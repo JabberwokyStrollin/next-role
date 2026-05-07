@@ -1,0 +1,280 @@
+"""
+update_status.py — Log applications and update application status.
+
+No Claude involvement. Pure JSON read/write.
+
+Usage:
+    # Log a new application (after submitting)
+    python scripts/update_status.py log --job-id <uuid> --method greenhouse
+
+    # Update status on an existing application
+    python scripts/update_status.py status --app-id <uuid> --status recruiter_screen
+
+    # List all applications
+    python scripts/update_status.py list
+"""
+
+import argparse
+import uuid as uuid_lib
+import sys
+
+from config import (
+    APPLICATION_TRACKER_PATH,
+    JOB_PIPELINE_PATH,
+    COMPANY_REGISTRY_PATH,
+    PROCESS_LOG_PATH,
+    load_json,
+    save_json,
+    now_utc,
+    today,
+    days_since,
+    GHOSTED_DAYS,
+)
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def append_log(entry: dict) -> None:
+    log = load_json(PROCESS_LOG_PATH)
+    log.append({
+        "log_id":       str(uuid_lib.uuid4()),
+        "timestamp":    now_utc(),
+        "session_date": today(),
+        **entry,
+    })
+    save_json(PROCESS_LOG_PATH, log)
+
+
+def derive_country(location: str) -> str:
+    loc = location.lower()
+    if "ireland" in loc or " ie" in loc:
+        return "IE"
+    if "canada" in loc or " ca" in loc:
+        return "CA"
+    return "OTHER"
+
+
+def check_ghosted(app: dict) -> bool:
+    if app.get("response_date"):
+        return False
+    if app.get("status") in ["offer", "rejected", "withdrawn", "recruiter_screen", "interview"]:
+        return False
+    if not app.get("date_applied"):
+        return False
+    return days_since(app["date_applied"]) > GHOSTED_DAYS
+
+
+# ── Commands ──────────────────────────────────────────────────────────────────
+
+def cmd_log(args):
+    """Log a new application after submitting."""
+    jobs = load_json(JOB_PIPELINE_PATH)
+    job  = next((j for j in jobs if j["job_id"] == args.job_id), None)
+    if not job:
+        print(f"Error: job ID {args.job_id} not found in pipeline.")
+        sys.exit(1)
+
+    apps = load_json(APPLICATION_TRACKER_PATH)
+
+    # Check for existing application
+    existing = next((a for a in apps if a.get("job_id") == args.job_id), None)
+    if existing:
+        print(f"Application already logged for this job: {existing['application_id']}")
+        print(f"Use 'status' command to update it.")
+        return
+
+    # Derive country
+    country = derive_country(job.get("location", ""))
+
+    # Cooldown — 90 days unless staffing agency
+    cooldown = None
+    if args.no_cooldown:
+        cooldown = None
+    else:
+        from datetime import date, timedelta
+        cooldown = (date.today() + timedelta(days=90)).isoformat()
+
+    app = {
+        "application_id":        str(uuid_lib.uuid4()),
+        "job_id":                job["job_id"],
+        "company_id":            job.get("company_id"),
+        "company_name":          job["company_name"],
+        "title":                 job["title"],
+        "apply_url":             job["apply_url"],
+        "location":              job.get("location", ""),
+        "country":               country,
+        "date_applied":          today(),
+        "application_method":    args.method or "direct",
+        "cover_letter_version":  job.get("cover_letter_version", 1),
+        "plain_text_submitted":  args.plain_text,
+        "composite_score_at_apply": None,  # populated below
+        "status":                "applied",
+        "status_updated":        now_utc(),
+        "cooldown_until":        cooldown,
+        "response_date":         None,
+        "ghosted_flag":          False,
+        "notes":                 args.notes or "",
+        "inaccuracies_noted":    "",
+    }
+
+    # Compute composite score snapshot
+    companies = load_json(COMPANY_REGISTRY_PATH)
+    company   = next((c for c in companies if c["company_id"] == job.get("company_id")), None)
+    from config import composite_score
+    app["composite_score_at_apply"] = composite_score(job, company)
+
+    apps.append(app)
+    save_json(APPLICATION_TRACKER_PATH, apps)
+
+    # Update pipeline status
+    updated_jobs = [
+        {**j, "pipeline_status": "applied"} if j["job_id"] == args.job_id else j
+        for j in jobs
+    ]
+    save_json(JOB_PIPELINE_PATH, updated_jobs)
+
+    # Update company cooldown
+    if cooldown and company:
+        updated_companies = [
+            {**c, "last_applied": today(), "cooldown_until": cooldown}
+            if c["company_id"] == company["company_id"] else c
+            for c in companies
+        ]
+        save_json(COMPANY_REGISTRY_PATH, updated_companies)
+
+    append_log({
+        "event_type":  "application_logged",
+        "entity_type": "application",
+        "entity_id":   app["application_id"],
+        "entity_name": f"{app['company_name']} — {app['title']}",
+        "detail": (
+            f"Application logged. Method: {app['application_method']}. "
+            f"Country: {country}. CL v{app['cover_letter_version']}. "
+            f"Score at apply: {app['composite_score_at_apply']}."
+        ),
+    })
+
+    print(f"Application logged: {app['application_id']}")
+    print(f"  Company:   {app['company_name']}")
+    print(f"  Title:     {app['title']}")
+    print(f"  Date:      {app['date_applied']}")
+    print(f"  Country:   {country}")
+    print(f"  Cooldown:  {cooldown or 'none'}")
+    print(f"  Score:     {app['composite_score_at_apply']}")
+
+
+def cmd_status(args):
+    """Update status on an existing application."""
+    apps = load_json(APPLICATION_TRACKER_PATH)
+    app  = next((a for a in apps if a["application_id"] == args.app_id), None)
+    if not app:
+        print(f"Error: application ID {args.app_id} not found.")
+        sys.exit(1)
+
+    old_status = app["status"]
+    first_response = (
+        not app.get("response_date") and
+        args.status not in ["applied", "ghosted"]
+    )
+
+    app["status"]         = args.status
+    app["status_updated"] = now_utc()
+    if first_response:
+        app["response_date"] = today()
+    if args.notes:
+        app["notes"] = (app.get("notes", "") + "\n" + args.notes).strip()
+
+    updated = [app if a["application_id"] == args.app_id else a for a in apps]
+    save_json(APPLICATION_TRACKER_PATH, updated)
+
+    append_log({
+        "event_type":  "application_status_change",
+        "entity_type": "application",
+        "entity_id":   app["application_id"],
+        "entity_name": f"{app['company_name']} — {app['title']}",
+        "detail":      f"Status: {old_status} → {args.status}.",
+    })
+
+    print(f"Status updated: {old_status} → {args.status}")
+    if first_response:
+        print(f"Response date set: {today()}")
+
+
+def cmd_list(args):
+    """List all applications with current status."""
+    apps = load_json(APPLICATION_TRACKER_PATH)
+    if not apps:
+        print("No applications logged yet.")
+        return
+
+    # Run ghosted check
+    updated = False
+    for app in apps:
+        ghosted = check_ghosted(app)
+        if ghosted != app.get("ghosted_flag"):
+            app["ghosted_flag"] = ghosted
+            if ghosted and app["status"] == "applied":
+                app["status"] = "ghosted"
+            updated = True
+
+    if updated:
+        save_json(APPLICATION_TRACKER_PATH, apps)
+
+    # Sort by date applied descending
+    sorted_apps = sorted(apps, key=lambda a: a.get("date_applied", ""), reverse=True)
+
+    print(f"\n{'Company':<22} {'Title':<35} {'Applied':<12} {'Status':<18} {'Score':<6} {'Ghost'}")
+    print("─" * 105)
+    for a in sorted_apps:
+        ghost = "YES" if a.get("ghosted_flag") else ""
+        print(
+            f"{a['company_name']:<22} "
+            f"{a['title'][:34]:<35} "
+            f"{a.get('date_applied',''):<12} "
+            f"{a['status']:<18} "
+            f"{str(a.get('composite_score_at_apply') or ''):<6} "
+            f"{ghost}"
+        )
+    print(f"\nTotal: {len(sorted_apps)} applications")
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="Track job applications.")
+    sub    = parser.add_subparsers(dest="command", required=True)
+
+    # log subcommand
+    log_p = sub.add_parser("log", help="Log a new application")
+    log_p.add_argument("--job-id",    required=True, metavar="UUID")
+    log_p.add_argument("--method",    default="direct",
+                       choices=["greenhouse","lever","workday","builtin",
+                                "linkedin","direct","other"])
+    log_p.add_argument("--plain-text", action="store_true",
+                       help="Plain text version was submitted")
+    log_p.add_argument("--no-cooldown", action="store_true",
+                       help="Skip cooldown (staffing agency / unknown employer)")
+    log_p.add_argument("--notes",    metavar="TEXT", help="Optional notes")
+
+    # status subcommand
+    st_p = sub.add_parser("status", help="Update application status")
+    st_p.add_argument("--app-id",  required=True, metavar="UUID")
+    st_p.add_argument("--status",  required=True,
+                      choices=["applied","recruiter_screen","interview",
+                               "offer","rejected","ghosted","withdrawn"])
+    st_p.add_argument("--notes",   metavar="TEXT", help="Optional notes")
+
+    # list subcommand
+    sub.add_parser("list", help="List all applications")
+
+    args = parser.parse_args()
+
+    if args.command == "log":
+        cmd_log(args)
+    elif args.command == "status":
+        cmd_status(args)
+    elif args.command == "list":
+        cmd_list(args)
+
+
+if __name__ == "__main__":
+    main()

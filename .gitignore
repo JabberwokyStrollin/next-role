@@ -216,3 +216,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+venv/
+node_modules/
+
+# next-role runtime data (gitignored — back up data/ externally)
+data/
+output/
+
+# Personal profile (resume + cover letter rules — copy from profile.example/)
+profile/
