@@ -38,6 +38,7 @@ JOB_PIPELINE_PATH        = DATA_DIR / "job_pipeline.json"
 APPLICATION_TRACKER_PATH = DATA_DIR / "application_tracker.json"
 PROCESS_LOG_PATH         = DATA_DIR / "process_log.json"
 TARGET_BOARDS_PATH       = DATA_DIR / "target_boards.json"
+CRAWL_LOG_PATH           = DATA_DIR / "crawl_log.jsonl"
 
 # ─── Rules files ──────────────────────────────────────────────────────────────
 

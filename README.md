@@ -86,6 +86,40 @@ Move-Item data "$env:USERPROFILE\OneDrive\next-role-data"
 New-Item -ItemType SymbolicLink -Path data -Target "$env:USERPROFILE\OneDrive\next-role-data"
 ```
 
+### 5. (Optional) IMAP credentials for LinkedIn alert ingest
+
+The Today checklist's **LinkedIn ingest** section pulls job postings out of LinkedIn job-alert emails so you don't have to copy URLs by hand. It connects to your inbox via IMAP (stdlib `imaplib` — no third-party email integration), filters to a sender allowlist, parses each email's HTML, and stages the postings for per-row review and ingest.
+
+Skip this if you're sticking to the crawl + manual ingest paths.
+
+**For Gmail**, generate an app password at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) (requires 2FA on your account). The app password is **not** your account password — Google issues a separate 16-character token for IMAP clients.
+
+**Windows (persistent):**
+```powershell
+[System.Environment]::SetEnvironmentVariable("NEXTROLE_IMAP_HOST", "imap.gmail.com", "User")
+[System.Environment]::SetEnvironmentVariable("NEXTROLE_IMAP_USER", "you@gmail.com", "User")
+[System.Environment]::SetEnvironmentVariable("NEXTROLE_IMAP_APP_PASSWORD", "abcd efgh ijkl mnop", "User")
+```
+
+**Mac/Linux:**
+```bash
+cat >> ~/.zshrc <<'EOF'
+export NEXTROLE_IMAP_HOST="imap.gmail.com"
+export NEXTROLE_IMAP_USER="you@gmail.com"
+export NEXTROLE_IMAP_APP_PASSWORD="abcd efgh ijkl mnop"
+EOF
+```
+
+For other providers, swap `NEXTROLE_IMAP_HOST` for your provider's IMAP host (e.g. `outlook.office365.com`, `imap.fastmail.com`) and follow that provider's app-password flow.
+
+The sender allowlist lives in `data/email_config.json` — auto-created with `jobalerts-noreply@linkedin.com` on first fetch. Extend it with any sender that emails you job alerts:
+
+```json
+{ "senders": ["jobalerts-noreply@linkedin.com", "alerts@otta.com"] }
+```
+
+After a successful fetch, the script marks each message `\Seen` on the server (so re-fetches don't restage them) and records Message-IDs in `data/email_state.json` as a second-line dedup safeguard.
+
 ---
 
 ## Daily workflow

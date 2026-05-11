@@ -17,9 +17,11 @@ Usage:
 """
 
 import argparse
+import json
 import re
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from itertools import product
 from urllib.parse import quote
@@ -28,6 +30,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from config import (
+    CRAWL_LOG_PATH,
     JOB_PIPELINE_PATH,
     STACK_KEYWORDS_PATH,
     TARGET_BOARDS_PATH,
@@ -150,19 +153,37 @@ def pre_filter(title: str, location: str, text: str, cfg: dict) -> tuple[bool, s
 
 # ── ATS auto-discovery ────────────────────────────────────────────────────────
 
+# ATSes we have a fetch_* implementation for. detect_ats may return other ATSes
+# (workday, smartrecruiters) so target_boards.json captures discovered companies
+# even when we can't yet crawl them; the crawl loop silently skips unsupported.
+SUPPORTED_ATSES = {"greenhouse", "lever", "ashby"}
+
+
 def detect_ats(url: str) -> tuple[str, str] | None:
     """Return (ats, slug) if apply URL reveals a known ATS, else None."""
     if not url:
         return None
+    # Greenhouse: hosted boards + API
     m = re.search(r"boards(?:-api)?\.greenhouse\.io/(?:v1/boards/)?([^/?#\s]+)", url)
     if m:
         return ("greenhouse", m.group(1))
-    m = re.search(r"jobs\.lever\.co/([^/?#\s]+)", url)
+    # Lever: US (.co) and EU (.eu.lever.co) hosted boards
+    m = re.search(r"jobs(?:\.eu)?\.lever\.co/([^/?#\s]+)", url)
     if m:
         return ("lever", m.group(1))
+    # Ashby
     m = re.search(r"jobs\.ashbyhq\.com/([^/?#\s]+)", url)
     if m:
         return ("ashby", m.group(1))
+    # Workday — slug is company subdomain (e.g. "stripe" from "stripe.wd1.myworkdayjobs.com").
+    # Not yet crawlable; auto-add still records the company for visibility.
+    m = re.search(r"([a-z0-9-]+)\.wd\d+\.myworkdayjobs\.com", url)
+    if m:
+        return ("workday", m.group(1))
+    # SmartRecruiters. Same caveat as Workday — recorded but not fetched.
+    m = re.search(r"(?:careers|jobs)\.smartrecruiters\.com/([^/?#\s]+)", url)
+    if m:
+        return ("smartrecruiters", m.group(1))
     return None
 
 
@@ -360,6 +381,30 @@ def fetch_ashby(slug: str, company: str) -> list[dict]:
     return out
 
 
+# ── Per-run JSONL log ────────────────────────────────────────────────────────-
+
+def _categorize_reason(reason: str) -> str:
+    """Map pre_filter's reason string to a stable funnel category."""
+    if reason.startswith("title seniority"): return "title_seniority"
+    if reason.startswith("title excluded"):  return "title_exclude"
+    if reason.startswith("location"):        return "location"
+    if reason.startswith("stack score"):     return "stack"
+    return "other"
+
+
+def _log_crawl_run(record: dict) -> None:
+    """Append a single crawl-run summary to CRAWL_LOG_PATH. Best-effort; never raises."""
+    try:
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            **record,
+        }
+        with CRAWL_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 # ── Main crawl ────────────────────────────────────────────────────────────────
 
 def crawl(
@@ -369,6 +414,7 @@ def crawl(
     limit:   int | None = None,
 ) -> int:
     """Run the full two-lane crawl. Returns number of jobs ingested."""
+    started_at    = time.time()
     cfg           = load_crawl_config()
     existing_urls = {j["apply_url"] for j in load_json(JOB_PIPELINE_PATH) if j.get("apply_url")}
 
@@ -401,6 +447,8 @@ def crawl(
             company = board.get("company", slug)
             if source and source != ats:
                 continue
+            if ats not in SUPPORTED_ATSES:
+                continue  # auto-discovered (e.g. workday, smartrecruiters) but no fetcher yet
             print(f"  {ats.capitalize()}: {company} ({slug})...")
             if ats == "greenhouse":
                 fetched = fetch_greenhouse(slug, company)
@@ -409,8 +457,7 @@ def crawl(
             elif ats == "ashby":
                 fetched = fetch_ashby(slug, company)
             else:
-                print(f"  [warn] Unknown ATS: {ats}")
-                continue
+                continue  # unreachable given SUPPORTED_ATSES check; defensive
             print(f"    → {len(fetched)} listings")
             listings += fetched
             time.sleep(0.3)
@@ -418,10 +465,11 @@ def crawl(
     print(f"\n  Total fetched: {len(listings)}")
 
     # ── Pre-filter + dedup + ATS auto-discovery ───────────────────────────────
-    candidates:         list[dict] = []
-    skipped_dupe        = 0
-    skipped_filter      = 0
-    new_boards          = 0
+    candidates:    list[dict] = []
+    skipped_dupe   = 0
+    skipped_filter = 0
+    funnel         = Counter()
+    auto_added     = []
 
     for listing in listings:
         url = listing.get("apply_url", "")
@@ -438,7 +486,11 @@ def crawl(
             if ats_info:
                 added = auto_add_board(listing["company"], *ats_info)
                 if added:
-                    new_boards += 1
+                    auto_added.append({
+                        "company": listing["company"],
+                        "ats":     ats_info[0],
+                        "slug":    ats_info[1],
+                    })
                     print(f"  [+] Auto-discovered {ats_info[0]}: {listing['company']} ({ats_info[1]})")
 
         passes, reason = pre_filter(
@@ -450,10 +502,12 @@ def crawl(
 
         if passes:
             candidates.append(listing)
+            funnel["pass"] += 1
             if verbose:
                 print(f"  ✓ [{listing['source']:<11}] {listing['company']} — {listing['title']} ({reason})")
         else:
             skipped_filter += 1
+            funnel[_categorize_reason(reason)] += 1
             if verbose:
                 print(f"  ✗ [{listing['source']:<11}] {listing['company']} — {listing['title']} ({reason})")
 
@@ -461,55 +515,67 @@ def crawl(
     print(f"  Passed:    {len(candidates)}")
     print(f"  Dupes:     {skipped_dupe}")
     print(f"  Filtered:  {skipped_filter}")
-    if new_boards:
-        print(f"  New ATS boards auto-added: {new_boards}")
+    if auto_added:
+        print(f"  New ATS boards auto-added: {len(auto_added)}")
 
     if limit:
         candidates = candidates[:limit]
         if limit < len(candidates):
             print(f"  Capped at --limit {limit}")
 
-    if not candidates:
-        print("\n  No new candidates to ingest.")
-        return 0
-
-    print(f"\n── Candidates ──────────────────────────────────────────────────")
-    for i, c in enumerate(candidates, 1):
-        print(f"  {i:>3}. [{c['source']:<11}] {c['company']:<24} {c['title']}")
-
-    if dry_run:
-        print(f"\n  Dry run — {len(candidates)} would be ingested.")
-        return 0
-
-    # ── Full ingest ───────────────────────────────────────────────────────────
-    print(f"\n── Ingesting {len(candidates)} candidates ───────────────────────────────")
     ingested = 0
     failed   = 0
 
-    for i, listing in enumerate(candidates, 1):
-        print(f"\n[{i}/{len(candidates)}] {listing['company']} — {listing['title']}")
-        try:
-            job = ingest_job(
-                apply_url    = listing["apply_url"],
-                company_name = listing["company"],
-                title        = listing["title"],
-                location     = listing["location"],
-                jd_text      = listing.get("jd_text", ""),
-                date_posted  = listing.get("date_posted"),
-                source       = listing["source"],
-            )
-            if job:
-                ingested += 1
-                existing_urls.add(listing["apply_url"])
-            else:
+    if not candidates:
+        print("\n  No new candidates to ingest.")
+    elif dry_run:
+        print(f"\n── Candidates ──────────────────────────────────────────────────")
+        for i, c in enumerate(candidates, 1):
+            print(f"  {i:>3}. [{c['source']:<11}] {c['company']:<24} {c['title']}")
+        print(f"\n  Dry run — {len(candidates)} would be ingested.")
+    else:
+        print(f"\n── Candidates ──────────────────────────────────────────────────")
+        for i, c in enumerate(candidates, 1):
+            print(f"  {i:>3}. [{c['source']:<11}] {c['company']:<24} {c['title']}")
+        print(f"\n── Ingesting {len(candidates)} candidates ───────────────────────────────")
+        for i, listing in enumerate(candidates, 1):
+            print(f"\n[{i}/{len(candidates)}] {listing['company']} — {listing['title']}")
+            try:
+                job = ingest_job(
+                    apply_url    = listing["apply_url"],
+                    company_name = listing["company"],
+                    title        = listing["title"],
+                    location     = listing["location"],
+                    jd_text      = listing.get("jd_text", ""),
+                    date_posted  = listing.get("date_posted"),
+                    source       = listing["source"],
+                )
+                if job:
+                    ingested += 1
+                    existing_urls.add(listing["apply_url"])
+                else:
+                    failed += 1
+            except Exception as e:
+                print(f"  Error: {e}")
                 failed += 1
-        except Exception as e:
-            print(f"  Error: {e}")
-            failed += 1
-        time.sleep(0.5)
+            time.sleep(0.5)
+        print(f"\n── Crawl complete ──────────────────────────────────────────────")
+        print(f"  Ingested: {ingested}   Failed/skipped: {failed}")
 
-    print(f"\n── Crawl complete ──────────────────────────────────────────────")
-    print(f"  Ingested: {ingested}   Failed/skipped: {failed}")
+    _log_crawl_run({
+        "duration_s":        int(time.time() - started_at),
+        "dry_run":           dry_run,
+        "source_filter":     source,
+        "total_fetched":     len(listings),
+        "dedup_hits":        skipped_dupe,
+        "filtered_total":    skipped_filter,
+        "funnel":            dict(funnel),
+        "passed":            len(candidates),
+        "ingested":          ingested,
+        "ingest_failed":     failed,
+        "auto_added_boards": auto_added,
+    })
+
     return ingested
 
 
