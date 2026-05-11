@@ -252,6 +252,16 @@ def ingest_job(
         })
         return None
 
+    # ── ATS auto-onboarding ──────────────────────────────────────────────────-
+    # Every ingest contributes to the ATS deep-crawl lane, not just aggregator
+    # listings. Lazy import: crawl.py imports ingest_job, so a module-level
+    # import here would be circular.
+    from crawl import detect_ats, auto_add_board  # noqa: WPS433
+    ats_info = detect_ats(apply_url)
+    if ats_info:
+        if auto_add_board(company["name"], *ats_info, added_via="ingest"):
+            print(f"  [+] Added ATS board: {ats_info[0]} / {ats_info[1]}")
+
     # ── Mechanical scores (no Claude) ─────────────────────────────────────────
     stack_score    = compute_stack_score(jd_text)
     velocity_score = compute_velocity_score(date_posted)

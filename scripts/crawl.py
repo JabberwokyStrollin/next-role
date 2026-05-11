@@ -187,13 +187,18 @@ def detect_ats(url: str) -> tuple[str, str] | None:
     return None
 
 
-def auto_add_board(company: str, ats: str, slug: str) -> bool:
-    """Add board to target_boards.json if not already present. Returns True if newly added."""
+def auto_add_board(company: str, ats: str, slug: str,
+                   added_via: str = "auto_discovery") -> bool:
+    """Add board to target_boards.json if not already present. Returns True if newly added.
+
+    added_via tags the provenance so a future audit can tell aggregator-driven
+    discoveries from ingest-driven ones from backfill passes.
+    """
     boards = load_json(TARGET_BOARDS_PATH)
     if any(b.get("ats") == ats and b.get("slug") == slug for b in boards):
         return False
     boards.append({"company": company, "ats": ats, "slug": slug,
-                   "added": today(), "added_via": "auto_discovery"})
+                   "added": today(), "added_via": added_via})
     save_json(TARGET_BOARDS_PATH, boards)
     return True
 
