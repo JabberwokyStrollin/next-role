@@ -7,9 +7,11 @@ constants, and environment loading.
 import os
 import sys
 import json
-import re
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import date, datetime, timezone
+
+import yaml
 
 # ─── stdout encoding ──────────────────────────────────────────────────────────
 # Windows defaults stdout to cp1252, which can't encode common Unicode that
@@ -39,6 +41,7 @@ APPLICATION_TRACKER_PATH = DATA_DIR / "application_tracker.json"
 PROCESS_LOG_PATH         = DATA_DIR / "process_log.json"
 TARGET_BOARDS_PATH       = DATA_DIR / "target_boards.json"
 CRAWL_LOG_PATH           = DATA_DIR / "crawl_log.jsonl"
+COMP_ESTIMATES_PATH      = DATA_DIR / "comp_estimates.json"
 
 # ─── Rules files ──────────────────────────────────────────────────────────────
 
@@ -46,7 +49,7 @@ PROFILE_DIR           = ROOT / "profile"
 COVER_LETTER_RULES    = PROFILE_DIR / "cover_letter_rules.md"
 RESUME_PATH           = PROFILE_DIR / "resume.md"
 SCORING_RUBRIC_PATH   = PROFILE_DIR / "scoring_rubric.md"
-STACK_KEYWORDS_PATH   = PROFILE_DIR / "stack_keywords.md"
+STACK_KEYWORDS_PATH   = PROFILE_DIR / "stack_keywords.yaml"
 
 # ─── Output directory for generated cover letters ─────────────────────────────
 
@@ -67,43 +70,94 @@ if not ANTHROPIC_API_KEY:
 CLAUDE_MODEL      = "claude-sonnet-4-5-20250929"  # JD scoring, cover letters
 CLAUDE_MODEL_FAST = "claude-haiku-4-5-20251001"   # Company research (10x cheaper)
 
-# ─── Scoring constants (loaded from profile/stack_keywords.md) ───────────────
+# ─── Scoring constants (loaded from profile/stack_keywords.yaml) ─────────────
 
 def _load_stack_keywords(path: Path) -> tuple[dict, int]:
     if not path.exists():
         raise FileNotFoundError(
             f"Stack keywords not found: {path}\n"
-            "Copy profile.example/stack_keywords.md to profile/ and fill in your stack."
+            "Copy profile.example/stack_keywords.yaml to profile/ and fill in your stack."
         )
-    keywords = {}
-    max_score = 35
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if re.match(r"max_score\s*:", line, re.IGNORECASE):
-            try:
-                max_score = int(line.split(":", 1)[1].strip())
-            except ValueError:
-                pass
-            continue
-        parts = line.split(":", 1)
-        if len(parts) == 2:
-            try:
-                keywords[parts[0].strip().lower()] = int(parts[1].strip())
-            except ValueError:
-                pass
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    max_score = int(data.get("max_score", 35))
+    raw = data.get("keywords") or {}
+    keywords = {str(k).lower(): int(v) for k, v in raw.items()}
     return keywords, max_score
 
 
 STACK_KEYWORDS, STACK_SCORE_MAX = _load_stack_keywords(STACK_KEYWORDS_PATH)
+
+# ─── SCORING SSOT ─────────────────────────────────────────────────────────────
+#
+# This block is the ONLY place composite-ranking parameters live in code.
+# Surfaces (serve.py, dashboard.py, ingest.py, run.py, README, etc.) MUST
+# import from here and reference ``COMPONENTS[k].weight`` for display
+# denominators and ``COMPOSITE_MAX`` for the overall composite ceiling.
+#
+# DO NOT:
+#   - hardcode "X/25", "/130", or any score denominator in another file
+#   - introduce a parallel ``composite_score`` function elsewhere — there is
+#     exactly one, defined in this module
+#   - inline a partial composite (e.g. summing stack + seniority + domain +
+#     velocity for sort order) — use composite_score() with the company arg
+#
+# DO:
+#   - extend ``COMPONENTS`` to add a new ranking signal
+#   - update ``native_max`` here if the storage scale of a stored field
+#     changes (e.g. if score_jd starts emitting seniority 0-30)
+#
+# Related SSOTs (each canonical for its own concern):
+#   - ``_SENIORITY_BUCKETS`` below — title→cap mapping
+#   - ``profile/stack_keywords.yaml`` — keyword scores + pre-filter lists
+#   - ``profile/scoring_rubric.md``  — Claude's 0-25 / 0-20 output ranges
+#
+# Pre-filter (crawl.py, prefilter_staged.py) is INTENTIONALLY pre-LLM and
+# reads only the YAML side of this triangle. Do not call ``composite_score``
+# from a pre-filter; it would require company research per raw listing and
+# wreck the cost model.
+# ──────────────────────────────────────────────────────────────────────────-
+
+@dataclass(frozen=True)
+class ScoringComponent:
+    weight:     int    # contribution to composite (display denominator)
+    native_max: int    # max value the stored field can hold (storage scale)
+
+    @property
+    def multiplier(self) -> float:
+        """How much each stored point contributes to the composite."""
+        return self.weight / self.native_max if self.native_max else 0.0
+
+
+COMPONENTS: dict[str, ScoringComponent] = {
+    # Stack syncs from profile/stack_keywords.yaml so users tune it as data.
+    "stack":       ScoringComponent(weight=STACK_SCORE_MAX, native_max=STACK_SCORE_MAX),
+    "domain":      ScoringComponent(weight=25, native_max=20),  # Claude rubric 0-20
+    "seniority":   ScoringComponent(weight=10, native_max=25),  # Claude rubric 0-25 (cap applied at storage time)
+    "velocity":    ScoringComponent(weight=10, native_max=5),   # VELOCITY_TIERS top tier
+    "freshness":   ScoringComponent(weight=8,  native_max=8),   # FRESHNESS_TIERS top tier
+    "sponsorship": ScoringComponent(weight=35, native_max=15),  # Haiku research output
+    "remote":      ScoringComponent(weight=12, native_max=5),   # Haiku research output
+}
+
+COMPOSITE_MAX: int = sum(c.weight for c in COMPONENTS.values())
+
 
 VELOCITY_TIERS = [
     (7,  5),
     (14, 4),
     (21, 3),
     (45, 1),
-]  # (days_since_posted, score) — first match wins; default 0
+]  # (days_since_posted, score) — first match wins; default 0. Stays on /5
+   # native scale; composite_score multiplies by COMPONENTS["velocity"].multiplier.
+
+# Freshness bonus: extra weight for very recently posted/discovered jobs.
+# Stacks on top of VELOCITY_TIERS. Scored natively on the same scale as the
+# composite weight so no multiplier work is needed at composite time.
+FRESHNESS_TIERS = [
+    (0, 8),   # posted today
+    (1, 3),   # 1 day ago
+    (2, 1),   # 2 days ago
+]  # (max_days, bonus); older than the last threshold = 0
 
 STALENESS_TIERS = {
     "fresh":      (0,  29),
@@ -158,6 +212,65 @@ def days_since(iso_date: str) -> int:
     return (date.today() - d).days
 
 
+# ─── Title-based seniority cap (mechanical, applied after Claude scoring) ───-
+
+# Order matters: more specific patterns must come before broader ones.
+# "Senior Principal" / "Sr. Principal" / "Senior Staff" must match before
+# "Senior" or "Principal" alone, since substring matches are first-wins.
+import re as _re
+
+_SENIORITY_BUCKETS: list[tuple[str, _re.Pattern, int]] = [
+    # Bucket D — score 0 (two steps away from Staff). Listed first so they
+    # beat the broader Senior/Principal patterns that follow.
+    ("D", _re.compile(r"\bdistinguished\b",                _re.I), 0),
+    ("D", _re.compile(r"\bfellow\b",                       _re.I), 0),
+    ("D", _re.compile(r"\bsenior\s+principal\b",           _re.I), 0),
+    ("D", _re.compile(r"\bsr\.?\s+principal\b",            _re.I), 0),
+    ("D", _re.compile(r"\bvp\b",                           _re.I), 0),
+    ("D", _re.compile(r"\bvice\s+president\b",             _re.I), 0),
+    ("D", _re.compile(r"\bjunior\b",                       _re.I), 0),
+    ("D", _re.compile(r"\bjr\.?\b",                        _re.I), 0),
+    ("D", _re.compile(r"\bintern\b",                       _re.I), 0),
+    ("D", _re.compile(r"\bentry[-\s]level\b",              _re.I), 0),
+    ("D", _re.compile(r"\bassociate\s+(software\s+)?engineer\b", _re.I), 0),
+
+    # Bucket A — at target (no cap). Senior Staff stays here despite the word
+    # "Senior" because it's senior to Staff, not below it.
+    ("A", _re.compile(r"\bsenior\s+staff\b",               _re.I), 25),
+    ("A", _re.compile(r"\bstaff\b",                        _re.I), 25),
+    ("A", _re.compile(r"\bsr\.?\s+staff\b",                _re.I), 25),
+    ("A", _re.compile(r"\blead\s+(engineer|developer)\b",  _re.I), 25),
+    ("A", _re.compile(r"\btech\s+lead\b",                  _re.I), 25),
+    ("A", _re.compile(r"\barchitecte?\b",                  _re.I), 25),
+
+    # Bucket B — one step below target (cap 15).
+    ("B", _re.compile(r"\bsenior\b",                       _re.I), 15),
+    ("B", _re.compile(r"\bsr\.?\s",                        _re.I), 15),
+
+    # Bucket C — one step above target (cap 15).
+    ("C", _re.compile(r"\bprincipal\b",                    _re.I), 15),
+]
+
+
+def title_seniority_cap(title: str) -> tuple[str, int]:
+    """
+    Classify a job title and return (bucket_letter, max_seniority_score).
+    Defaults to ('A', 25) if no bucket matches — better to under-cap than
+    silently zero an unfamiliar title.
+    """
+    t = (title or "").strip()
+    for bucket, pat, cap in _SENIORITY_BUCKETS:
+        if pat.search(t):
+            return bucket, cap
+    return "A", 25
+
+
+def apply_title_cap(raw_seniority: int, title: str) -> int:
+    """Cap a raw Claude seniority score by the job title bucket."""
+    _, cap = title_seniority_cap(title)
+    return max(0, min(cap, int(raw_seniority)))
+
+
 # ─── Scoring helpers (mechanical — no Claude needed) ─────────────────────────
 
 def compute_stack_score(jd_text: str) -> int:
@@ -193,13 +306,162 @@ def compute_staleness(date_posted: str | None) -> str:
     return "hard_stale"
 
 
+def compute_freshness_bonus(job: dict) -> int:
+    """
+    Bonus for very recently posted/discovered jobs. Recomputed on every call
+    (not stored on the record) so the score decays naturally as the job ages.
+
+    Prefers ``job['date_posted']`` (source-supplied YYYY-MM-DD); falls back to
+    ``job['date_found']`` (full ISO ingest timestamp) when posting date is
+    unavailable. Only the date portion is used — sub-day precision on
+    ``date_found`` is intentionally ignored because source ``date_posted``
+    is day-grained, so finer tiers would only be honest for one input.
+    """
+    raw = job.get("date_posted") or job.get("date_found") or ""
+    if not raw:
+        return 0
+    iso_date = raw[:10]
+    try:
+        age = days_since(iso_date)
+    except ValueError:
+        return 0
+    for threshold, bonus in FRESHNESS_TIERS:
+        if age <= threshold:
+            return bonus
+    return 0
+
+
+# ─── JD-level no-sponsorship filter (mechanical, runs at ingest time) ────────-
+#
+# Some JDs explicitly state the company will not sponsor a visa for the role.
+# ``ingest.py`` uses ``detect_no_sponsorship`` to discard those postings before
+# the Claude scoring call — saving the API cost and keeping them out of the
+# pipeline entirely.
+#
+# This is a HARD ingest-time discard, parallel to ``ethics_hard_exclude`` on
+# the company record but operating per-JD. It is intentionally separate from
+# the composite's ``sponsorship`` component (0-15 company-level score based
+# on the org's historical sponsorship record) — that score can still be good
+# even when an individual posting opts out.
+#
+# Patterns deliberately err on false negatives over false positives: each
+# requires an explicit negation token near the word "sponsor".
+# Caught (representative): "we are unable to provide visa sponsorship",
+# "we do not sponsor visas", "this role does not offer sponsorship",
+# "must be authorized to work without sponsorship", "no visa sponsorship
+# available", "sponsorship is not available for this position".
+# Intentionally NOT caught: "we sponsor visas", "visa sponsorship available",
+# "open to sponsorship".
+
+_NO_SPONSORSHIP_PATTERNS: list[_re.Pattern] = [
+    # Subject + negation + (within ~40 chars) the word "sponsor".
+    _re.compile(
+        r"\b(?:un(?:able|willing)|cannot|can'?t|won'?t|"
+        r"(?:do(?:es)?|will|are|is|am)\s+not|"
+        r"do(?:es)?n'?t|aren'?t|isn'?t|not\s+able)\b"
+        r"[^.!?\n]{0,40}?\bsponsor",
+        _re.I,
+    ),
+    # "without ... sponsor" — implies candidate must already be authorized.
+    _re.compile(r"\bwithout\b[^.!?\n]{0,40}?\bsponsor", _re.I),
+    # "no (visa|work) sponsorship"
+    _re.compile(r"\bno\s+(?:visa\s+|work\s+(?:visa\s+)?)?sponsorship\b", _re.I),
+    # "sponsorship ... not available/offered/provided/possible"
+    _re.compile(
+        r"\bsponsorship\b[^.!?\n]{0,30}?\bnot\s+(?:available|offered|provided|possible)\b",
+        _re.I,
+    ),
+    # "not eligible for ... sponsor[ship]"
+    _re.compile(r"\bnot\s+eligible\b[^.!?\n]{0,40}?\bsponsor", _re.I),
+]
+
+
+def detect_no_sponsorship(jd_text: str) -> str | None:
+    """
+    Scan JD text for an explicit refusal to sponsor a visa. Returns a short
+    snippet around the first match (for logging), or None if no refusal
+    language is found. Caller owns the discard/log decision.
+    """
+    if not jd_text:
+        return None
+    for pat in _NO_SPONSORSHIP_PATTERNS:
+        m = pat.search(jd_text)
+        if m:
+            start = max(0, m.start() - 20)
+            end   = min(len(jd_text), m.end() + 20)
+            return jd_text[start:end].strip()
+    return None
+
+
 def composite_score(job: dict, company: dict | None) -> int:
-    """Compute composite score from all stored components."""
-    return (
-        (job.get("stack_match_score")     or 0) +
-        (job.get("seniority_score")       or 0) +
-        (job.get("domain_fit_score")      or 0) +
-        (job.get("hiring_velocity_score") or 0) +
-        (company.get("sponsorship_score") if company else 0) +
-        (company.get("remote_fit")        if company else 0)
+    """
+    Compute composite score from all stored components, weighted by COMPONENTS.
+
+    Stored fields stay on their native scales (0-25 for Claude seniority, 0-15
+    for sponsorship research, etc.); this function applies the per-component
+    multiplier to bring each into its share of the COMPOSITE_MAX (130).
+    """
+    raw: dict[str, int] = {
+        "stack":       (job.get("stack_match_score")     or 0),
+        "domain":      (job.get("domain_fit_score")      or 0),
+        "seniority":   (job.get("seniority_score")       or 0),
+        "velocity":    (job.get("hiring_velocity_score") or 0),
+        "freshness":   compute_freshness_bonus(job),
+        "sponsorship": ((company or {}).get("sponsorship_score") or 0),
+        "remote":      ((company or {}).get("remote_fit")        or 0),
+    }
+    return sum(int(raw[k] * c.multiplier) for k, c in COMPONENTS.items())
+
+
+# ─── COMPANY-FILTER SSOT ──────────────────────────────────────────────────────
+#
+# Single source of truth for "should this company be hidden from apply
+# surfaces right now". Anywhere that surfaces jobs for application MUST call
+# this; do not implement a parallel rule elsewhere.
+#
+# Rule: hide companies with MAX_ACTIVE_APPS_PER_COMPANY in-flight applications.
+# "In-flight" means status in IN_FLIGHT_STATUSES with no response_date yet.
+# A rejection / interview / withdraw / offer flips the status (and/or sets
+# response_date in update_status.cmd_status), which immediately frees the slot
+# — there is no time-based cooldown. ``ghosted`` is intentionally excluded so
+# silently-dead applications give the slot back.
+#
+# Surfaces that call this:
+#   - serve.py:render_cover_letters_body (the web UI's apply queue)
+#   - run.py:generate_cover_letters (legacy CLI surface; kept in sync)
+#
+# Pre-filters (crawl.py, prefilter_staged.py, ingest.py) DO NOT call this:
+# the crawl is intentionally permissive so good roles enter the pipeline even
+# at companies already in flight; the ranking surfaces handle suppression.
+# (Separate from ``ethics_hard_exclude`` at ingest time, which is an absolute
+# "never work here" kill switch.)
+# ──────────────────────────────────────────────────────────────────────────-
+
+MAX_ACTIVE_APPS_PER_COMPANY: int = 3
+
+IN_FLIGHT_STATUSES: frozenset[str] = frozenset({
+    "applied",
+    "recruiter_screen",
+    "interview",
+})
+
+
+def company_block_reason(company_id: str | None, apps: list[dict]) -> str | None:
+    """
+    Return a short reason string if a company should be hidden from apply
+    surfaces, or None if it can be shown.
+
+    A company is blocked when MAX_ACTIVE_APPS_PER_COMPANY or more applications
+    at it are in-flight (status in IN_FLIGHT_STATUSES, no response_date).
+    """
+    if not company_id:
+        return None
+    active = sum(
+        1 for a in apps
+        if a.get("company_id") == company_id
+        and a.get("status") in IN_FLIGHT_STATUSES
+        and not a.get("response_date")
     )
+    if active >= MAX_ACTIVE_APPS_PER_COMPANY:
+        return f"{active} active applications"
+    return None

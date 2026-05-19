@@ -22,6 +22,7 @@ from config import (
     CLAUDE_MODEL,
     JOB_PIPELINE_PATH,
     SCORING_RUBRIC_PATH,
+    apply_title_cap,
     load_json,
     save_json,
     now_utc,
@@ -37,11 +38,16 @@ def _load_rubric() -> str:
     return SCORING_RUBRIC_PATH.read_text(encoding="utf-8")
 
 
-def score_jd(jd_text: str) -> dict:
+def score_jd(jd_text: str, title: str | None = None) -> dict:
     """
     Call Claude with the JD text and return the scoring dict.
     Returns: {"seniority_score": int, "domain_fit_score": int, "score_notes": str}
     Raises: ValueError if response cannot be parsed as valid JSON with required keys.
+
+    If ``title`` is provided, ``seniority_score`` is mechanically capped by the
+    title bucket (Senior/Principal → 15, Distinguished/VP/Junior → 0, Staff/
+    Architect/Lead → 25). Pass ``None`` to skip the cap (e.g. when scoring a
+    raw JD outside the pipeline).
     """
     # Sanitize surrogate characters that break JSON serialization on Windows
     jd_text = jd_text.encode("utf-8", errors="ignore").decode("utf-8")
@@ -80,6 +86,17 @@ def score_jd(jd_text: str) -> dict:
     result["seniority_score"]  = max(0, min(25, int(result["seniority_score"])))
     result["domain_fit_score"] = max(0, min(20, int(result["domain_fit_score"])))
 
+    # Apply title-based cap to seniority. Done here (after Claude) rather than
+    # in the prompt because the model has shown a tendency to reclassify
+    # Principal titles based on JD scope language, which over-penalizes them.
+    if title:
+        raw = result["seniority_score"]
+        capped = apply_title_cap(raw, title)
+        if capped != raw:
+            result["seniority_score"]    = capped
+            result["seniority_raw"]      = raw
+            result["seniority_cap_title"] = title
+
     return result
 
 
@@ -110,6 +127,7 @@ def main():
     group.add_argument("--stdin",   action="store_true", help="Read JD text from stdin")
     args = parser.parse_args()
 
+    title: str | None = None
     if args.jd:
         with open(args.jd, encoding="utf-8") as f:
             jd_text = f.read()
@@ -124,14 +142,15 @@ def main():
             print(f"Error: job ID {args.job_id} not found.", file=sys.stderr)
             sys.exit(1)
         jd_text = match.get("jd_text", "")
-        job_id = args.job_id
+        title   = match.get("title", "")
+        job_id  = args.job_id
 
     if not jd_text.strip():
         print("Error: JD text is empty.", file=sys.stderr)
         sys.exit(1)
 
     print("Scoring JD with Claude...", flush=True)
-    scores = score_jd(jd_text)
+    scores = score_jd(jd_text, title=title)
 
     print(f"  Seniority score:  {scores['seniority_score']}/25")
     print(f"  Domain fit score: {scores['domain_fit_score']}/20")

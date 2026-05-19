@@ -33,7 +33,7 @@ if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 // ── Config ────────────────────────────────────────────────────────────────────
 
 const API_KEY    = process.env.ANTHROPIC_API_KEY;
-const CL_MODEL   = "claude-sonnet-4-5-20250929";  // Sonnet for cover letters
+const CL_MODEL   = "claude-sonnet-4-6";  // Sonnet 4.6 for cover letters
 const MAX_TOKENS = 4000;
 
 if (!API_KEY) {
@@ -53,7 +53,15 @@ function saveJson(p, data) {
 }
 
 function todayISO() {
-  return new Date().toISOString().split("T")[0];
+  // Build the date string from local-timezone components so it stays in sync
+  // with todayLong() (which is also local). toISOString() uses UTC, which can
+  // disagree with local time around midnight and produce inconsistent dates
+  // between the filename and the letter body.
+  const d = new Date();
+  const y  = d.getFullYear();
+  const m  = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
 }
 
 function todayLong() {
@@ -110,14 +118,31 @@ async function callClaude(system, userMessage) {
 
 // ── Visa paragraph parser ─────────────────────────────────────────────────────
 
+// Map subsection heading text to country codes. Add entries as needed when
+// new countries are added to the rules file.
+const COUNTRY_NAME_TO_CODE = {
+  canada:          "CA",
+  ireland:         "IE",
+  "united kingdom": "UK",
+  uk:              "UK",
+};
+
 function parseVisaParagraphs(rulesText) {
-  const match = rulesText.match(/##\s+Work Authorization Paragraphs\s*\n([\s\S]*?)(?=\n##\s|$)/);
-  if (!match) return {};
+  // Section heading: "## Locked Visa / Work Authorization Paragraphs",
+  // followed by per-country "### <country>" subsections.
+  const sectionMatch = rulesText.match(
+    /##\s+Locked Visa\s*\/\s*Work Authorization Paragraphs\s*\n([\s\S]*?)(?=\n##\s|$)/i
+  );
+  if (!sectionMatch) return {};
+  const body = sectionMatch[1];
   const entries = {};
-  const paragraphs = match[1].split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
-  for (const para of paragraphs) {
-    const m = para.match(/^([A-Z]{2,4}):\s*([\s\S]+)$/);
-    if (m) entries[m[1]] = m[2].replace(/\s+/g, " ").trim();
+
+  const subRegex = /###\s+([^\n]+)\n([\s\S]*?)(?=\n###\s|$)/g;
+  let m;
+  while ((m = subRegex.exec(body)) !== null) {
+    const heading = m[1].trim().toLowerCase();
+    const code = COUNTRY_NAME_TO_CODE[heading];
+    if (code) entries[code] = m[2].trim().replace(/\s+/g, " ");
   }
   return entries;
 }
@@ -135,75 +160,41 @@ ${rulesText}
 
 ## Required JSON output format
 {
-  "date": "<today's date as Month DD, YYYY>",
-  "re_line": "<job title for Re: line>",
-  "opening": "<opening paragraph — hook + genuine technical interest in problem domain>",
-  "sections": [
-    {
-      "heading": "<section heading in JD's own language>",
-      "body": "<section paragraph>"
-    }
-  ],
-  "closing": "<closing paragraph before Sincerely>"
+  "re_line": "<job title for the Re: line>",
+  "opening": "<opening paragraph>",
+  "body_paragraphs": ["<body paragraph 1>", "<body paragraph 2>", "..."],
+  "closing": "<closing paragraph>"
 }
 
-Rules:
-- sections array must have 3-4 entries
-- Do NOT include a Work Authorization section in the sections array — it will be appended automatically if configured in your profile
-- Use em dashes (—) not double hyphens (--)
-- Never fabricate experience
-- Map section headings to JD's own language
-- Select 2-3 projects that best match JD emphasis per Project Selection Guide
-- Do not mention degree gap
-- No forced company admiration — problem-domain interest only in opening
-- Total word count for opening + all section bodies + closing combined must be 400-450 words. Be concise — cut padding, not substance. Single page is a hard requirement.`;
+The Cover Letter Rules document above is authoritative — follow it. The visa/work-authorization paragraph is appended automatically server-side after the signature; do not produce it in any field. Return ONLY the JSON object — no preamble, no markdown fences.`;
 }
 
 // ── docx assembly ─────────────────────────────────────────────────────────────
 
 async function buildDocx(content, outputPath, visaText = null) {
   const {
-    Document, Packer, Paragraph, TextRun, BorderStyle,
-    AlignmentType, HeadingLevel, WidthType,
+    Document, Packer, Paragraph, TextRun,
+    AlignmentType,
   } = require("docx");
 
   // Colors per spec
   const NAVY = "1F3864";
-  const BLUE = "2E75B6";
 
-  // Font sizes (half-points: spec says 20pt renders as 10pt body, 34pt for name)
-  const BODY_SIZE = 20;   // 10pt
-  const NAME_SIZE = 34;   // 17pt
-  const HEAD_SIZE = 20;   // 10pt — same as body, color differentiates
-
-  // Section heading with blue color and bottom border rule
-  function sectionHeading(text) {
-    return new Paragraph({
-      spacing: { before: 120, after: 40 },
-      border: {
-        bottom: { style: BorderStyle.SINGLE, size: 6, color: BLUE, space: 1 },
-      },
-      children: [
-        new TextRun({
-          text,
-          font: "Calibri",
-          size: HEAD_SIZE,
-          color: BLUE,
-          bold: true,
-        }),
-      ],
-    });
-  }
+  // Font sizes (half-points: docx uses half-points so multiply pt by 2)
+  const BODY_SIZE    = 21;  // 10.5pt
+  const CONTACT_SIZE = 19;  // 9.5pt — one size smaller than body
+  const NAME_SIZE    = 28;  // 14pt
 
   // Body paragraph
   function bodyPara(text, opts = {}) {
     return new Paragraph({
       spacing: { before: 80, after: 80 },
+      alignment: opts.alignment,
       children: [
         new TextRun({
           text,
           font: "Calibri",
-          size: BODY_SIZE,
+          size: opts.size || BODY_SIZE,
           bold: opts.bold || false,
         }),
       ],
@@ -220,9 +211,10 @@ async function buildDocx(content, outputPath, visaText = null) {
 
   const children = [];
 
-  // ── Header: Name ──────────────────────────────────────────────────────────
+  // ── Header: Name (centered) ───────────────────────────────────────────────
   children.push(new Paragraph({
     spacing: { before: 0, after: 0 },
+    alignment: AlignmentType.CENTER,
     children: [
       new TextRun({
         text: "Johnny Ray Blanton III",
@@ -234,20 +226,23 @@ async function buildDocx(content, outputPath, visaText = null) {
     ],
   }));
 
-  // ── Header: Contact line ──────────────────────────────────────────────────
+  // ── Header: Contact line (centered, one size smaller) ────────────────────
   children.push(new Paragraph({
     spacing: { before: 0, after: 120 },
+    alignment: AlignmentType.CENTER,
     children: [
       new TextRun({
         text: "+1 210 980 2220  |  blantonjohnny3@gmail.com  |  linkedin.com/in/johnny-blanton",
         font: "Calibri",
-        size: BODY_SIZE,
+        size: CONTACT_SIZE,
       }),
     ],
   }));
 
   // ── Date ─────────────────────────────────────────────────────────────────
-  children.push(bodyPara(content.date || todayLong()));
+  // Always use today's actual system date — never trust Claude to provide it,
+  // since model training cutoffs make hallucinated dates likely.
+  children.push(bodyPara(todayLong()));
   children.push(spacer());
 
   // ── Salutation ────────────────────────────────────────────────────────────
@@ -271,32 +266,30 @@ async function buildDocx(content, outputPath, visaText = null) {
   // ── Opening paragraph ─────────────────────────────────────────────────────
   children.push(bodyPara(content.opening));
 
-  // ── Body sections ─────────────────────────────────────────────────────────
-  for (const section of content.sections) {
-    children.push(sectionHeading(section.heading));
-    children.push(bodyPara(section.body));
-  }
-
-  // ── Visa section (optional) ───────────────────────────────────────────────
-  if (visaText) {
-    children.push(sectionHeading("Work Authorization"));
-    children.push(bodyPara(visaText));
+  // ── Body paragraphs (no headings — prose only) ───────────────────────────
+  for (const para of content.body_paragraphs) {
+    children.push(bodyPara(para));
   }
 
   // ── Closing ───────────────────────────────────────────────────────────────
-  children.push(spacer());
   children.push(bodyPara(content.closing));
   children.push(spacer());
   children.push(bodyPara("Sincerely,"));
   children.push(spacer());
   children.push(bodyPara("Johnny Ray Blanton III", { bold: true }));
 
+  // ── Visa paragraph (after signature, prefixed "Note:") ────────────────────
+  if (visaText) {
+    children.push(spacer());
+    children.push(bodyPara(`Note: ${visaText}`));
+  }
+
   const doc = new Document({
     sections: [{
       properties: {
         page: {
           size:   { width: 12240, height: 15840 },  // US Letter
-          margin: { top: 900, bottom: 900, left: 1260, right: 1260 },
+          margin: { top: 1080, bottom: 1080, left: 1260, right: 1260 },
         },
       },
       children,
@@ -374,24 +367,80 @@ async function main() {
   const raw = await callClaude(system, userMsg);
 
   // ── Parse JSON response ───────────────────────────────────────────────────
-  let content;
-  try {
-    let cleaned = raw.trim();
+  function parseLetterJson(text) {
+    let cleaned = text.trim();
     if (cleaned.includes("```json")) cleaned = cleaned.split("```json")[1].split("```")[0].trim();
     else if (cleaned.includes("```")) cleaned = cleaned.split("```")[1].split("```")[0].trim();
     else if (cleaned.includes("{")) cleaned = cleaned.slice(cleaned.indexOf("{"), cleaned.lastIndexOf("}") + 1);
-    content = JSON.parse(cleaned);
+    return JSON.parse(cleaned);
+  }
+
+  let content;
+  try {
+    content = parseLetterJson(raw);
   } catch (e) {
     console.error("Error: Claude returned non-JSON response:\n", raw);
     process.exit(1);
   }
 
+  // ── Word-count enforcement (auto-retry once if over cap) ─────────────────
+  function countLetterWords(c) {
+    const all = [c.opening, ...c.body_paragraphs, c.closing].join(" ");
+    return all.trim().split(/\s+/).filter(Boolean).length;
+  }
+
+  const WORD_CAP = 380;
+  const initialCount = countLetterWords(content);
+  if (initialCount > WORD_CAP) {
+    console.log(`  Draft is ${initialCount} words (cap ${WORD_CAP}). Asking Claude to trim...`);
+    const trimSystem = `You are trimming a cover letter to fit a hard word cap.
+
+## Hard rules
+- Opening + all body paragraph texts + closing combined MUST be ≤ ${WORD_CAP} words.
+- body_paragraphs MUST have exactly 2 or 3 entries. Never 4. If the input has more than 3, drop entries.
+- The entire body MUST name AT MOST 3 distinct projects total (across all paragraphs combined). A "named project" is one referenced by name (e.g. "HALOC Distilled", "Jailer", "YAML ingestion framework", "HALOC Flink Distilled", "MASS/GPC", "next-role") or by a description that resolves unambiguously to one project. If the input names more than 3, drop the weakest one entirely — do not just compress it. A single paragraph that gives sentence-level treatment to 3 different projects is a violation even if the paragraph count is within the cap.
+- Do NOT add new content. Only cut.
+- Do NOT introduce any visa, sponsorship, or work-authorization content anywhere — that paragraph is appended automatically server-side and must not appear in opening, body, or closing.
+- Preserve narrative arc (problem → decision → outcome). Cut whole sentences, not adjectives.
+- Drop a body paragraph entirely (remove that array element) if needed to fit; do not pad the remaining paragraphs.
+- Return the SAME JSON shape as input: { re_line, opening, body_paragraphs: [string, ...], closing }.
+
+Return ONLY valid JSON — no preamble, no markdown fences.`;
+    const trimUserMsg = `Trim this letter to ≤ ${WORD_CAP} words. Current count: ${initialCount}.\n\n${JSON.stringify(content, null, 2)}`;
+    const trimRaw = await callClaude(trimSystem, trimUserMsg);
+    try {
+      const trimmed = parseLetterJson(trimRaw);
+      const trimmedCount = countLetterWords(trimmed);
+      if (trimmedCount <= WORD_CAP) {
+        console.log(`  Trimmed to ${trimmedCount} words.`);
+        content = trimmed;
+      } else {
+        console.log(`  Trim attempt landed at ${trimmedCount} words — still over cap. Using trimmed version anyway.`);
+        content = trimmed;
+      }
+    } catch (e) {
+      console.error("  Warning: trim retry returned non-JSON; keeping original draft.");
+    }
+  }
+
   content.company_name = job.company_name;
 
   // ── Build docx ────────────────────────────────────────────────────────────
+  // Filename: YYYY-MM-DD_Company_Title.docx; same-day regen → _v2, _v3, ...
+  // Date prefix prevents collisions across different jobs at the same company,
+  // and gives same-day regenerations a stable disambiguator.
   const version    = (job.cover_letter_version || 0) + 1;
-  const filename   = `${slugify(job.company_name)}_${slugify(job.title)}_CoverLetter_v${version}.docx`;
+  const dateStr    = todayISO();
+  const slug       = `${slugify(job.company_name)}_${slugify(job.title)}`;
+  let filename     = `${dateStr}_${slug}.docx`;
+  let collisionN   = 1;
+  while (fs.existsSync(path.join(OUTPUT_DIR, filename))) {
+    collisionN += 1;
+    filename = `${dateStr}_${slug}_v${collisionN}.docx`;
+  }
   const outputPath = path.join(OUTPUT_DIR, filename);
+  // POSIX-style relative path; serve.py converts to OS-native when opening.
+  const relPath    = `output/${filename}`;
 
   console.log("  Assembling .docx...");
   await buildDocx(content, outputPath, visaText);
@@ -400,7 +449,7 @@ async function main() {
   // ── Update pipeline record ────────────────────────────────────────────────
   const updatedJobs = jobs.map(j => j.job_id === jobId
     ? { ...j, cover_letter_generated: true, cover_letter_version: version,
-               pipeline_status: "cover_letter_ready" }
+               cover_letter_path: relPath, pipeline_status: "cover_letter_ready" }
     : j
   );
   saveJson(PIPELINE_PATH, updatedJobs);
@@ -414,10 +463,18 @@ async function main() {
   });
 
   // ── Post-generation summary ───────────────────────────────────────────────
-  const visaLine = visaText ? `  Work auth: ${country} paragraph applied` : `  Work auth: none`;
+  const allText  = [content.opening, ...content.body_paragraphs, content.closing].join(" ");
+  const realWords = allText.trim().split(/\s+/).filter(Boolean).length;
+  const overCap  = realWords > WORD_CAP ? ` ⚠ OVER ${WORD_CAP}-WORD CAP` : "";
+
+  const paraCount = content.body_paragraphs.length;
+  const overParas = paraCount > 3 ? ` ⚠ OVER 3-PARAGRAPH CAP` : (paraCount < 2 ? ` ⚠ UNDER 2-PARAGRAPH MIN` : "");
+
+  const visaLine = visaText ? `  Work auth: ${country} paragraph applied (after signature, "Note:" prefix)` : `  Work auth: none`;
   console.log("\n── Post-generation checklist ─────────────────────────────────");
-  console.log(`  File:     ${filename}`);
-  console.log(`  Sections: ${content.sections.map(s => s.heading).join(", ")}`);
+  console.log(`  File:         ${filename}`);
+  console.log(`  Word count:   ${realWords}${overCap}`);
+  console.log(`  Body paras:   ${paraCount}${overParas}`);
   console.log(visaLine);
   console.log("\n  Before submitting, verify:");
   console.log("  [ ] All project names and metrics are accurate");

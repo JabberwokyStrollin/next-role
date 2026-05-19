@@ -63,27 +63,36 @@ Projects available (update with your own):
 - Degree or education references
 - Salary expectations
 
-## Work Authorization Paragraphs
+## Locked Visa / Work Authorization Paragraphs
 
-Define one entry per country or situation code (2–4 uppercase letters). Each entry must
-be separated by a blank line. The code and paragraph text are on the same line, or the
-text can wrap — just no blank lines within a single entry.
+Define one `### <Country>` subsection per situation. The subsection heading must match
+one of the country names recognized by `scripts/generate_cl.js:COUNTRY_NAME_TO_CODE`
+(`Canada`, `Ireland`, `United Kingdom` / `UK`). The body is one paragraph; soft-wrap as
+you like — it will be re-flowed into a single line.
 
-If this section is absent, or no entry matches the job's country, the Work Authorization
-section is omitted from the letter entirely. Use `[Company Name]` as a placeholder if
-your paragraph needs to reference the employer — it will be substituted automatically.
+If this section is absent, or no subsection matches the job's country, the Work
+Authorization section is omitted from the letter entirely. Use `[Company Name]` as a
+placeholder if your paragraph needs to reference the employer — it will be substituted
+automatically.
 
-CA: I am a [nationality] relocating to Canada. I will require a work permit and expect
+### Canada
+
+I am a [nationality] relocating to Canada. I will require a work permit and expect
 to qualify under the Global Talent Stream (Category A), which carries a two-week
 processing target. I am ready to provide all required documentation.
 
-IE: I am a [nationality]. I will require visa sponsorship to work in Ireland. Based on
+### Ireland
+
+I am a [nationality]. I will require visa sponsorship to work in Ireland. Based on
 my profile, I expect to qualify for the Critical Skills Employment Permit. I am ready
 to work with [Company Name] to complete any required documentation efficiently.
 
-UK: I am a [nationality]. I will require a Skilled Worker visa to work in the United
+### United Kingdom
+
+I am a [nationality]. I will require a Skilled Worker visa to work in the United
 Kingdom. I meet the eligibility requirements and am prepared to support [Company Name]
 through the sponsorship process.
 
-<!-- Add, remove, or modify entries to match your situation.
-     Remove this entire section if you are a local candidate who needs no sponsorship. -->
+<!-- Add, remove, or modify subsections to match your situation. To support a new
+     country, add the name to COUNTRY_NAME_TO_CODE in scripts/generate_cl.js. Remove
+     this entire section if you are a local candidate who needs no sponsorship. -->

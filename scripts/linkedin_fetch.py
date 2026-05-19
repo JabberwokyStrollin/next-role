@@ -32,7 +32,6 @@ import os
 import re
 import sys
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.header import decode_header, make_header
 from pathlib import Path
@@ -353,31 +352,6 @@ def _fetch_jd_text(url: str) -> tuple[str, bool, str]:
         return "", False, "short"
     _log_jd_fetch({**record, "reason": "ok"})
     return jd_text, True, "ok"
-
-
-def _attach_jd_text(jobs: list[dict], max_workers: int = 4) -> int:
-    """
-    Best-effort parallel fetch of JD body for each job; mutates jobs in place.
-    Returns the count of jobs where a JD was successfully attached.
-
-    Not called automatically anywhere — kept for opt-in scripted use against
-    non-LinkedIn URLs. Bulk fetch against linkedin.com trips their bot detection
-    even at modest concurrency, so the in-app flow uses per-row on-demand
-    fetches at human cadence instead.
-    """
-    if not jobs:
-        return 0
-
-    def _one(j: dict) -> bool:
-        text, ok, _reason = _fetch_jd_text(j.get("apply_url", ""))
-        if ok:
-            j["jd_text"] = text
-            return True
-        return False
-
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        results = list(ex.map(_one, jobs))
-    return sum(1 for r in results if r)
 
 
 # ── IMAP fetch ────────────────────────────────────────────────────────────────

@@ -1,0 +1,64 @@
+# Stack keyword weights and crawl pre-filter config.
+# Matched case-insensitively against full JD text. More specific phrases
+# should score higher to reward exact-match roles. `max_score` caps the
+# total no matter how many keywords match.
+
+max_score: 35
+
+keywords:
+  # Primary stack — your core differentiating technologies
+  # [language]: 5
+  # [framework or platform]: 6
+
+  # Secondary stack — technologies you know well but aren't your calling card
+  # [tool]: 2
+
+  # Adjacent — broadly applicable skills that add small signal
+  # [skill]: 1
+
+crawl:
+  # Title must contain at least one of these (case-insensitive)
+  seniority_titles:
+    - staff
+    - principal
+    - senior staff
+    - lead engineer
+    - lead developer
+    - architect
+    - tech lead
+
+  # Reject title if it contains any of these (case-insensitive). Filters the
+  # false positives a broad seniority match drags in (e.g. pre-sales
+  # architects, customer-success leads).
+  title_exclude:
+    - solutions architect
+    - delivery architect
+    - sales engineer
+    - customer success
+    - professional services
+
+  # Location must contain at least one of these, or "remote"
+  location_allow:
+    - remote
+    # - [country or city]
+    # - [country or city]
+
+  # RemoteOK API query tag groups.
+  # Each top-level item is one API call. Tags within an inner list are
+  # AND-filtered (RemoteOK returns only listings tagged with ALL of them).
+  # For "one-or-the-other" alternatives (e.g. spark vs databricks rarely
+  # co-occur), list them as separate top-level items.
+  aggregator_tags:
+    # - [tag]
+    # - [tag, tag]   # AND-filtered combo
+    # - [spark]
+    # - [databricks]
+
+  # Remotive full-text search queries. Each item is one query string.
+  # Write alternatives as separate items.
+  aggregator_keywords:
+    # - keywords here
+    # - alternative keyword set here
+
+  # Minimum stack keyword score to pass pre-filter
+  min_pre_filter_score: 3

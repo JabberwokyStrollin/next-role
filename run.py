@@ -30,8 +30,20 @@ Usage:
 import argparse
 import subprocess
 import sys
-import os
 from pathlib import Path
+
+# Composite scoring + company filtering are defined ONLY in scripts/config.py
+# — see the SCORING SSOT and COMPANY-FILTER SSOT banners there. Do not
+# redefine composite_score or duplicate the company-filter rule here.
+sys.path.insert(0, str(Path(__file__).parent / "scripts"))
+from config import (  # noqa: E402
+    MAX_ACTIVE_APPS_PER_COMPANY,
+    APPLICATION_TRACKER_PATH,
+    company_block_reason,
+    composite_score,
+    load_json,
+    save_json,
+)
 
 # ── stdout encoding (Windows cp1252 → UTF-8) ─────────────────────────────────
 for _stream in (sys.stdout, sys.stderr):
@@ -62,45 +74,6 @@ def run_node(script: str, *args) -> int:
     cmd = ["node", str(SCRIPTS / script), *args]
     result = subprocess.run(cmd, cwd=ROOT)
     return result.returncode
-
-
-def load_json(path):
-    import json
-    if not path.exists():
-        return []
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_json(path, data):
-    import json
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-
-def composite_score(job, company):
-    return (
-        (job.get("stack_match_score")     or 0) +
-        (job.get("seniority_score")       or 0) +
-        (job.get("domain_fit_score")      or 0) +
-        (job.get("hiring_velocity_score") or 0) +
-        ((company.get("sponsorship_score") if company else None) or 0) +
-        ((company.get("remote_fit")        if company else None) or 0)
-    )
-
-
-def top_per_company(scored):
-    """Given (score, job) pairs sorted desc, keep only the top job per company_id.
-    Prevents spamming a single company with multiple simultaneous applications."""
-    seen = set()
-    out  = []
-    for score, job in scored:
-        cid = job.get("company_id")
-        if cid in seen:
-            continue
-        seen.add(cid)
-        out.append((score, job))
-    return out
 
 
 # ── Ingest ────────────────────────────────────────────────────────────────────
@@ -224,30 +197,37 @@ def generate_cover_letters(top_n: int = 5, auto: bool = False) -> None:
     jobs      = load_json(DATA_DIR / "job_pipeline.json")
     companies = load_json(DATA_DIR / "company_registry.json")
     co_by_id  = {c["company_id"]: c for c in companies}
+    apps      = load_json(APPLICATION_TRACKER_PATH)
 
-    eligible = [
+    # Status-side eligibility.
+    raw_eligible = [
         j for j in jobs
         if j.get("pipeline_status") in ["active", "cover_letter_ready"]
         and not j.get("cover_letter_generated")
     ]
 
-    scored = []
-    for job in eligible:
+    # Company-side eligibility via the COMPANY-FILTER SSOT
+    # (config.company_block_reason). Suppress jobs at companies with
+    # MAX_ACTIVE_APPS_PER_COMPANY or more in-flight applications.
+    scored     = []
+    suppressed = 0
+    for job in raw_eligible:
+        if company_block_reason(job.get("company_id"), apps):
+            suppressed += 1
+            continue
         company = co_by_id.get(job.get("company_id"))
         score   = composite_score(job, company)
         scored.append((score, job))
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    deduped    = top_per_company(scored)
-    candidates = deduped[:top_n]
+    candidates = scored[:top_n]
     if not candidates:
         print("\nNo jobs ready for cover letter generation.")
         return
 
-    suppressed = len(scored) - len(deduped)
-    print(f"\n── Cover letter candidates (top {top_n}, one per company) ──────────")
+    print(f"\n── Cover letter candidates (top {top_n}, ≤{MAX_ACTIVE_APPS_PER_COMPANY} active apps/co) ──────────")
     if suppressed:
-        print(f"  ({suppressed} lower-scoring sibling job{'s' if suppressed != 1 else ''} suppressed at same companies)")
+        print(f"  ({suppressed} suppressed: company already at {MAX_ACTIVE_APPS_PER_COMPANY} active applications)")
     for i, (score, job) in enumerate(candidates, 1):
         print(f"  {i}. [{score:>3}] {job['company_name']} — {job['title']}")
 

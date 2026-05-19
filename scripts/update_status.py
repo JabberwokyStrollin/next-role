@@ -23,6 +23,7 @@ from config import (
     JOB_PIPELINE_PATH,
     COMPANY_REGISTRY_PATH,
     PROCESS_LOG_PATH,
+    composite_score,
     load_json,
     save_json,
     now_utc,
@@ -85,14 +86,6 @@ def cmd_log(args):
     # Derive country
     country = derive_country(job.get("location", ""))
 
-    # Cooldown — 90 days unless staffing agency
-    cooldown = None
-    if args.no_cooldown:
-        cooldown = None
-    else:
-        from datetime import date, timedelta
-        cooldown = (date.today() + timedelta(days=90)).isoformat()
-
     app = {
         "application_id":        str(uuid_lib.uuid4()),
         "job_id":                job["job_id"],
@@ -109,7 +102,6 @@ def cmd_log(args):
         "composite_score_at_apply": None,  # populated below
         "status":                "applied",
         "status_updated":        now_utc(),
-        "cooldown_until":        cooldown,
         "response_date":         None,
         "ghosted_flag":          False,
         "notes":                 args.notes or "",
@@ -119,7 +111,6 @@ def cmd_log(args):
     # Compute composite score snapshot
     companies = load_json(COMPANY_REGISTRY_PATH)
     company   = next((c for c in companies if c["company_id"] == job.get("company_id")), None)
-    from config import composite_score
     app["composite_score_at_apply"] = composite_score(job, company)
 
     apps.append(app)
@@ -131,15 +122,6 @@ def cmd_log(args):
         for j in jobs
     ]
     save_json(JOB_PIPELINE_PATH, updated_jobs)
-
-    # Update company cooldown
-    if cooldown and company:
-        updated_companies = [
-            {**c, "last_applied": today(), "cooldown_until": cooldown}
-            if c["company_id"] == company["company_id"] else c
-            for c in companies
-        ]
-        save_json(COMPANY_REGISTRY_PATH, updated_companies)
 
     append_log({
         "event_type":  "application_logged",
@@ -158,7 +140,6 @@ def cmd_log(args):
     print(f"  Title:     {app['title']}")
     print(f"  Date:      {app['date_applied']}")
     print(f"  Country:   {country}")
-    print(f"  Cooldown:  {cooldown or 'none'}")
     print(f"  Score:     {app['composite_score_at_apply']}")
 
 
@@ -251,8 +232,6 @@ def main():
                                 "linkedin","direct","other"])
     log_p.add_argument("--plain-text", action="store_true",
                        help="Plain text version was submitted")
-    log_p.add_argument("--no-cooldown", action="store_true",
-                       help="Skip cooldown (staffing agency / unknown employer)")
     log_p.add_argument("--notes",    metavar="TEXT", help="Optional notes")
 
     # status subcommand

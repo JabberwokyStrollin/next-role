@@ -27,8 +27,10 @@ from config import (
     ANTHROPIC_API_KEY,
     CLAUDE_MODEL,
     COMPANY_REGISTRY_PATH,
+    COMPONENTS,
     JOB_PIPELINE_PATH,
     PROCESS_LOG_PATH,
+    detect_no_sponsorship,
     load_json,
     save_json,
     now_utc,
@@ -36,15 +38,13 @@ from config import (
     compute_stack_score,
     compute_velocity_score,
     compute_staleness,
-    days_since,
 )
 from score_jd import score_jd
 from research_company import build_registry_record, upsert_company
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-COMPANY_REFRESH_DAYS = 30   # Refresh company record if older than this
-MIN_JD_LENGTH        = 200  # Minimum characters for a substantive JD
+MIN_JD_LENGTH = 200  # Minimum characters for a substantive JD
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -154,7 +154,12 @@ def get_or_stub_company(company_name: str) -> dict | None:
     """
     Look up company in registry. If not found, create a stub record with
     default scores — no API call. Research happens later only for top-ranked jobs.
-    Returns company record dict, or None if hard-excluded or on cooldown.
+    Returns company record dict, or None if hard-excluded.
+
+    Note: company-based throttling (the "already have N apps in flight" rule)
+    is enforced at apply-surface time via ``config.company_block_reason``, not
+    here — the crawl is intentionally permissive so good roles enter the
+    pipeline regardless of existing in-flight applications.
     """
     companies = load_json(COMPANY_REGISTRY_PATH)
     existing = next(
@@ -165,9 +170,6 @@ def get_or_stub_company(company_name: str) -> dict | None:
     if existing:
         if existing.get("ethics_hard_exclude"):
             print(f"  Company {company_name} is ethics-excluded — skipping job.")
-            return None
-        if check_cooldown(existing):
-            print(f"  {company_name} is on cooldown until {existing['cooldown_until']} — skipping.")
             return None
         print(f"  Using existing company record.")
         return existing
@@ -187,16 +189,6 @@ def get_or_stub_company(company_name: str) -> dict | None:
     return stub
 
 
-# ── Cooldown check ────────────────────────────────────────────────────────────
-
-def check_cooldown(company: dict) -> bool:
-    """Return True if company is on cooldown (should skip)."""
-    cooldown = company.get("cooldown_until")
-    if not cooldown:
-        return False
-    return cooldown > today()
-
-
 # ── Main ingest ───────────────────────────────────────────────────────────────
 
 def ingest_job(
@@ -212,11 +204,14 @@ def ingest_job(
     Full ingest pipeline for a single job.
     Returns the written job record, or None if discarded.
     """
-    # Sanitize all text fields — strip surrogates that break JSON on Windows
+    # Sanitize all text fields — strip surrogates that break JSON on Windows,
+    # then strip leading/trailing whitespace from the single-line fields so
+    # near-duplicate titles like "Staff Engineer" vs "Staff Engineer " don't
+    # render as visually distinct rows.
     jd_text      = jd_text.encode("utf-8", errors="ignore").decode("utf-8")
-    title        = title.encode("utf-8", errors="ignore").decode("utf-8")
-    company_name = company_name.encode("utf-8", errors="ignore").decode("utf-8")
-    location     = location.encode("utf-8", errors="ignore").decode("utf-8")
+    title        = title.encode("utf-8", errors="ignore").decode("utf-8").strip()
+    company_name = company_name.encode("utf-8", errors="ignore").decode("utf-8").strip()
+    location     = location.encode("utf-8", errors="ignore").decode("utf-8").strip()
 
     jobs = load_json(JOB_PIPELINE_PATH)
 
@@ -248,7 +243,7 @@ def ingest_job(
             "entity_type": "job",
             "entity_name": f"{company_name} — {title}",
             "source_url":  apply_url,
-            "detail":      "Job discarded: company is ethics-excluded or on cooldown.",
+            "detail":      "Job discarded: company is ethics-excluded.",
         })
         return None
 
@@ -262,17 +257,37 @@ def ingest_job(
         if auto_add_board(company["name"], *ats_info, added_via="ingest"):
             print(f"  [+] Added ATS board: {ats_info[0]} / {ats_info[1]}")
 
+    # ── No-sponsorship JD discard ─────────────────────────────────────────────
+    # Per-JD hard exclude: the posting explicitly refuses visa sponsorship.
+    # Runs before scoring so we don't spend a Claude call on something we're
+    # going to discard. Independent of the company-level sponsorship signal,
+    # which scores the org's historical record across all postings.
+    no_sponsor_snippet = detect_no_sponsorship(jd_text)
+    if no_sponsor_snippet:
+        print(f"  JD refuses sponsorship: \"...{no_sponsor_snippet}...\" — discarding.")
+        append_log({
+            "event_type":  "job_discarded",
+            "entity_type": "job",
+            "entity_name": f"{company_name} — {title}",
+            "source_url":  apply_url,
+            "detail":      f"Job discarded: JD says no sponsorship (\"...{no_sponsor_snippet}...\").",
+        })
+        return None
+
     # ── Mechanical scores (no Claude) ─────────────────────────────────────────
     stack_score    = compute_stack_score(jd_text)
     velocity_score = compute_velocity_score(date_posted)
     staleness      = compute_staleness(date_posted)
 
-    print(f"  Stack score: {stack_score}/35  Velocity: {velocity_score}/5  Staleness: {staleness}")
+    print(f"  Stack score: {stack_score}/{COMPONENTS['stack'].native_max}  "
+          f"Velocity: {velocity_score}/{COMPONENTS['velocity'].native_max}  "
+          f"Staleness: {staleness}")
 
     # ── Claude judgment scores ────────────────────────────────────────────────
     print("  Scoring JD with Claude...", flush=True)
     scores = score_jd(jd_text)
-    print(f"  Seniority: {scores['seniority_score']}/25  Domain: {scores['domain_fit_score']}/20")
+    print(f"  Seniority: {scores['seniority_score']}/{COMPONENTS['seniority'].native_max}  "
+          f"Domain: {scores['domain_fit_score']}/{COMPONENTS['domain'].native_max}")
     print(f"  Notes: {scores['score_notes']}")
 
     # ── Build job record ──────────────────────────────────────────────────────
@@ -318,8 +333,11 @@ def ingest_job(
         "entity_name": f"{company_name} — {title}",
         "source_url":  apply_url,
         "detail": (
-            f"Job ingested. Stack: {stack_score}/35, Velocity: {velocity_score}/5, "
-            f"Seniority: {scores['seniority_score']}/25, Domain: {scores['domain_fit_score']}/20. "
+            f"Job ingested. "
+            f"Stack: {stack_score}/{COMPONENTS['stack'].native_max}, "
+            f"Velocity: {velocity_score}/{COMPONENTS['velocity'].native_max}, "
+            f"Seniority: {scores['seniority_score']}/{COMPONENTS['seniority'].native_max}, "
+            f"Domain: {scores['domain_fit_score']}/{COMPONENTS['domain'].native_max}. "
             f"Staleness: {staleness}."
         ),
     })

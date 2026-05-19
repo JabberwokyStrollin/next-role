@@ -23,10 +23,10 @@ import sys
 import time
 from collections import Counter
 from datetime import datetime, timezone
-from itertools import product
 from urllib.parse import quote
 
 import requests
+import yaml
 from bs4 import BeautifulSoup
 
 from config import (
@@ -59,61 +59,31 @@ CRAWL_CONFIG_DEFAULTS = {
 
 
 def load_crawl_config() -> dict:
-    """Parse ## Crawl Config section from profile/stack_keywords.md."""
+    """Load crawl section from profile/stack_keywords.yaml."""
     if not STACK_KEYWORDS_PATH.exists():
         return dict(CRAWL_CONFIG_DEFAULTS)
 
-    text  = STACK_KEYWORDS_PATH.read_text(encoding="utf-8")
-    match = re.search(r"##\s+Crawl Config\s*\n([\s\S]*?)(?=\n##\s|$)", text)
-    if not match:
-        return dict(CRAWL_CONFIG_DEFAULTS)
+    data  = yaml.safe_load(STACK_KEYWORDS_PATH.read_text(encoding="utf-8")) or {}
+    crawl = data.get("crawl") or {}
 
     cfg = dict(CRAWL_CONFIG_DEFAULTS)
-    for line in match.group(1).splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split(":", 1)
-        if len(parts) != 2:
-            continue
-        key, val = parts[0].strip(), parts[1].strip()
-        if key == "seniority_titles":
-            cfg["seniority_titles"] = [t.strip().lower() for t in val.split(",") if t.strip()]
-        elif key == "title_exclude":
-            cfg["title_exclude"] = [t.strip().lower() for t in val.split(",") if t.strip()]
-        elif key == "location_allow":
-            cfg["location_allow"] = [l.strip().lower() for l in val.split(",") if l.strip()]
-        elif key == "aggregator_tags":
-            groups = []
-            for chunk in val.split("|"):
-                positions = [
-                    [a.strip() for a in t.split("/") if a.strip()]
-                    for t in chunk.split(",") if t.strip()
-                ]
-                if not positions:
-                    continue
-                for combo in product(*positions):
-                    groups.append(list(combo))
-            if groups:
-                cfg["aggregator_tag_groups"] = groups
-        elif key == "aggregator_keywords":
-            groups = []
-            for chunk in val.split("|"):
-                positions = [
-                    [a.strip() for a in word.split("/") if a.strip()]
-                    for word in chunk.split() if word
-                ]
-                if not positions:
-                    continue
-                for combo in product(*positions):
-                    groups.append(" ".join(combo))
-            if groups:
-                cfg["aggregator_keyword_groups"] = groups
-        elif key == "min_pre_filter_score":
-            try:
-                cfg["min_pre_filter_score"] = int(val)
-            except ValueError:
-                pass
+    if "seniority_titles" in crawl:
+        cfg["seniority_titles"] = [str(t).strip().lower() for t in crawl["seniority_titles"]]
+    if "title_exclude" in crawl:
+        cfg["title_exclude"] = [str(t).strip().lower() for t in crawl["title_exclude"]]
+    if "location_allow" in crawl:
+        cfg["location_allow"] = [str(l).strip().lower() for l in crawl["location_allow"]]
+    if "aggregator_tags" in crawl:
+        cfg["aggregator_tag_groups"] = [
+            [str(t).strip() for t in group] for group in crawl["aggregator_tags"]
+        ]
+    if "aggregator_keywords" in crawl:
+        cfg["aggregator_keyword_groups"] = [str(q).strip() for q in crawl["aggregator_keywords"]]
+    if "min_pre_filter_score" in crawl:
+        try:
+            cfg["min_pre_filter_score"] = int(crawl["min_pre_filter_score"])
+        except (TypeError, ValueError):
+            pass
     return cfg
 
 
@@ -128,6 +98,15 @@ def html_to_text(html: str) -> str:
 
 
 # ── Pre-filter (no API cost) ──────────────────────────────────────────────────
+#
+# This pre-filter is INTENTIONALLY pre-LLM. It runs on every raw aggregator
+# hit (~5000 listings per crawl) to cut down to the few worth scoring. The
+# composite_score() in scripts/config.py requires Claude scoring + company
+# research — calling it here would defeat the cost model entirely. Do NOT
+# import composite_score in this file. The signals checked below
+# (title allowlist/blocklist, location_allow, mechanical stack score on
+# title + JD prefix) come from profile/stack_keywords.yaml, which is the
+# canonical SSOT for pre-filter configuration.
 
 def pre_filter(title: str, location: str, text: str, cfg: dict) -> tuple[bool, str]:
     """Returns (passes, reason_string)."""

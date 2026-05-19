@@ -13,6 +13,9 @@ from config import (
     JOB_PIPELINE_PATH,
     COMPANY_REGISTRY_PATH,
     APPLICATION_TRACKER_PATH,
+    COMPONENTS,
+    COMPOSITE_MAX,
+    compute_freshness_bonus,
     load_json,
     today,
     composite_score,
@@ -57,7 +60,7 @@ def hyperlink(url: str) -> str:
     return f"\033]8;;{url}\033\\{url}\033]8;;\033\\"
 
 
-def score_bar(value, max_val=105, width=12):
+def score_bar(value, max_val=COMPOSITE_MAX, width=12):
     filled = round((value / max_val) * width)
     bar    = "█" * filled + "░" * (width - filled)
     if value >= 70:
@@ -142,18 +145,21 @@ def main():
     print()
 
     # ── Score breakdown for top 3 ────────────────────────────────────────────
+    # Denominators read from the SSOT (config.COMPONENTS) — never hardcoded.
     print(f"{BOLD}── Score breakdown (top 3) ─────────────────────────────────────{RESET}")
+    NM = {k: c.native_max for k, c in COMPONENTS.items()}
     for i, (score, job, company) in enumerate(display[:3], 1):
         stub_note = " [stub — company not yet researched]" if (company and company.get("stub")) else ""
         print(f"\n  {i}. {job['company_name']} — {job['title']}{stub_note}")
-        print(f"     Stack:      {job.get('stack_match_score') or 0:>3}/35")
-        print(f"     Seniority:  {job.get('seniority_score') or 0:>3}/25")
-        print(f"     Domain:     {job.get('domain_fit_score') or 0:>3}/20")
-        print(f"     Velocity:   {job.get('hiring_velocity_score') or 0:>3}/5")
-        print(f"     Sponsorship:{(company.get('sponsorship_score') if company else 0) or 0:>3}/15")
-        print(f"     Remote fit: {(company.get('remote_fit') if company else 0) or 0:>3}/5")
+        print(f"     Stack:      {job.get('stack_match_score')     or 0:>3}/{NM['stack']}")
+        print(f"     Seniority:  {job.get('seniority_score')       or 0:>3}/{NM['seniority']}")
+        print(f"     Domain:     {job.get('domain_fit_score')      or 0:>3}/{NM['domain']}")
+        print(f"     Velocity:   {job.get('hiring_velocity_score') or 0:>3}/{NM['velocity']}")
+        print(f"     Freshness:  {compute_freshness_bonus(job)         :>3}/{NM['freshness']}")
+        print(f"     Sponsorship:{(company.get('sponsorship_score') if company else 0) or 0:>3}/{NM['sponsorship']}")
+        print(f"     Remote fit: {(company.get('remote_fit')        if company else 0) or 0:>3}/{NM['remote']}")
         print(f"     {'─'*22}")
-        print(f"     Composite:  {score:>3}/105")
+        print(f"     Composite:  {score:>3}/{COMPOSITE_MAX}")
         if job.get("score_notes"):
             print(f"     Notes: {job['score_notes'][:120]}...")
         print(f"     Apply:  {hyperlink(job.get('apply_url', 'N/A'))}")

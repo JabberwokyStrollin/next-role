@@ -47,6 +47,17 @@ SCRIPTS    = ROOT / "scripts"
 DATA_DIR   = ROOT / "data"
 OUTPUT_DIR = ROOT / "output"
 
+# Ranking-related symbols come from the scoring SSOT (scripts/config.py).
+# Do not redefine composite_score, score weights, or denominators in this file.
+sys.path.insert(0, str(SCRIPTS))
+from config import (  # noqa: E402
+    COMPONENTS,
+    COMPOSITE_MAX,
+    MAX_ACTIVE_APPS_PER_COMPANY,
+    company_block_reason,
+    composite_score,
+)
+
 # Mirrors scripts/config.py. Duplicated to keep serve.py importable without
 # the ANTHROPIC_API_KEY check that config.py runs at import time.
 APPLICATION_TRACKER_PATH = DATA_DIR / "application_tracker.json"
@@ -195,6 +206,40 @@ def load_pipeline():
         return json.loads(raw)
     except Exception:
         return []
+
+
+def load_comp_estimates_by_job() -> dict:
+    """Read data/comp_estimates.json once and index by job_id."""
+    p = DATA_DIR / "comp_estimates.json"
+    if not p.exists():
+        return {}
+    try:
+        records = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return {r["job_id"]: r for r in records if r.get("job_id")}
+
+
+def load_companies_by_id() -> dict:
+    """Read company_registry.json once per page render and index by company_id.
+
+    composite_score() needs the company record to apply sponsorship + remote
+    weights. Callers should join job → company via job['company_id'].
+    """
+    p = DATA_DIR / "company_registry.json"
+    if not p.exists():
+        return {}
+    try:
+        raw = p.read_text(encoding="utf-8", errors="replace")
+        raw = raw.encode("utf-8", errors="ignore").decode("utf-8")
+        return {c["company_id"]: c for c in json.loads(raw)}
+    except Exception:
+        return {}
+
+
+def job_score(job: dict, co_by_id: dict) -> int:
+    """Convenience: full composite for a single job using a preloaded company map."""
+    return composite_score(job, co_by_id.get(job.get("company_id")))
 
 
 def load_daily_state(date_iso: str) -> dict:
@@ -414,6 +459,25 @@ def pop_linkedin_flash() -> dict | None:
     return f
 
 
+# ── Cover letters & apply (phase 5) ───────────────────────────────────────────-
+
+CL_RENDER_CAP = 30  # rows visible in the cover_letters section by default
+
+_cl_flash: dict | None = None
+
+
+def set_cl_flash(kind: str, text: str) -> None:
+    """kind: 'ok' | 'warn' | 'info'."""
+    global _cl_flash
+    _cl_flash = {"kind": kind, "text": text}
+
+
+def pop_cl_flash() -> dict | None:
+    global _cl_flash
+    f, _cl_flash = _cl_flash, None
+    return f
+
+
 def run_linkedin_fetch() -> tuple[bool, int, str]:
     """Run scripts/linkedin_fetch.py. Returns (ok, n_fetched, output)."""
     cmd = [sys.executable, "-u", str(SCRIPTS / "linkedin_fetch.py")]
@@ -473,6 +537,251 @@ def discard_failing_staged() -> int:
     if n_discarded:
         save_staged_emails(kept)
     return n_discarded
+
+
+# ── Resume snippets (Experience & Education) ─────────────────────────────────-
+
+RESUME_MD_PATH = ROOT / "profile" / "resume.md"
+
+PROFILE_LINKS = [
+    ("LinkedIn", "linkedin.com/in/johnny-blanton"),
+    ("GitHub",   "github.com/JabberwokyStrollin"),
+]
+
+_MONTH_ABBREVS = {
+    "jan": "01", "feb": "02", "mar": "03", "apr": "04",
+    "may": "05", "jun": "06", "jul": "07", "aug": "08",
+    "sep": "09", "oct": "10", "nov": "11", "dec": "12",
+}
+
+# Date range like "Jan 2020 – Mar 2026", "Mar 2026 – Present", with en/em/hyphen.
+_DATE_RANGE_RE = re.compile(
+    r"(?P<m1>[A-Za-z]+)\s+(?P<y1>\d{4})"
+    r"\s*[–—\-]\s*"
+    r"(?P<m2>[A-Za-z]+)\s*(?P<y2>\d{4})?"
+)
+
+
+def _to_mm_yyyy(month_name: str, year: str) -> str:
+    if not month_name or not year:
+        return ""
+    mm = _MONTH_ABBREVS.get(month_name.strip().lower()[:3], "")
+    return f"{mm}/{year}" if mm else f"{month_name} {year}"
+
+
+def _split_date_range(text: str) -> tuple[str, str]:
+    m = _DATE_RANGE_RE.search(text or "")
+    if not m:
+        return "", ""
+    frm = _to_mm_yyyy(m.group("m1"), m.group("y1"))
+    m2  = m.group("m2") or ""
+    if m2.lower().startswith("present"):
+        to = "Present"
+    else:
+        to = _to_mm_yyyy(m2, m.group("y2") or "")
+    return frm, to
+
+
+def _section_block(md: str, heading: str) -> str:
+    """Body of a top-level '## {heading}' section, up to the next '## '."""
+    pattern = re.compile(
+        r"^##\s+" + re.escape(heading) + r"\s*\n(.*?)(?=^##\s)",
+        re.MULTILINE | re.DOTALL,
+    )
+    m = pattern.search(md + "\n## ")  # trailing sentinel so the last section terminates
+    return m.group(1) if m else ""
+
+
+def _split_title_company(head: str) -> tuple[str, str]:
+    for sep in ("—", "–", " - "):
+        pat = r"^(.+?)\s+" + re.escape(sep.strip()) + r"\s+(.+)$"
+        m   = re.match(pat, head)
+        if m:
+            return m.group(1).strip(), m.group(2).strip()
+    return head.strip(), ""
+
+
+def _coalesce_description(body_lines: list[str]) -> str:
+    """
+    Join soft-wrapped paragraphs and bullets into single lines. Preserves blank
+    lines between bullets/paragraphs. Drops '---' horizontal rules.
+    """
+    cleaned = [l for l in body_lines if l.strip() != "---"]
+    while cleaned and not cleaned[0].strip():
+        cleaned.pop(0)
+    while cleaned and not cleaned[-1].strip():
+        cleaned.pop()
+
+    coalesced: list[str] = []
+    for ln in cleaned:
+        stripped = ln.strip()
+        if not stripped:
+            coalesced.append("")
+            continue
+        if stripped.startswith("- "):
+            coalesced.append(stripped)
+        elif coalesced and coalesced[-1]:
+            coalesced[-1] += " " + stripped
+        else:
+            coalesced.append(stripped)
+
+    # Collapse runs of blank lines.
+    out: list[str] = []
+    prev_blank = False
+    for ln in coalesced:
+        if ln == "":
+            if not prev_blank and out:
+                out.append("")
+            prev_blank = True
+        else:
+            out.append(ln)
+            prev_blank = False
+    return "\n".join(out).strip()
+
+
+def parse_experience(md: str) -> list[dict]:
+    block = _section_block(md, "Experience")
+    if not block:
+        return []
+    entries = re.split(r"(?m)^### ", block)
+    out: list[dict] = []
+    for raw in entries:
+        raw = raw.strip()
+        if not raw:
+            continue
+        lines = raw.splitlines()
+        title, company = _split_title_company(lines[0].strip())
+
+        date_line  = ""
+        body_start = 1
+        for i in range(1, len(lines)):
+            ln = lines[i].strip()
+            if not ln:
+                continue
+            if "|" in ln and _DATE_RANGE_RE.search(ln):
+                date_line  = ln
+                body_start = i + 1
+                break
+
+        frm, to, location = "", "", ""
+        if date_line:
+            parts   = [p.strip() for p in date_line.split("|", 1)]
+            frm, to = _split_date_range(parts[0])
+            if len(parts) > 1:
+                location = parts[1]
+
+        description = _coalesce_description(lines[body_start:])
+
+        out.append({
+            "title":       title,
+            "company":     company,
+            "location":    location,
+            "from":        frm,
+            "to":          to,
+            "description": description,
+        })
+    return out
+
+
+_STATE_AT_END_RE = re.compile(r"\b[A-Z]{2,3}\s*$")
+
+
+def parse_education(md: str) -> list[dict]:
+    block = _section_block(md, "Education")
+    if not block:
+        return []
+
+    # Bullets may wrap across lines. Continuations are indented or non-empty
+    # non-bullet lines until the next '- ' or blank line.
+    entries: list[str] = []
+    current: str | None = None
+    for line in block.splitlines():
+        if line.startswith("- "):
+            if current is not None:
+                entries.append(current)
+            current = line[2:].rstrip()
+        elif current is not None and (line.startswith(" ") or line.startswith("\t")):
+            current += " " + line.strip()
+        elif current is not None and line.strip() == "":
+            entries.append(current)
+            current = None
+    if current is not None:
+        entries.append(current)
+
+    out: list[dict] = []
+    for entry in entries:
+        segments = [s.strip() for s in entry.split("|") if s.strip()]
+        if not segments:
+            continue
+
+        date_idx = -1
+        for i, s in enumerate(segments):
+            if _DATE_RANGE_RE.search(s):
+                date_idx = i
+                break
+
+        frm, to = ("", "")
+        if date_idx >= 0:
+            frm, to = _split_date_range(segments[date_idx])
+
+        # Institution: nearest segment before the date that ends with a state
+        # code, else the segment immediately before the date.
+        inst_idx = -1
+        if date_idx > 0:
+            for i in range(date_idx - 1, -1, -1):
+                if _STATE_AT_END_RE.search(segments[i]):
+                    inst_idx = i
+                    break
+            if inst_idx == -1:
+                inst_idx = date_idx - 1
+
+        institution, location = "", ""
+        if inst_idx >= 0:
+            inst_full = segments[inst_idx]
+            m = re.match(r"^(.+),\s*([^,]+)$", inst_full)
+            if m and _STATE_AT_END_RE.search(m.group(2)):
+                institution = m.group(1).strip()
+                location    = m.group(2).strip()
+            else:
+                institution = inst_full
+
+        degree_end = inst_idx if inst_idx >= 0 else (
+            date_idx if date_idx >= 0 else len(segments)
+        )
+        degree_parts = list(segments[:degree_end])
+        if date_idx >= 0 and date_idx + 1 < len(segments):
+            degree_parts.extend(segments[date_idx + 1:])
+        degree = " | ".join(degree_parts).strip()
+
+        out.append({
+            "degree":      degree,
+            "institution": institution,
+            "location":    location,
+            "from":        frm,
+            "to":          to,
+        })
+    return out
+
+
+def parse_resume_snippets() -> dict:
+    if not RESUME_MD_PATH.exists():
+        return {
+            "experience": [],
+            "education":  [],
+            "error":      "profile/resume.md not found.",
+        }
+    try:
+        md = RESUME_MD_PATH.read_text(encoding="utf-8")
+    except Exception as e:
+        return {
+            "experience": [],
+            "education":  [],
+            "error":      f"Failed to read resume.md: {e}",
+        }
+    return {
+        "experience": parse_experience(md),
+        "education":  parse_education(md),
+    }
 
 
 _SCRIPTS_ON_PATH = False
@@ -676,6 +985,115 @@ STYLE = """
                     border-radius: 4px; cursor: pointer; font-family: inherit; }
   .btn-mini:hover { background: #e8e8e6; }
   .btn-mini[disabled] { opacity: 0.5; cursor: wait; }
+  .cl-list        { margin-top: 10px; }
+  .cl-row         { background: #fafaf8; border: 0.5px solid rgba(0,0,0,0.1);
+                    border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+  .cl-meta        { display: flex; align-items: center; gap: 10px;
+                    font-size: 13px; flex-wrap: wrap; }
+  .cl-meta .score { color: #2E75B6; font-weight: 500; min-width: 30px;
+                    font-variant-numeric: tabular-nums; }
+  .cl-meta .company { font-weight: 500; min-width: 130px; }
+  .cl-meta .title-cell { color: #555; flex: 1; min-width: 220px; }
+  .cl-location    { color: #888; font-size: 11px; }
+  .cl-file-line   { font-size: 11px; color: #1a5c2e; margin-top: 6px;
+                    font-family: ui-monospace, Consolas, monospace; }
+  .cl-file-name   { background: #e6f4ec; padding: 2px 6px; border-radius: 3px; }
+  .cl-breakdown   { font-size: 11px; color: #666; margin-top: 6px;
+                    font-variant-numeric: tabular-nums; }
+  .cl-breakdown strong { color: #1a1a18; font-weight: 500; }
+  .cl-notes       { margin-top: 4px; }
+  .cl-notes summary { font-size: 11px; color: #2E75B6; cursor: pointer;
+                      list-style: none; padding: 2px 0; user-select: none; }
+  .cl-notes summary::-webkit-details-marker { display: none; }
+  .cl-notes summary::before { content: '▸ '; color: #888; }
+  .cl-notes[open] summary::before { content: '▾ '; }
+  .cl-notes-body  { font-size: 12px; color: #444; line-height: 1.45;
+                    padding: 6px 10px; margin-top: 4px;
+                    background: #f8f8f6; border-radius: 6px;
+                    border-left: 2px solid #2E75B6; }
+  .cl-actions     { display: flex; align-items: center; gap: 6px;
+                    margin-top: 10px; flex-wrap: wrap; }
+  .cl-actions .apply-link { font-size: 11px; }
+  .snippet-entry  { background: #fafaf8; border: 0.5px solid rgba(0,0,0,0.1);
+                    border-radius: 8px; padding: 0; margin-bottom: 10px; }
+  .snippet-entry summary { padding: 12px 16px; cursor: pointer;
+                           display: flex; align-items: center; gap: 8px;
+                           list-style: none; font-size: 13px; flex-wrap: wrap; }
+  .snippet-entry summary::-webkit-details-marker { display: none; }
+  .snippet-entry summary::before { content: '▸'; color: #888; margin-right: 2px; }
+  .snippet-entry[open] summary::before { content: '▾'; }
+  .snippet-entry summary strong { font-weight: 500; color: #1a1a18; }
+  .snippet-entry summary .snippet-meta { color: #888; font-size: 11px; }
+  .snippet-fields { padding: 4px 16px 14px;
+                    border-top: 0.5px solid rgba(0,0,0,0.06); }
+  .snippet-field  { display: flex; align-items: flex-start; gap: 8px;
+                    margin-top: 10px; }
+  .snippet-field-col { flex: 1; min-width: 0; }
+  .snippet-field label { margin-top: 0; margin-bottom: 4px; }
+  .snippet-field input, .snippet-field textarea {
+    font-size: 12px; padding: 6px 8px;
+    font-family: ui-monospace, Consolas, monospace;
+    background: #fff;
+  }
+  .snippet-field textarea { min-height: 140px; }
+  .snippet-copy   { font-size: 11px; padding: 6px 12px; background: #f0f0ee;
+                    color: #333; border: 0.5px solid rgba(0,0,0,0.15);
+                    border-radius: 4px; cursor: pointer; font-family: inherit;
+                    margin-top: 18px; white-space: nowrap; flex-shrink: 0; }
+  .snippet-copy:hover { background: #e8e8e6; }
+  .snippet-copy.copied { background: #1a5c2e; color: #fff;
+                         border-color: #1a5c2e; }
+  /* Comp estimate panel (inline within cover-letter row) */
+  .comp-panel        { background: #f8fbfc; border: 0.5px solid rgba(46,117,182,0.25);
+                       border-radius: 8px; padding: 12px 14px; margin-top: 10px; }
+  .comp-summary-bar  { display: flex; align-items: center; gap: 8px;
+                       margin-bottom: 10px; flex-wrap: wrap; }
+  .comp-summary-label{ font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+                       color: #555; font-weight: 500; }
+  .comp-summary-value{ flex: 1; font-size: 12.5px; color: #1a1a18;
+                       font-variant-numeric: tabular-nums;
+                       background: #fff; padding: 4px 8px; border-radius: 4px;
+                       border: 0.5px solid rgba(0,0,0,0.08); min-width: 240px; }
+  .comp-table        { width: 100%; border-collapse: collapse; font-size: 12px;
+                       font-variant-numeric: tabular-nums; }
+  .comp-table td     { padding: 6px 8px; border-bottom: 0.5px solid rgba(0,0,0,0.06);
+                       vertical-align: middle; }
+  .comp-table tr:last-child td { border-bottom: none; }
+  .comp-label        { color: #555; font-weight: 500; min-width: 120px; }
+  .comp-range        { color: #666; }
+  .comp-target       { color: #1a5c2e; font-weight: 500; white-space: nowrap; }
+  .comp-badge        { display: inline-block; font-size: 9.5px; padding: 1px 6px;
+                       border-radius: 3px; text-transform: uppercase;
+                       letter-spacing: 0.04em; font-weight: 500;
+                       margin-right: 4px; vertical-align: middle; }
+  .comp-badge-expected   { background: #d4edda; color: #155724; }
+  .comp-badge-possible   { background: #fef3cd; color: #7a4f00; }
+  .comp-badge-statedinjd { background: #cfe2ff; color: #084298; }
+  .comp-badge-unusual    { background: #f0f0ee; color: #888; }
+  .comp-reason       { color: #888; font-size: 10.5px; font-style: italic; }
+  .comp-unusual      { margin-top: 8px; }
+  .comp-unusual summary { font-size: 11px; color: #2E75B6; cursor: pointer;
+                          list-style: none; padding: 2px 0; user-select: none; }
+  .comp-unusual summary::-webkit-details-marker { display: none; }
+  .comp-unusual summary::before { content: '▸ '; color: #888; }
+  .comp-unusual[open] summary::before { content: '▾ '; }
+  .comp-unusual-body { padding: 8px 10px; margin-top: 4px;
+                       background: #fafaf8; border-radius: 6px; }
+  .comp-unusual-item { padding: 3px 0; font-size: 11px; color: #555; }
+  .comp-unusual-item strong { color: #1a1a18; font-weight: 500; }
+  .comp-footer       { display: flex; align-items: flex-start; gap: 10px;
+                       margin-top: 10px; padding-top: 8px;
+                       border-top: 0.5px solid rgba(0,0,0,0.06);
+                       font-size: 11px; flex-wrap: wrap; }
+  .comp-conf         { font-weight: 500; padding: 2px 6px; border-radius: 3px;
+                       text-transform: uppercase; letter-spacing: 0.04em;
+                       font-size: 9.5px; white-space: nowrap; }
+  .comp-conf-high    { background: #d4edda; color: #155724; }
+  .comp-conf-med     { background: #fef3cd; color: #7a4f00; }
+  .comp-conf-low     { background: #f8d7da; color: #721c24; }
+  .comp-reasoning    { color: #666; flex: 1; min-width: 200px; line-height: 1.45; }
+  .comp-stale        { color: #888; font-size: 10px; margin-left: auto;
+                       white-space: nowrap; }
 </style>
 """
 
@@ -686,7 +1104,7 @@ def page(title: str, body: str) -> str:
 <title>{title} — next-role</title>{STYLE}</head>
 <body><div class="wrap">
 <h1>next-role</h1>
-<p class="sub">Job search pipeline · <a href="/today">Today</a> · <a href="/">Ingest</a> · <a href="/pipeline">Pipeline</a></p>
+<p class="sub">Job search pipeline · <a href="/today">Today</a> · <a href="/">Ingest</a> · <a href="/pipeline">Pipeline</a> · <a href="/resume">Snippets</a></p>
 {body}
 </div></body></html>"""
 
@@ -744,29 +1162,20 @@ def ingest_form(
 
 
 def pipeline_card() -> str:
-    jobs = load_pipeline()
-    active = [j for j in jobs if j.get("pipeline_status") != "archived"]
+    jobs     = load_pipeline()
+    co_by_id = load_companies_by_id()
+    active   = [j for j in jobs if j.get("pipeline_status") != "archived"]
     if not active:
         return '<div class="card"><h2>Pipeline</h2><p style="color:#888">No jobs yet.</p></div>'
 
     rows = ""
-    for job in sorted(active, key=lambda j: (
-        (j.get("stack_match_score") or 0) +
-        (j.get("seniority_score") or 0) +
-        (j.get("domain_fit_score") or 0) +
-        (j.get("hiring_velocity_score") or 0)
-    ), reverse=True)[:10]:
-        partial = (
-            (job.get("stack_match_score") or 0) +
-            (job.get("seniority_score") or 0) +
-            (job.get("domain_fit_score") or 0) +
-            (job.get("hiring_velocity_score") or 0)
-        )
-        apply_url = job.get("apply_url", "")
+    for job in sorted(active, key=lambda j: job_score(j, co_by_id), reverse=True)[:10]:
+        score      = job_score(job, co_by_id)
+        apply_url  = job.get("apply_url", "")
         apply_link = f'<a class="apply-link" href="{apply_url}" target="_blank">Apply ↗</a>' if apply_url else ""
         rows += f"""
         <div class="job-row">
-          <span class="score">{partial}</span>
+          <span class="score">{score}</span>
           <span class="company">{job['company_name'][:18]}</span>
           <span class="title-cell">{job['title'][:40]}</span>
           {apply_link}
@@ -782,42 +1191,545 @@ def pipeline_card() -> str:
 
 
 def pipeline_page() -> str:
-    jobs = load_pipeline()
-    active = [j for j in jobs if j.get("pipeline_status") != "archived"]
+    from html import escape as esc
 
+    jobs     = load_pipeline()
+    co_by_id = load_companies_by_id()
+    apps     = load_applications()
+    active   = [j for j in jobs if j.get("pipeline_status") != "archived"]
+
+    # ── Upcoming interviews (from application_tracker.json) ──────────────────
+    interview_apps = [
+        a for a in apps
+        if a.get("status") in ("recruiter_screen", "interview", "offer")
+    ]
+    interview_card = ""
+    if interview_apps:
+        interview_rows = ""
+        for app in interview_apps:
+            job_id  = esc(app.get("job_id", ""))
+            status  = app.get("status", "")
+            cls     = _STATUS_LABEL_CLASS.get(status, "pf-badge")
+            company = esc((app.get("company_name") or "?")[:30])
+            title   = esc((app.get("title") or "?")[:50])
+            applied = esc(app.get("date_applied", "") or "—")
+            interview_rows += f"""
+            <a href="/job/{job_id}" style="text-decoration:none;color:inherit">
+              <div class="job-row" style="cursor:pointer">
+                <span class="company">{company}</span>
+                <span class="title-cell">{title}</span>
+                <span class="app-status {cls}">{esc(status.replace('_',' '))}</span>
+                <span style="color:#888;font-size:11px">applied {applied}</span>
+              </div>
+            </a>"""
+        interview_card = f"""
+<div class="card" style="background:#f8fbfc;border-color:rgba(46,117,182,0.35)">
+  <h2>Upcoming interviews ({len(interview_apps)})
+    <span style="color:#888;font-weight:400;font-size:12px">— click a row for the prep page (JD, comp, cover letter)</span>
+  </h2>
+  <div class="pipeline">{interview_rows}</div>
+</div>
+"""
+
+    # ── All active jobs ──────────────────────────────────────────────────────
     rows = ""
-    for job in sorted(active, key=lambda j: (
-        (j.get("stack_match_score") or 0) +
-        (j.get("seniority_score") or 0) +
-        (j.get("domain_fit_score") or 0) +
-        (j.get("hiring_velocity_score") or 0)
-    ), reverse=True):
-        partial = (
-            (job.get("stack_match_score") or 0) +
-            (job.get("seniority_score") or 0) +
-            (job.get("domain_fit_score") or 0) +
-            (job.get("hiring_velocity_score") or 0)
-        )
-        apply_url = job.get("apply_url", "")
+    for job in sorted(active, key=lambda j: job_score(j, co_by_id), reverse=True):
+        score      = job_score(job, co_by_id)
+        job_id     = job.get("job_id", "")
+        apply_url  = job.get("apply_url", "")
         apply_link = f'<a class="apply-link" href="{apply_url}" target="_blank">Apply ↗</a>' if apply_url else ""
+        details_link = f'<a class="apply-link" href="/job/{job_id}">Details →</a>'
         cl = "✓" if job.get("cover_letter_generated") else ""
         rows += f"""
         <div class="job-row">
-          <span class="score">{partial}</span>
+          <span class="score">{score}</span>
           <span class="company">{job['company_name'][:20]}</span>
           <span class="title-cell">{job['title'][:45]}</span>
           <span style="color:#888;font-size:11px">{job.get('pipeline_status','')}</span>
           <span style="color:#1a5c2e;font-size:11px">{cl}</span>
           {apply_link}
+          {details_link}
         </div>"""
 
     return page("Pipeline", f"""
+{interview_card}
 <div class="card">
   <h2>All active jobs ({len(active)})</h2>
   <div class="pipeline">{rows or '<p style="color:#888">No jobs yet.</p>'}</div>
 </div>
 <p><a href="/">← Add job</a></p>
 """)
+
+
+_SNIPPETS_JS = """
+<script>
+(function () {
+  document.querySelectorAll('.snippet-copy').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var sel = btn.getAttribute('data-target');
+      var el  = sel ? document.getElementById(sel) : null;
+      if (!el) return;
+      var text = (el.value !== undefined) ? el.value : el.textContent;
+      var ok = function () {
+        var orig = btn.textContent;
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(function () {
+          btn.textContent = orig;
+          btn.classList.remove('copied');
+        }, 1200);
+      };
+      var fail = function () {
+        var orig = btn.textContent;
+        btn.textContent = 'Copy failed';
+        setTimeout(function () { btn.textContent = orig; }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(ok, function () {
+          // Fallback for non-secure contexts.
+          try { el.select(); document.execCommand('copy'); ok(); }
+          catch (e) { fail(); }
+        });
+      } else {
+        try { el.select(); document.execCommand('copy'); ok(); }
+        catch (e) { fail(); }
+      }
+    });
+  });
+})();
+</script>
+"""
+
+
+_SNIPPET_STRIP_RE = re.compile(r"[\[\]{}<>]")
+_SNIPPET_WS_RUN_RE = re.compile(r"[ \t]{2,}")
+
+
+def _sanitize_snippet(value: str) -> str:
+    """Strip characters that ATS forms commonly mangle or reject."""
+    if not value:
+        return value
+    s = value.replace("—", "-").replace("–", "-")
+    s = _SNIPPET_STRIP_RE.sub("", s)
+    lines = [_SNIPPET_WS_RUN_RE.sub(" ", ln).rstrip() for ln in s.split("\n")]
+    return "\n".join(lines)
+
+
+def _snippet_field(field_id: str, label: str, value: str, multiline: bool = False) -> str:
+    from html import escape as esc
+    value = _sanitize_snippet(value)
+    if multiline:
+        input_el = (
+            f'<textarea id="{field_id}" readonly '
+            f'rows="{max(3, min(value.count(chr(10)) + 2, 18))}">'
+            f'{esc(value)}</textarea>'
+        )
+    else:
+        input_el = (
+            f'<input id="{field_id}" type="text" '
+            f'value="{esc(value)}" readonly>'
+        )
+    return f"""
+    <div class="snippet-field">
+      <div class="snippet-field-col">
+        <label for="{field_id}">{esc(label)}</label>
+        {input_el}
+      </div>
+      <button class="snippet-copy" type="button" data-target="{field_id}">Copy</button>
+    </div>
+    """
+
+
+def render_experience_entry(idx: int, exp: dict) -> str:
+    from html import escape as esc
+    pfx      = f"exp{idx}"
+    title    = exp.get("title", "")
+    company  = exp.get("company", "")
+    location = exp.get("location", "")
+    frm      = exp.get("from", "")
+    to       = exp.get("to", "")
+    desc     = exp.get("description", "")
+
+    head = f'<strong>{esc(title)}</strong>'
+    if company:
+        head += f' <span class="snippet-meta">· {esc(company)}</span>'
+    if frm or to:
+        head += f' <span class="snippet-meta">({esc(frm)} – {esc(to)})</span>'
+
+    fields_html = "".join([
+        _snippet_field(f"{pfx}-title",    "Title",           title),
+        _snippet_field(f"{pfx}-company",  "Company",         company),
+        _snippet_field(f"{pfx}-location", "Location",        location),
+        _snippet_field(f"{pfx}-from",     "From (MM/YYYY)",  frm),
+        _snippet_field(f"{pfx}-to",       "To (MM/YYYY)",    to),
+        _snippet_field(f"{pfx}-desc",     "Job description", desc, multiline=True),
+    ])
+
+    return f"""
+    <details class="snippet-entry">
+      <summary>{head}</summary>
+      <div class="snippet-fields">{fields_html}</div>
+    </details>
+    """
+
+
+def render_education_entry(idx: int, edu: dict) -> str:
+    from html import escape as esc
+    pfx         = f"edu{idx}"
+    degree      = edu.get("degree", "")
+    institution = edu.get("institution", "")
+    location    = edu.get("location", "")
+    frm         = edu.get("from", "")
+    to          = edu.get("to", "")
+
+    head = f'<strong>{esc(degree[:80])}</strong>'
+    if institution:
+        head += f' <span class="snippet-meta">· {esc(institution)}</span>'
+    if frm or to:
+        head += f' <span class="snippet-meta">({esc(frm)} – {esc(to)})</span>'
+
+    fields_html = "".join([
+        _snippet_field(f"{pfx}-degree",      "Degree",          degree,
+                       multiline=len(degree) > 60),
+        _snippet_field(f"{pfx}-institution", "Institution",     institution),
+        _snippet_field(f"{pfx}-location",    "Location",        location),
+        _snippet_field(f"{pfx}-from",        "From (MM/YYYY)",  frm),
+        _snippet_field(f"{pfx}-to",          "To (MM/YYYY)",    to),
+    ])
+
+    return f"""
+    <details class="snippet-entry">
+      <summary>{head}</summary>
+      <div class="snippet-fields">{fields_html}</div>
+    </details>
+    """
+
+
+def render_links_card() -> str:
+    fields_html = "".join(
+        _snippet_field(f"link-{label.lower()}", label, url)
+        for label, url in PROFILE_LINKS
+    )
+    return f"""
+    <div class="card">
+      <h2>Links</h2>
+      <div class="snippet-fields">{fields_html}</div>
+    </div>
+    """
+
+
+_STATUS_LABEL_CLASS = {
+    "applied":          "app-status-applied",
+    "recruiter_screen": "app-status-recruiter_screen",
+    "interview":        "app-status-interview",
+    "ghosted":          "app-status-ghosted",
+    "rejected":         "pf-fail",
+    "withdrawn":        "app-status-ghosted",
+    "offer":            "pf-pass",
+    "active":           "pf-badge",
+    "cover_letter_ready": "pf-pass",
+}
+
+
+def job_detail_page(job_id: str) -> str:
+    """Per-job detail surface: pulls together JD, comp estimate, cover letter,
+    application timeline. The compensation card is pinned at the top when the
+    job is in an interview-stage status — that's when the user needs the
+    negotiation numbers most."""
+    from html import escape as esc
+
+    jobs = load_pipeline()
+    job  = next((j for j in jobs if j.get("job_id") == job_id), None)
+    if not job:
+        return page("Job not found", (
+            '<div class="card">'
+            '<p>No job with that id in the pipeline. '
+            'It may have been archived or never ingested.</p>'
+            '<p><a href="/pipeline">← Pipeline</a> · <a href="/today">Today</a></p>'
+            '</div>'
+        ))
+
+    co_by_id  = load_companies_by_id()
+    company   = co_by_id.get(job.get("company_id")) or {}
+    comp_rec  = load_comp_estimates_by_job().get(job_id)
+    apps      = load_applications()
+    app       = next((a for a in apps if a.get("job_id") == job_id), None)
+
+    if app:
+        status = app.get("status", "applied")
+    elif job.get("pipeline_status") == "archived":
+        status = "archived"
+    else:
+        status = job.get("pipeline_status", "active")
+    is_interview_stage = status in ("recruiter_screen", "interview", "offer")
+
+    company_name = esc(job.get("company_name", "?"))
+    title        = esc(job.get("title", "?"))
+    location     = esc(job.get("location", ""))
+    apply_url    = esc(job.get("apply_url", ""))
+    score        = job_score(job, co_by_id)
+
+    status_class = _STATUS_LABEL_CLASS.get(status, "pf-badge")
+    apply_link_html = (
+        f'<a class="apply-link" href="{apply_url}" target="_blank" rel="noopener">Open posting ↗</a>'
+        if apply_url else ''
+    )
+
+    header_card = f"""
+    <div class="card">
+      <div class="cl-meta" style="margin-bottom:8px">
+        <span class="score">{score}</span>
+        <span class="company" style="font-size:15px">{company_name}</span>
+        <span class="app-status {status_class}">{esc(status.replace('_',' '))}</span>
+      </div>
+      <div style="color:#555;font-size:14px;margin-bottom:4px">{title}</div>
+      <div style="color:#888;font-size:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <span>{location}</span>
+        {apply_link_html}
+      </div>
+    </div>
+    """
+
+    # ── Compensation card ────────────────────────────────────────────────────
+    if comp_rec:
+        comp_inner = render_comp_panel(comp_rec, job_id)
+        title_suffix = (
+            ' <span style="color:#888;font-weight:400;font-size:11px">'
+            '— review before recruiter call</span>'
+            if is_interview_stage else ''
+        )
+        comp_card = f"""
+    <div class="card">
+      <h2>Compensation{title_suffix}</h2>
+      {comp_inner}
+      <div style="margin-top:10px">
+        <form method="POST" action="/today/comp/estimate" class="cl-form" style="display:inline">
+          <input type="hidden" name="job_id" value="{esc(job_id)}">
+          <input type="hidden" name="return_to" value="/job/{esc(job_id)}">
+          <button class="btn-mini" type="submit">Re-estimate</button>
+        </form>
+      </div>
+    </div>
+        """
+    else:
+        comp_card = f"""
+    <div class="card">
+      <h2>Compensation</h2>
+      <p style="color:#888;font-size:12px">
+        No estimate generated yet. Run one to get a salary range and bonus structure
+        you can use in the application form and at negotiation time.
+      </p>
+      <form method="POST" action="/today/comp/estimate" class="cl-form" style="display:inline">
+        <input type="hidden" name="job_id" value="{esc(job_id)}">
+        <input type="hidden" name="return_to" value="/job/{esc(job_id)}">
+        <button class="btn btn-primary" type="submit">Estimate compensation</button>
+      </form>
+    </div>
+        """
+
+    # ── Application timeline card (only if applied) ──────────────────────────
+    timeline_card = ""
+    if app:
+        applied_date = esc(app.get("date_applied", "") or "—")
+        status_upd   = esc((app.get("status_updated", "") or "")[:10])
+        response     = esc((app.get("response_date", "") or "")[:10] or "—")
+        notes        = (app.get("notes") or "").strip()
+        notes_html   = (
+            f'<p style="color:#444;font-size:12px;line-height:1.5;margin-top:8px">{esc(notes)}</p>'
+            if notes else ''
+        )
+        timeline_card = f"""
+    <div class="card">
+      <h2>Application timeline</h2>
+      <table class="comp-table">
+        <tr><td class="comp-label">Applied</td><td>{applied_date}</td></tr>
+        <tr><td class="comp-label">Current status</td><td><span class="app-status {status_class}">{esc(status.replace('_',' '))}</span> · last updated {status_upd or '—'}</td></tr>
+        <tr><td class="comp-label">Response date</td><td>{response}</td></tr>
+      </table>
+      {notes_html}
+    </div>
+        """
+
+    # ── Cover letter card ────────────────────────────────────────────────────
+    cl_done    = bool(job.get("cover_letter_generated"))
+    cl_relpath = (job.get("cover_letter_path") or "")
+    cl_abspath = str(ROOT / cl_relpath) if cl_relpath else ""
+    cl_filename = cl_relpath.split("/")[-1] if cl_relpath else ""
+    if cl_done:
+        cl_card = f"""
+    <div class="card">
+      <h2>Cover letter</h2>
+      <div class="cl-file-line"><span class="cl-file-name">{esc(cl_filename)}</span></div>
+      <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+        <form method="POST" action="/today/cl/open" class="cl-form" style="display:inline">
+          <input type="hidden" name="job_id" value="{esc(job_id)}">
+          <input type="hidden" name="return_to" value="/job/{esc(job_id)}">
+          <button class="btn-mini" type="submit">Open</button>
+        </form>
+        <button class="btn-mini cl-copy-path" type="button" data-path="{esc(cl_abspath)}">Copy Path</button>
+        <form method="POST" action="/today/cl/generate" class="cl-form" style="display:inline">
+          <input type="hidden" name="job_id" value="{esc(job_id)}">
+          <input type="hidden" name="return_to" value="/job/{esc(job_id)}">
+          <button class="btn-mini" type="submit">Regenerate</button>
+        </form>
+      </div>
+    </div>
+        """
+    else:
+        cl_card = f"""
+    <div class="card">
+      <h2>Cover letter</h2>
+      <p style="color:#888;font-size:12px">Not generated yet.</p>
+      <form method="POST" action="/today/cl/generate" class="cl-form" style="display:inline">
+        <input type="hidden" name="job_id" value="{esc(job_id)}">
+        <input type="hidden" name="return_to" value="/job/{esc(job_id)}">
+        <button class="btn btn-primary" type="submit">Generate cover letter</button>
+      </form>
+    </div>
+        """
+
+    # ── JD card ──────────────────────────────────────────────────────────────
+    jd_text = (job.get("jd_text") or "").strip()
+    if jd_text:
+        jd_card = f"""
+    <div class="card">
+      <h2>Job description <span style="color:#888;font-weight:400;font-size:12px">— {len(jd_text):,} chars</span></h2>
+      <pre style="max-height:480px;background:#fafaf8;padding:14px;font-size:12px;line-height:1.55">{esc(jd_text)}</pre>
+    </div>
+        """
+    else:
+        jd_card = """
+    <div class="card">
+      <h2>Job description</h2>
+      <p style="color:#888;font-size:12px">No JD text on record for this job.</p>
+    </div>
+        """
+
+    # ── Score breakdown card ────────────────────────────────────────────────
+    from config import compute_freshness_bonus  # local import to match render_cl_row pattern
+    sponsor_co = co_by_id.get(job.get("company_id"), {}) or {}
+    NM = {k: c.native_max for k, c in COMPONENTS.items()}
+    rows = [
+        ("Stack",       job.get("stack_match_score") or 0,     NM["stack"]),
+        ("Seniority",   job.get("seniority_score") or 0,       NM["seniority"]),
+        ("Domain",      job.get("domain_fit_score") or 0,      NM["domain"]),
+        ("Velocity",    job.get("hiring_velocity_score") or 0, NM["velocity"]),
+        ("Freshness",   compute_freshness_bonus(job),          NM["freshness"]),
+        ("Sponsorship", sponsor_co.get("sponsorship_score") or 0, NM["sponsorship"]),
+        ("Remote fit",  sponsor_co.get("remote_fit") or 0,     NM["remote"]),
+    ]
+    score_rows_html = "".join(
+        f'<tr><td class="comp-label">{esc(label)}</td>'
+        f'<td><strong>{value}</strong> / {denom}</td></tr>'
+        for label, value, denom in rows
+    )
+    notes_text = (job.get("score_notes") or "").strip()
+    notes_block = (
+        f'<details class="cl-notes" style="margin-top:10px"><summary>rationale</summary>'
+        f'<div class="cl-notes-body">{esc(notes_text)}</div></details>'
+        if notes_text else ''
+    )
+    score_card = f"""
+    <div class="card">
+      <h2>Score breakdown <span style="color:#888;font-weight:400;font-size:12px">— composite {score} / {COMPOSITE_MAX}</span></h2>
+      <table class="comp-table">{score_rows_html}</table>
+      {notes_block}
+    </div>
+    """
+
+    # ── Assemble (comp card pinned high for interview-stage) ───────────────
+    nav = '<p style="margin-bottom:14px"><a href="/pipeline">← Pipeline</a> · <a href="/today">Today</a></p>'
+
+    if is_interview_stage:
+        body = nav + header_card + comp_card + timeline_card + jd_card + cl_card + score_card
+    else:
+        body = nav + header_card + timeline_card + cl_card + comp_card + jd_card + score_card
+
+    # Reuse the cover-letters JS so Copy buttons + form debounce work on this page.
+    body += """
+<script>
+(function () {
+  document.querySelectorAll('.cl-copy-path').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var p = btn.getAttribute('data-path') || '';
+      if (!p) return;
+      navigator.clipboard.writeText(p).then(function () {
+        var orig = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(function () { btn.textContent = orig; }, 1000);
+      });
+    });
+  });
+  document.querySelectorAll('.snippet-copy').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var sel = btn.getAttribute('data-target');
+      var el  = sel ? document.getElementById(sel) : null;
+      if (!el) return;
+      var text = (el.value !== undefined) ? el.value : el.textContent;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () {
+          var orig = btn.textContent;
+          btn.textContent = 'Copied!';
+          btn.classList.add('copied');
+          setTimeout(function () {
+            btn.textContent = orig;
+            btn.classList.remove('copied');
+          }, 1200);
+        });
+      }
+    });
+  });
+  document.querySelectorAll('.cl-form').forEach(function (f) {
+    f.addEventListener('submit', function () {
+      var btns = f.querySelectorAll('button[type=submit]');
+      setTimeout(function () { btns.forEach(function (b) { b.disabled = true; }); }, 0);
+      setTimeout(function () { btns.forEach(function (b) { b.disabled = false; }); }, 60000);
+    });
+  });
+})();
+</script>
+"""
+
+    return page(f"{job.get('company_name','?')} — {job.get('title','?')}", body)
+
+
+def resume_page() -> str:
+    from html import escape as esc
+    data  = parse_resume_snippets()
+    parts = []
+
+    err = data.get("error")
+    if err:
+        parts.append(f'<div class="notice notice-warn">{esc(err)}</div>')
+
+    parts.append('<div class="card">')
+    parts.append(
+        '<h2>Experience '
+        '<span style="color:#888;font-weight:400;font-size:12px">'
+        '— click a row to expand, then copy individual fields'
+        '</span></h2>'
+    )
+    if not data["experience"]:
+        parts.append('<p style="color:#888">No experience entries found in profile/resume.md.</p>')
+    else:
+        for i, exp in enumerate(data["experience"]):
+            parts.append(render_experience_entry(i, exp))
+    parts.append('</div>')
+
+    parts.append('<div class="card">')
+    parts.append('<h2>Education</h2>')
+    if not data["education"]:
+        parts.append('<p style="color:#888">No education entries found in profile/resume.md.</p>')
+    else:
+        for i, edu in enumerate(data["education"]):
+            parts.append(render_education_entry(i, edu))
+    parts.append('</div>')
+
+    parts.append(render_links_card())
+
+    parts.append(_SNIPPETS_JS)
+
+    return page("Resume snippets", "\n".join(parts))
 
 
 def render_section_body(sid: str, linkedin_view: str = "default") -> str:
@@ -827,6 +1739,8 @@ def render_section_body(sid: str, linkedin_view: str = "default") -> str:
         return render_crawl_body()
     if sid == "linkedin_ingest":
         return render_linkedin_body(linkedin_view)
+    if sid == "cover_letters":
+        return render_cover_letters_body()
     return '<p class="section-placeholder">Section content arrives in a later phase.</p>'
 
 
@@ -1172,6 +2086,443 @@ def render_app_row(app: dict) -> str:
     """
 
 
+def render_cover_letters_body() -> str:
+    """
+    Cover letters & apply section. Top CL_RENDER_CAP eligible rows by partial
+    composite score; each row has state-dependent buttons:
+
+      active (CL not yet generated):
+        [Generate CL]  [Open Apply]  [Mark Applied]  [Archive]
+
+      cover_letter_ready (CL generated):
+        [Open]  [Copy Path]  [Open Apply]  [Regenerate]  [Mark Applied]  [Archive]
+    """
+    from html import escape as esc
+
+    parts = []
+
+    flash = pop_cl_flash()
+    if flash:
+        cls = {
+            "ok":   "notice notice-ok",
+            "warn": "notice notice-warn",
+            "info": "notice notice-info",
+        }.get(flash["kind"], "notice notice-info")
+        parts.append(f'<div class="{cls}">{esc(flash["text"])}</div>')
+
+    jobs     = load_pipeline()
+    co_by_id = load_companies_by_id()
+    apps     = load_applications()
+
+    # Status-side eligibility (job has not yet been applied/archived).
+    raw_eligible = [
+        j for j in jobs
+        if j.get("pipeline_status") in ("active", "cover_letter_ready")
+    ]
+
+    # Company-side eligibility (≤ MAX_ACTIVE_APPS_PER_COMPANY in-flight at
+    # the company). The rule lives in config.company_block_reason — do not
+    # reimplement it here. See SCORING/COMPANY-FILTER SSOT banners in
+    # scripts/config.py.
+    eligible   = []
+    suppressed = 0
+    for j in raw_eligible:
+        if company_block_reason(j.get("company_id"), apps):
+            suppressed += 1
+            continue
+        eligible.append(j)
+    eligible.sort(key=lambda j: job_score(j, co_by_id), reverse=True)
+
+    if not eligible:
+        parts.append(
+            '<p class="section-placeholder">'
+            'No eligible jobs in the pipeline. Run the crawl or LinkedIn ingest to add some.'
+            '</p>'
+        )
+        return "\n".join(parts)
+
+    visible = eligible[:CL_RENDER_CAP]
+    overage = len(eligible) - len(visible)
+
+    n_ready = sum(1 for j in eligible if j.get("pipeline_status") == "cover_letter_ready")
+    n_new   = len(eligible) - n_ready
+    suppressed_html = (
+        f' · <span class="staged-count">{suppressed} suppressed '
+        f'(≥{MAX_ACTIVE_APPS_PER_COMPANY} active apps at company)</span>'
+        if suppressed else ''
+    )
+    parts.append(
+        '<div class="staged-summary">'
+        f'<span class="staged-count">{n_new} need CL · {n_ready} CL ready to apply · {len(eligible)} eligible</span>'
+        f'{suppressed_html}'
+        '</div>'
+    )
+
+    comp_by_job = load_comp_estimates_by_job()
+
+    parts.append('<div class="cl-list">')
+    for job in visible:
+        parts.append(render_cl_row(job, co_by_id, comp_by_job.get(job.get("job_id", ""))))
+    parts.append('</div>')
+
+    if overage > 0:
+        parts.append(
+            f'<p style="color:#888;font-size:11px;margin-top:8px">'
+            f'Showing top {len(visible)} of {len(eligible)} by composite score. '
+            f'Generate/apply/archive rows to surface the next batch.'
+            '</p>'
+        )
+
+    # Clipboard handler + form-submit debounce. Wrapped in an IIFE to avoid
+    # leaking globals; re-attaches every render since the page reloads on each form post.
+    parts.append("""
+<script>
+(function () {
+  document.querySelectorAll('.cl-copy-path').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var p = btn.getAttribute('data-path') || '';
+      if (!p) return;
+      navigator.clipboard.writeText(p).then(function () {
+        var orig = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(function () { btn.textContent = orig; }, 1000);
+      }, function () {
+        btn.textContent = 'Copy failed';
+        setTimeout(function () { btn.textContent = 'Copy Path'; }, 1500);
+      });
+    });
+  });
+  document.querySelectorAll('.snippet-copy').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var sel = btn.getAttribute('data-target');
+      var el  = sel ? document.getElementById(sel) : null;
+      if (!el) return;
+      var text = (el.value !== undefined) ? el.value : el.textContent;
+      var ok = function () {
+        var orig = btn.textContent;
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(function () {
+          btn.textContent = orig;
+          btn.classList.remove('copied');
+        }, 1200);
+      };
+      var fail = function () {
+        var orig = btn.textContent;
+        btn.textContent = 'Copy failed';
+        setTimeout(function () { btn.textContent = orig; }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(ok, fail);
+      } else { fail(); }
+    });
+  });
+  document.querySelectorAll('.cl-form').forEach(function (f) {
+    f.addEventListener('submit', function () {
+      var btns = f.querySelectorAll('button[type=submit]');
+      setTimeout(function () { btns.forEach(function (b) { b.disabled = true; }); }, 0);
+      // Generate CL / comp estimate take ~30s; leave buttons disabled longer.
+      setTimeout(function () { btns.forEach(function (b) { b.disabled = false; }); }, 60000);
+    });
+  });
+})();
+</script>
+""")
+
+    return "\n".join(parts)
+
+
+def _fmt_currency(value, currency: str) -> str:
+    if value is None:
+        return ""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return ""
+    return f"{currency} {n:,}"
+
+
+_COMP_BADGE_CLASS = {
+    "Expected":      "comp-badge-expected",
+    "Possible":      "comp-badge-possible",
+    "Stated-in-JD":  "comp-badge-statedinjd",
+    "Unusual":       "comp-badge-unusual",
+}
+
+
+def render_comp_panel(comp_record: dict, job_id: str) -> str:
+    """Render the inline compensation-estimate panel for one job row."""
+    from html import escape as esc
+
+    est       = comp_record.get("estimate", {}) or {}
+    currency  = est.get("currency", "USD")
+    base      = est.get("base", {}) or {}
+    confidence = est.get("confidence", "")
+    reasoning = est.get("reasoning", "") or ""
+
+    bonus_specs = [
+        # (key,             label,            target field name,  short suffix)
+        ("year_end_bonus", "Year-end bonus", "target_amount",    ""),
+        ("signon",         "Sign-on bonus",  "target",           ""),
+        ("relocation",     "Relocation",     "target",           ""),
+        ("equity",         "Equity / RSU",   "target_annual",    "/yr"),
+    ]
+
+    # ── Build the one-line summary (target-asks for visible items only) ──────
+    summary_bits = []
+    base_target = base.get("target")
+    if base_target:
+        summary_bits.append(f"{currency} {int(base_target):,} base")
+    for key, label, tgt_key, suffix in bonus_specs:
+        comp = est.get(key, {}) or {}
+        if comp.get("classification") == "Unusual":
+            continue
+        v = comp.get(tgt_key)
+        if v is None:
+            continue
+        short_label = label.lower().replace(" bonus", "").replace(" / rsu", "")
+        summary_bits.append(f"{currency} {int(v):,} {short_label}{suffix}")
+    summary_text = " + ".join(summary_bits) if summary_bits else "(estimate has no actionable targets)"
+
+    # ── Base salary row ──────────────────────────────────────────────────────
+    base_min = _fmt_currency(base.get("min"), currency)
+    base_max = _fmt_currency(base.get("max"), currency)
+    base_tgt_fmt = _fmt_currency(base_target, currency)
+
+    base_row_html = f"""
+      <tr>
+        <td class="comp-label">Base salary</td>
+        <td class="comp-range">{esc(base_min)} – {esc(base_max)}</td>
+        <td class="comp-target">TARGET: <span id="comp-base-{esc(job_id)}">{esc(base_tgt_fmt)}</span></td>
+        <td><button class="snippet-copy btn-mini" type="button" data-target="comp-base-{esc(job_id)}">Copy</button></td>
+      </tr>
+    """
+
+    # ── Bonus rows (Expected / Possible / Stated-in-JD visible) ─────────────
+    visible_rows = []
+    unusual_items = []
+    for key, label, tgt_key, suffix in bonus_specs:
+        comp = est.get(key, {}) or {}
+        cls  = comp.get("classification", "")
+        reason = (comp.get("reason") or "").strip()
+        if cls == "Unusual":
+            unusual_items.append((label, reason))
+            continue
+
+        badge_class = _COMP_BADGE_CLASS.get(cls, "")
+        badge_html  = f'<span class="comp-badge {badge_class}">{esc(cls)}</span>'
+
+        # Build value display
+        target_amount = comp.get(tgt_key)
+        if key == "year_end_bonus":
+            pct = comp.get("target_pct")
+            pct_str = f"~{pct}%" if pct else ""
+            amt_fmt = _fmt_currency(target_amount, currency)
+            value_display = " ".join(s for s in [pct_str, f"(~{amt_fmt})" if amt_fmt and pct_str else amt_fmt] if s)
+        else:
+            value_display = _fmt_currency(target_amount, currency)
+
+        copy_id = f"comp-{key}-{esc(job_id)}"
+        if target_amount is not None:
+            copy_btn = f'<button class="snippet-copy btn-mini" type="button" data-target="{copy_id}">Copy</button>'
+            target_cell = f'<span id="{copy_id}">{esc(_fmt_currency(target_amount, currency))}</span>'
+        else:
+            copy_btn = ""
+            target_cell = '<span style="color:#888">—</span>'
+
+        visible_rows.append(f"""
+      <tr>
+        <td class="comp-label">{esc(label)}</td>
+        <td class="comp-range">{badge_html}{esc(value_display) if value_display else ""}<br><span class="comp-reason">{esc(reason)}</span></td>
+        <td class="comp-target">{target_cell}</td>
+        <td>{copy_btn}</td>
+      </tr>
+        """)
+
+    # ── Unusual (collapsed by default; "Show all" toggle) ────────────────────
+    unusual_html = ""
+    if unusual_items:
+        items_html = "".join(
+            f'<div class="comp-unusual-item"><strong>{esc(label)}</strong> · '
+            f'<span class="comp-badge comp-badge-unusual">Unusual</span> '
+            f'<span class="comp-reason">{esc(reason)}</span></div>'
+            for label, reason in unusual_items
+        )
+        skipped_names = ", ".join(label for label, _ in unusual_items)
+        unusual_html = f"""
+      <details class="comp-unusual">
+        <summary>Not customary for this role — skipped: {esc(skipped_names.lower())} ({len(unusual_items)})</summary>
+        <div class="comp-unusual-body">{items_html}</div>
+      </details>
+        """
+
+    # ── Confidence + reasoning footer ────────────────────────────────────────
+    conf_class = {"HIGH": "comp-conf-high", "MED": "comp-conf-med",
+                  "LOW": "comp-conf-low"}.get(confidence, "")
+    generated_at = comp_record.get("generated_at", "")
+    stale_marker = (
+        f'<span class="comp-stale">generated {esc(generated_at[:10])}</span>'
+        if generated_at else ""
+    )
+    footer_html = f"""
+      <div class="comp-footer">
+        <span class="comp-conf {conf_class}">Confidence: {esc(confidence)}</span>
+        <span class="comp-reasoning">{esc(reasoning)}</span>
+        {stale_marker}
+      </div>
+    """
+
+    summary_id = f"comp-summary-{esc(job_id)}"
+    return f"""
+    <div class="comp-panel">
+      <div class="comp-summary-bar">
+        <span class="comp-summary-label">Target ask</span>
+        <span class="comp-summary-value" id="{summary_id}">{esc(summary_text)}</span>
+        <button class="snippet-copy btn-mini" type="button" data-target="{summary_id}">Copy</button>
+      </div>
+      <table class="comp-table">
+        {base_row_html}
+        {''.join(visible_rows)}
+      </table>
+      {unusual_html}
+      {footer_html}
+    </div>
+    """
+
+
+def render_cl_row(job: dict, co_by_id: dict | None = None,
+                  comp_record: dict | None = None) -> str:
+    from html import escape as esc
+
+    job_id    = esc(job.get("job_id", ""))
+    company   = esc(job.get("company_name", "?"))[:30]
+    title     = esc(job.get("title", "?"))[:60]
+    location  = esc(job.get("location", ""))[:35]
+    apply_url = esc(job.get("apply_url", ""))
+    score     = job_score(job, co_by_id or {})
+
+    cl_done    = bool(job.get("cover_letter_generated"))
+    cl_version = job.get("cover_letter_version", 0)
+    cl_relpath = job.get("cover_letter_path", "") or ""
+    cl_abspath = str(ROOT / cl_relpath) if cl_relpath else ""
+    cl_filename = cl_relpath.split("/")[-1] if cl_relpath else ""
+
+    state_pill = (
+        f'<span class="pf-badge pf-pass">CL v{cl_version} ready</span>'
+        if cl_done
+        else '<span class="pf-badge" style="background:#fef3cd;color:#7a4f00">needs CL</span>'
+    )
+
+    apply_link = (
+        f'<a class="apply-link" href="{apply_url}" target="_blank" rel="noopener">Open Apply ↗</a>'
+        if apply_url else ''
+    )
+    detail_link = f'<a class="apply-link" href="/job/{job_id}" style="margin-left:6px">Details →</a>'
+
+    # ── Score breakdown ──────────────────────────────────────────────────────
+    # Denominators read from the SSOT (scripts/config.py:COMPONENTS) so they
+    # stay correct if weights ever change. Shows the native (raw) stored
+    # value for each component; the row's headline score is the weighted
+    # composite via composite_score().
+    from config import compute_freshness_bonus  # local import to avoid cycle at top
+    sponsor_co = (co_by_id or {}).get(job.get("company_id"), {}) if co_by_id else {}
+    stack_s     = job.get("stack_match_score")        or 0
+    seniority   = job.get("seniority_score")          or 0
+    domain      = job.get("domain_fit_score")         or 0
+    velocity    = job.get("hiring_velocity_score")    or 0
+    freshness   = compute_freshness_bonus(job)
+    sponsorship = sponsor_co.get("sponsorship_score") or 0
+    remote      = sponsor_co.get("remote_fit")        or 0
+    staleness   = esc(job.get("staleness_status", "") or "")
+    notes       = (job.get("score_notes") or "").strip()
+
+    NM = {k: c.native_max for k, c in COMPONENTS.items()}
+    breakdown_line = (
+        '<div class="cl-breakdown">'
+        f'<span>Stack <strong>{stack_s}</strong>/{NM["stack"]}</span> · '
+        f'<span>Sen <strong>{seniority}</strong>/{NM["seniority"]}</span> · '
+        f'<span>Dom <strong>{domain}</strong>/{NM["domain"]}</span> · '
+        f'<span>Vel <strong>{velocity}</strong>/{NM["velocity"]}</span> · '
+        f'<span>Fresh <strong>{freshness}</strong>/{NM["freshness"]}</span> · '
+        f'<span>Spons <strong>{sponsorship}</strong>/{NM["sponsorship"]}</span> · '
+        f'<span>Rem <strong>{remote}</strong>/{NM["remote"]}</span>'
+        f'{f" · <span>staleness: {staleness}</span>" if staleness else ""}'
+        '</div>'
+    )
+
+    notes_block = ""
+    if notes:
+        notes_block = (
+            '<details class="cl-notes">'
+            '<summary>rationale</summary>'
+            f'<div class="cl-notes-body">{esc(notes)}</div>'
+            '</details>'
+        )
+
+    # Generate vs Regenerate button text changes; same endpoint.
+    gen_label = "Regenerate" if cl_done else "Generate CL"
+    gen_class = "btn-mini" if cl_done else "btn btn-primary"
+    gen_style = "margin-top:0" if cl_done else "margin-top:0"
+
+    cl_file_block = ""
+    open_copy = ""
+    if cl_done:
+        cl_file_block = (
+            f'<div class="cl-file-line">'
+            f'<span class="cl-file-name">{esc(cl_filename)}</span>'
+            f'</div>'
+        )
+        open_copy = (
+            f'<form method="POST" action="/today/cl/open" class="cl-form" style="display:inline">'
+            f'<input type="hidden" name="job_id" value="{job_id}">'
+            f'<button class="btn-mini" type="submit">Open</button>'
+            f'</form>'
+            f'<button class="btn-mini cl-copy-path" type="button" '
+            f'data-path="{esc(cl_abspath)}">Copy Path</button>'
+        )
+
+    comp_done   = comp_record is not None
+    comp_label  = "Re-estimate Comp" if comp_done else "Estimate Comp"
+    comp_panel  = render_comp_panel(comp_record, job_id) if comp_done else ""
+
+    return f"""
+    <div class="cl-row" id="cl-{job_id}">
+      <div class="cl-meta">
+        <span class="score">{score}</span>
+        <span class="company">{company}</span>
+        <span class="title-cell">{title}</span>
+        <span class="cl-location">{location}</span>
+        {state_pill}
+      </div>
+      {breakdown_line}
+      {notes_block}
+      {cl_file_block}
+      {comp_panel}
+      <div class="cl-actions">
+        <form method="POST" action="/today/cl/generate" class="cl-form" style="display:inline">
+          <input type="hidden" name="job_id" value="{job_id}">
+          <button class="{gen_class}" type="submit" style="{gen_style}">{gen_label}</button>
+        </form>
+        <form method="POST" action="/today/comp/estimate" class="cl-form" style="display:inline">
+          <input type="hidden" name="job_id" value="{job_id}">
+          <button class="btn-mini" type="submit">{comp_label}</button>
+        </form>
+        {open_copy}
+        {apply_link}
+        {detail_link}
+        <form method="POST" action="/today/apply/log" class="cl-form" style="display:inline;margin-left:auto">
+          <input type="hidden" name="job_id" value="{job_id}">
+          <button class="btn-mini" type="submit">Mark Applied</button>
+        </form>
+        <form method="POST" action="/today/cl/archive" class="cl-form" style="display:inline">
+          <input type="hidden" name="job_id" value="{job_id}">
+          <button class="btn-mini" type="submit">Archive</button>
+        </form>
+      </div>
+    </div>
+    """
+
+
 def daily_checklist_page(open_section: str | None = None, linkedin_view: str = "default") -> str:
     apply_ghosted_check()
     today_iso = date.today().isoformat()
@@ -1263,6 +2614,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(crawl_status_payload())
         elif path == "/pipeline":
             self.send_html(pipeline_page())
+        elif path == "/resume":
+            self.send_html(resume_page())
+        elif path.startswith("/job/"):
+            job_id = path[len("/job/"):].strip("/")
+            self.send_html(job_detail_page(job_id))
         else:
             self.send_html("<h1>Not found</h1>", 404)
 
@@ -1275,6 +2631,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(303)
         self.send_header("Location", location)
         self.end_headers()
+
+    def redirect_or_today(self, params: dict, open_section: str | None = None,
+                          fragment: str | None = None):
+        """Redirect to params['return_to'] if it's a safe same-origin path, else /today."""
+        return_to = (params.get("return_to", [""])[0] or "").strip()
+        if return_to.startswith("/") and not return_to.startswith("//"):
+            self.send_response(303)
+            self.send_header("Location", return_to)
+            self.end_headers()
+            return
+        self.redirect_today(open_section, fragment)
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -1393,6 +2760,170 @@ class Handler(BaseHTTPRequestHandler):
                         f"Discarded: {target.get('company','?')} — {target.get('title','?')}",
                     )
             self.redirect_today("linkedin_ingest")
+            return
+
+        if path == "/today/cl/generate":
+            length = int(self.headers.get("Content-Length", 0))
+            raw    = self.rfile.read(length).decode("utf-8")
+            params = parse_qs(raw)
+            job_id = params.get("job_id", [""])[0].strip()
+
+            if not job_id:
+                set_cl_flash("warn", "Generate CL failed — missing job_id.")
+            else:
+                cmd = ["node", str(SCRIPTS / "generate_cl.js"), "--job-id", job_id]
+                try:
+                    result = subprocess.run(
+                        cmd, cwd=ROOT,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        encoding="utf-8", errors="replace",
+                        timeout=120,
+                    )
+                    if result.returncode == 0:
+                        # Re-load to find the new filename for the flash.
+                        jobs = load_pipeline()
+                        job  = next((j for j in jobs if j.get("job_id") == job_id), None)
+                        fname = (job or {}).get("cover_letter_path", "").split("/")[-1]
+                        set_cl_flash(
+                            "ok",
+                            f"Cover letter generated: {fname}" if fname else "Cover letter generated.",
+                        )
+                    else:
+                        tail = "; ".join([l for l in (result.stdout or "").splitlines() if l.strip()][-3:])
+                        set_cl_flash("warn", f"Generate CL failed — {tail or 'see server log'}")
+                except subprocess.TimeoutExpired:
+                    set_cl_flash("warn", "Generate CL timed out after 120s.")
+                except Exception as e:
+                    set_cl_flash("warn", f"Failed to launch generate_cl.js: {e}")
+
+            self.redirect_or_today(params, "cover_letters", fragment=f"cl-{job_id}")
+            return
+
+        if path == "/today/comp/estimate":
+            length = int(self.headers.get("Content-Length", 0))
+            raw    = self.rfile.read(length).decode("utf-8")
+            params = parse_qs(raw)
+            job_id = params.get("job_id", [""])[0].strip()
+
+            if not job_id:
+                set_cl_flash("warn", "Comp estimate failed — missing job_id.")
+            else:
+                cmd = [sys.executable, str(SCRIPTS / "comp_estimate.py"), "--job-id", job_id]
+                try:
+                    result = subprocess.run(
+                        cmd, cwd=ROOT,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        encoding="utf-8", errors="replace",
+                        timeout=120,
+                    )
+                    if result.returncode == 0:
+                        ests = load_comp_estimates_by_job()
+                        rec  = ests.get(job_id)
+                        if rec:
+                            est = rec.get("estimate", {})
+                            cur = est.get("currency", "")
+                            tgt = (est.get("base") or {}).get("target")
+                            conf = est.get("confidence", "")
+                            if tgt:
+                                set_cl_flash("ok",
+                                    f"Comp estimate: {cur} {tgt:,} target ({conf} confidence).")
+                            else:
+                                set_cl_flash("ok", "Comp estimate generated.")
+                        else:
+                            set_cl_flash("ok", "Comp estimate generated.")
+                    else:
+                        tail = "; ".join([l for l in (result.stdout or "").splitlines() if l.strip()][-3:])
+                        set_cl_flash("warn", f"Comp estimate failed — {tail or 'see server log'}")
+                except subprocess.TimeoutExpired:
+                    set_cl_flash("warn", "Comp estimate timed out after 120s.")
+                except Exception as e:
+                    set_cl_flash("warn", f"Failed to launch comp_estimate.py: {e}")
+
+            self.redirect_or_today(params, "cover_letters", fragment=f"cl-{job_id}")
+            return
+
+        if path == "/today/cl/open":
+            length = int(self.headers.get("Content-Length", 0))
+            raw    = self.rfile.read(length).decode("utf-8")
+            params = parse_qs(raw)
+            job_id = params.get("job_id", [""])[0].strip()
+
+            jobs = load_pipeline()
+            job  = next((j for j in jobs if j.get("job_id") == job_id), None)
+            rel  = (job or {}).get("cover_letter_path", "")
+            if not job:
+                set_cl_flash("warn", "Open failed — job not found.")
+            elif not rel:
+                set_cl_flash("warn", "Open failed — no cover_letter_path on this job. Generate first.")
+            else:
+                file_path = ROOT / rel
+                if not file_path.exists():
+                    set_cl_flash("warn", f"Open failed — file missing: {file_path}")
+                else:
+                    try:
+                        os.startfile(str(file_path))   # Windows; launches default app
+                    except Exception as e:
+                        set_cl_flash("warn", f"Open failed — {e}")
+
+            self.redirect_or_today(params, "cover_letters", fragment=f"cl-{job_id}")
+            return
+
+        if path == "/today/cl/archive":
+            length = int(self.headers.get("Content-Length", 0))
+            raw    = self.rfile.read(length).decode("utf-8")
+            params = parse_qs(raw)
+            job_id = params.get("job_id", [""])[0].strip()
+
+            if job_id:
+                p = DATA_DIR / "job_pipeline.json"
+                if p.exists():
+                    jobs = json.loads(p.read_text(encoding="utf-8"))
+                    target = next((j for j in jobs if j.get("job_id") == job_id), None)
+                    if target:
+                        target["pipeline_status"] = "archived"
+                        p.write_text(
+                            json.dumps(jobs, indent=2, ensure_ascii=False),
+                            encoding="utf-8",
+                        )
+                        set_cl_flash(
+                            "info",
+                            f"Archived: {target.get('company_name','?')} — {target.get('title','?')}",
+                        )
+                    else:
+                        set_cl_flash("warn", "Archive failed — job not found.")
+
+            self.redirect_today("cover_letters")
+            return
+
+        if path == "/today/apply/log":
+            length = int(self.headers.get("Content-Length", 0))
+            raw    = self.rfile.read(length).decode("utf-8")
+            params = parse_qs(raw)
+            job_id = params.get("job_id", [""])[0].strip()
+
+            if not job_id:
+                set_cl_flash("warn", "Mark Applied failed — missing job_id.")
+            else:
+                cmd = [
+                    sys.executable, str(SCRIPTS / "update_status.py"), "log",
+                    "--job-id", job_id, "--method", "direct",
+                ]
+                try:
+                    result = subprocess.run(
+                        cmd, cwd=ROOT,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        encoding="utf-8", errors="replace",
+                        timeout=60,
+                    )
+                    if result.returncode == 0:
+                        set_cl_flash("ok", "Application logged. Row moves to Status updates section.")
+                    else:
+                        tail = "; ".join([l for l in (result.stdout or "").splitlines() if l.strip()][-3:])
+                        set_cl_flash("warn", f"Mark Applied failed — {tail or 'see server log'}")
+                except Exception as e:
+                    set_cl_flash("warn", f"Failed to launch update_status.py: {e}")
+
+            self.redirect_today("cover_letters")
             return
 
         if path == "/today/toggle":

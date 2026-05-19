@@ -36,7 +36,11 @@ MIN_JD_LENGTH = 200
 
 def pre_filter_relaxed(title: str, location: str, jd_text: str, cfg: dict) -> tuple[bool, str]:
     """
-    Title + location + (optional) stack-score filter.
+    Title + location + (optional) stack-score filter for LinkedIn-staged rows.
+
+    INTENTIONALLY pre-LLM, same rationale as scripts/crawl.py:pre_filter — see
+    that file's banner. Do NOT call composite_score from here; signals come
+    from profile/stack_keywords.yaml only.
 
     If jd_text is shorter than MIN_JD_LENGTH, the stack-score check is skipped
     so rows without a JD body don't all get rejected for missing stack keywords

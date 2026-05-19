@@ -234,8 +234,6 @@ def build_registry_record(research: dict, existing_id: str | None = None) -> dic
         "ethics_hard_exclude": research.get("ethics_hard_exclude", False),
         "ethics_flags":        research.get("ethics_flags", []),
         "ethics_notes":        research.get("ethics_notes", ""),
-        "cooldown_until":      None,
-        "last_applied":        None,
         "confirmed_clean":     False,
         "record_created":      now,
         "record_updated":      now,
@@ -256,8 +254,6 @@ def upsert_company(record: dict) -> tuple[str, bool]:
     if existing_idx is not None:
         record["company_id"]      = companies[existing_idx]["company_id"]
         record["record_created"]  = companies[existing_idx]["record_created"]
-        record["cooldown_until"]  = companies[existing_idx].get("cooldown_until")
-        record["last_applied"]    = companies[existing_idx].get("last_applied")
         record["confirmed_clean"] = companies[existing_idx].get("confirmed_clean", False)
         companies[existing_idx]   = record
         save_json(COMPANY_REGISTRY_PATH, companies)
