@@ -483,6 +483,102 @@ def detect_no_sponsorship(jd_text: str) -> str | None:
     return None
 
 
+# ─── Ethics auto-exclude rules (deterministic post-process) ──────────────────
+#
+# These rules force ``ethics_hard_exclude=True`` on a company regardless of
+# the LLM's overall judgment. The principle: Claude returns categorized,
+# described ethics flags; we (Python) own the policy decision of which
+# categories + descriptions are absolute disqualifiers.
+#
+# Per the project's "deterministic rules in code" principle: when an LLM
+# must apply a hard policy alongside its judgment calls, the policy lives
+# in a post-process, not the prompt. Rules added here also apply
+# retroactively via a sweep over existing company records.
+#
+# Single entry point: ``company_auto_exclude_reason(company)``. The
+# per-rule predicates beneath it are also exposed so the surfaces / tests
+# can introspect *which* rule fired.
+
+# --- Rule 1: employee-targeted surveillance ----------------------------------
+# The "surveillance" Haiku category is broad — covers customer data, KYC,
+# seller monitoring, ad targeting, AND employee surveillance. Only the
+# employee-targeting variant is the policy disqualifier here.
+_EMPLOYEE_SURVEILLANCE_RE: _re.Pattern = _re.compile(
+    r"\b(?:employee|worker|workforce)\b", _re.I
+)
+
+# --- Rule 2: mass surveillance ------------------------------------------------
+# Confirmed `surveillance` category flag whose description names law
+# enforcement, intelligence agencies, facial recognition, predictive
+# policing, spyware sales, or similar — the Palantir / Clearview / NSO
+# / ShotSpotter category.
+_MASS_SURVEILLANCE_DESC_RE: _re.Pattern = _re.compile(
+    r"\bmass\s+surveillance\b"
+    r"|\bfacial\s+recognition\b"
+    r"|\bpredictive\s+policing\b"
+    r"|\blaw\s+enforcement\b"
+    r"|\bintelligence\s+agen(?:cy|cies)\b"
+    r"|\bborder\s+(?:surveillance|patrol|enforcement)\b"
+    r"|\bspyware\b"
+    r"|\bgovernment\s+surveillance\b",
+    _re.I,
+)
+
+# --- Rule 3: direct defense contractor ---------------------------------------
+# Industry-field match. Haiku reliably populates ``industry``; defense
+# contractors get labels like "Aerospace & Defense", "Defense Technology",
+# "Military Systems". Intentionally excludes ambiguous terms like
+# "aerospace" alone (would match SpaceX / commercial aviation) and
+# "intelligence" alone (would false-positive on Sales-Intelligence SaaS).
+_DEFENSE_INDUSTRY_RE: _re.Pattern = _re.compile(
+    r"\b(?:defense|defence|military|weapons?|munitions?|armaments?)\b",
+    _re.I,
+)
+
+
+def is_employee_surveillance_flag(flag: dict) -> bool:
+    """True iff ``flag`` is a confirmed employee-targeted surveillance flag."""
+    if not flag or flag.get("status") != "confirmed":
+        return False
+    if flag.get("category") != "surveillance":
+        return False
+    return bool(_EMPLOYEE_SURVEILLANCE_RE.search(flag.get("description") or ""))
+
+
+def is_mass_surveillance_flag(flag: dict) -> bool:
+    """True iff ``flag`` is a confirmed mass-surveillance flag (law-enforcement,
+    intelligence, spyware, facial-recognition, etc.)."""
+    if not flag or flag.get("status") != "confirmed":
+        return False
+    if flag.get("category") != "surveillance":
+        return False
+    return bool(_MASS_SURVEILLANCE_DESC_RE.search(flag.get("description") or ""))
+
+
+def is_defense_contractor(company: dict) -> bool:
+    """True iff the company's ``industry`` string names defense/military/weapons."""
+    return bool(_DEFENSE_INDUSTRY_RE.search((company or {}).get("industry") or ""))
+
+
+def company_auto_exclude_reason(company: dict) -> str | None:
+    """
+    Apply the deterministic ethics_hard_exclude rules to a researched
+    company record. Returns a short reason string for the first rule that
+    fires, or None if no rule applies. Order is fixed (industry first,
+    then per-flag rules) so the reason is reproducible.
+    """
+    if not company:
+        return None
+    if is_defense_contractor(company):
+        return "defense contractor (industry match)"
+    for f in company.get("ethics_flags") or []:
+        if is_employee_surveillance_flag(f):
+            return "confirmed employee surveillance"
+        if is_mass_surveillance_flag(f):
+            return "confirmed mass surveillance"
+    return None
+
+
 def composite_score(job: dict, company: dict | None) -> int:
     """
     Full composite score — used for apply-time ranking and cover-letter

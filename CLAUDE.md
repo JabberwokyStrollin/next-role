@@ -180,6 +180,18 @@ the pipeline. Neither is a throttle — both are absolute.
 | `ethics_hard_exclude` on the company record | per-company | checked in `scripts/ingest.py:get_or_stub_company` |
 | JD text explicitly refuses sponsorship | per-JD | `scripts/config.py:detect_no_sponsorship` (+ `_NO_SPONSORSHIP_PATTERNS`); called in `scripts/ingest.py:ingest_job` before scoring |
 
+`ethics_hard_exclude` is set by company research. The Haiku model returns
+its own judgment on the field; on top of that, deterministic rules can
+force the flag to `True` regardless of what the LLM said. All rules
+funnel through one SSOT entry point:
+
+| Concern | Canonical location |
+|---|---|
+| Unified auto-exclude entry point | `scripts/config.py:company_auto_exclude_reason` — returns a reason string for the first rule that fires; applied in `scripts/research_company.py:research_company` after Tier-2 merge |
+| Rule: direct defense contractor | `scripts/config.py:is_defense_contractor` (+ `_DEFENSE_INDUSTRY_RE`) — industry-field match |
+| Rule: confirmed employee-targeted surveillance | `scripts/config.py:is_employee_surveillance_flag` (+ `_EMPLOYEE_SURVEILLANCE_RE`) — per-flag, description match |
+| Rule: confirmed mass surveillance | `scripts/config.py:is_mass_surveillance_flag` (+ `_MASS_SURVEILLANCE_DESC_RE`) — per-flag, description match |
+
 ### Rules
 
 1. **One detector for "JD refuses sponsorship".** The regex set lives only in
@@ -195,6 +207,22 @@ the pipeline. Neither is a throttle — both are absolute.
    one-off passes over already-ingested rows (e.g. when the regex set
    expands). Default is dry-run; pass `--apply` to archive. New ingests
    are caught automatically by `ingest_job`, so don't schedule this.
+
+4. **All auto-exclude policy lives in `config.py`.** Add new rules as
+   `is_<X>` predicates next to the existing three, then wire them into
+   `company_auto_exclude_reason`. Don't reach around them with ad-hoc
+   keyword checks elsewhere, and don't put rules in the Haiku prompt —
+   per the "deterministic rules in code" principle, hard policy belongs
+   in Python. Claude returns categorized, described flags; we own the
+   judgment of which combinations force exclusion.
+
+5. **Adding a rule = retroactive sweep too.** When you add a new
+   `is_<X>` predicate or broaden an existing one, run the predicate over
+   the existing `company_registry.json` and flip + archive any matches.
+   `ethics_hard_exclude` blocks future ingest, not existing pipeline
+   rows — `company_block_reason` does not consult it at apply time. So
+   the retroactive step must also set `pipeline_status="archived"` and
+   `archived_reason` on the affected company's active jobs.
 
 ## Other project notes
 

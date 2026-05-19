@@ -27,6 +27,7 @@ from config import (
     CLAUDE_MODEL,
     CLAUDE_MODEL_FAST,
     COMPANY_REGISTRY_PATH,
+    company_auto_exclude_reason,
     load_json,
     save_json,
     now_utc,
@@ -204,6 +205,16 @@ def research_company(name: str, model: str = CLAUDE_MODEL_FAST) -> dict:
     existing_flags = result.get("ethics_flags", [])
     new_flags      = tier2.get("new_ethics_flags", [])
     result["ethics_flags"] = existing_flags + new_flags
+
+    # Deterministic post-process — defense contractor / employee surveillance
+    # / mass surveillance always trigger hard exclude regardless of the LLM's
+    # overall judgment. Rule SSOT: config.company_auto_exclude_reason. See
+    # the "Ingest-time hard excludes" auto-trigger table in CLAUDE.md.
+    if not result.get("ethics_hard_exclude"):
+        auto_reason = company_auto_exclude_reason(result)
+        if auto_reason:
+            result["ethics_hard_exclude"] = True
+            print(f"  Auto-exclude: {auto_reason}", flush=True)
 
     # Clamp scores
     result["sponsorship_score"] = max(0, min(15, int(result.get("sponsorship_score", 7))))

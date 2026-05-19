@@ -101,6 +101,9 @@ file.
 | `IN_FLIGHT_STATUSES` | `frozenset[str]` | What "in-flight" means for the throttle: `applied`, `recruiter_screen`, `interview`. `ghosted` is intentionally excluded so dead apps free the slot. |
 | `_SENIORITY_BUCKETS` | `list[(str, Pattern, int)]` | Ordered (bucket, regex, cap) — first match wins. Used by `title_seniority_cap`. |
 | `_NO_SPONSORSHIP_PATTERNS` | `list[Pattern]` | Regexes that detect explicit no-sponsorship language in JD text. Single source consumed via `detect_no_sponsorship`. |
+| `_EMPLOYEE_SURVEILLANCE_RE` | `Pattern` | Word-boundary regex (`employee\|worker\|workforce`) matched against an ethics-flag description. Consumed via `is_employee_surveillance_flag`. |
+| `_MASS_SURVEILLANCE_DESC_RE` | `Pattern` | Alternation regex for mass-surveillance indicators (`mass surveillance`, `facial recognition`, `law enforcement`, `intelligence agencies`, `predictive policing`, `border surveillance`, `spyware`, `government surveillance`). Consumed via `is_mass_surveillance_flag`. |
+| `_DEFENSE_INDUSTRY_RE` | `Pattern` | Word-boundary regex (`defense\|defence\|military\|weapons\|munitions\|armaments`) matched against the company's `industry` field. Consumed via `is_defense_contractor`. |
 
 ### Side effects at import time
 
@@ -229,6 +232,40 @@ snippet around the first match (for logging), or `None` if no refusal is
 found. Patterns deliberately err on false negatives — each requires an
 explicit negation token near the word "sponsor". Caller (`ingest.py`) owns
 the discard decision.
+
+#### `is_employee_surveillance_flag(flag: dict) -> bool`
+True iff an ethics flag (as produced by `research_company`) is a confirmed
+employee-targeted surveillance flag. Trigger: `status == "confirmed"` AND
+`category == "surveillance"` AND the description matches
+`_EMPLOYEE_SURVEILLANCE_RE` (`\bemployee|worker|workforce\b`). The narrow
+description filter prevents customer-data/regulatory/seller surveillance
+descriptions (e.g. RBC's KYC obligations, eBay's seller-fraud monitoring)
+from triggering exclusion — only employee-targeting language does.
+
+#### `is_mass_surveillance_flag(flag: dict) -> bool`
+True iff an ethics flag is confirmed mass surveillance — `status ==
+"confirmed"` AND `category == "surveillance"` AND the description matches
+any term in `_MASS_SURVEILLANCE_DESC_RE` (law enforcement, intelligence
+agencies, facial recognition, predictive policing, border surveillance,
+spyware, government surveillance). Targets the Palantir / Clearview / NSO
+/ ShotSpotter class of company.
+
+#### `is_defense_contractor(company: dict) -> bool`
+True iff the company's `industry` field matches `_DEFENSE_INDUSTRY_RE`
+(`defense|defence|military|weapons|munitions|armaments`). Pure
+industry-field match — does not inspect ethics_flags. Intentionally
+excludes ambiguous tokens like `aerospace` and `intelligence` alone, both
+of which false-positive on commercial industries.
+
+#### `company_auto_exclude_reason(company: dict) -> str | None`
+Unified entry point for the three deterministic `ethics_hard_exclude`
+auto-triggers. Returns a short reason string for the first rule that
+fires, or `None` if no rule applies. Order: `is_defense_contractor` (fastest
+check, industry-only), then per-flag rules `is_employee_surveillance_flag`,
+`is_mass_surveillance_flag` (in the order each flag appears).
+`research_company.research_company` calls this after merging Tier-2 flags
+and flips `ethics_hard_exclude` to True if a reason is returned. The same
+function powers the retroactive sweep over the existing registry.
 
 #### `composite_score(job: dict, company: dict | None) -> int`
 **The only full-composite function in the codebase.** Reads each stored
@@ -701,6 +738,10 @@ Calls Tier 1 then Tier 2 and merges:
 - Tier 2 `glassdoor_rating` overrides if non-null.
 - Tier 2 sentiment fields override if not `"unknown"`.
 - Tier 2 `new_ethics_flags` are appended to Tier 1's flags.
+- After merging, `config.company_auto_exclude_reason` is consulted; if any
+  deterministic rule fires (defense contractor / employee surveillance /
+  mass surveillance), `ethics_hard_exclude` is forced `True` (additive —
+  never downgrades an LLM-set `True`) and the reason is printed.
 - `sponsorship_score` clamped to `0..15`, `remote_fit` clamped to `0..5`.
 
 Default `model` is Haiku (`CLAUDE_MODEL_FAST`); pass Sonnet for higher-stakes
