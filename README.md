@@ -73,6 +73,12 @@ fill in title/company/location, submit. The server auto-fetches the JD
 if it can; for JS-rendered pages (Workday, Taleo) it prompts you to
 paste the text manually.
 
+`/metrics` shows cohort comparisons (in-flight vs rejected/ghosted vs
+offers) across every composite-score component, a composite-score
+distribution, and funnel-speed stats. Useful for asking "is the
+composite predicting outcomes?" and "how long does the median response
+take?". Data only — no Claude calls.
+
 ### Option B — Command line
 
 ```bash
@@ -274,6 +280,7 @@ scripts/
   linkedin_fetch.py     — IMAP fetch of LinkedIn job-alert emails
   dashboard.py          — terminal pipeline summary
   update_status.py      — application logging + status transitions
+  metrics.py            — read-only analytics for the /metrics page
   comp_estimate.py      — Opus-driven salary + bonus estimator
   generate_cl.js        — cover-letter generator → .docx (Node)
   rescore_all.py        — bulk re-score under a new rubric

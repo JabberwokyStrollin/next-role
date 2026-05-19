@@ -37,6 +37,7 @@ Two cross-cutting rules govern most of the code and are referenced throughout:
 - [`serve.py`](#servepy) — local web UI (Flask-free stdlib HTTP)
 - [`scripts/dashboard.py`](#scriptsdashboardpy) — terminal pipeline summary
 - [`scripts/update_status.py`](#scriptsupdate_statuspy) — application logging + status transitions
+- [`scripts/metrics.py`](#scriptsmetricspy) — read-only analytics behind the `/metrics` route
 
 **Per-job utilities**
 
@@ -854,6 +855,7 @@ calling `linkedin_fetch._fetch_jd_text`.
 #### `GET /today?open=<section>&view=<view>` — daily checklist.
 #### `GET /today/crawl/status` — JSON: background crawl state for polling.
 #### `GET /pipeline` — full ranked table of active jobs.
+#### `GET /metrics` — read-only analytics dashboard rendered from `scripts/metrics.py:build_metrics()`.
 #### `GET /resume` — Experience + Education snippet builder.
 #### `GET /job/<id>` — per-job detail (composite breakdown, JD viewer, comp panel).
 #### `POST /ingest` — handle the ingest form; auto-fetch JD or render paste form.
@@ -936,6 +938,8 @@ the web view stays in sync with the CLI.
 - `ingest_form(...) -> str` — the `/` ingest form (and the paste-mode variant).
 - `pipeline_card() -> str` — short top-10 pipeline preview on the ingest landing page.
 - `pipeline_page() -> str` — the full `/pipeline` table.
+- `metrics_page() -> str` — the `/metrics` analytics page; calls `scripts/metrics.py:build_metrics()` and renders five cards (overview, status breakdown, avg composite by cohort, component contribution averages, score-distribution histogram, funnel speed).
+- `_fmt_num(v, suffix='') -> str` / `_hist_row(band, by_cohort, max_count) -> str` — helpers for the metrics page (number formatting + one stacked histogram row).
 - `_sanitize_snippet(value: str) -> str` — escape HTML-unsafe chars inside snippet textareas.
 - `_snippet_field(field_id, label, value, multiline=False) -> str` — one field + copy button.
 - `render_experience_entry(idx, exp) -> str` / `render_education_entry(idx, edu) -> str` — collapsible snippet rows.
@@ -1070,6 +1074,85 @@ of all applications.
 Argparse with three subcommands (`log`, `status`, `list`). Status choices
 are constrained: `applied`, `recruiter_screen`, `interview`, `offer`,
 `rejected`, `ghosted`, `withdrawn`.
+
+---
+
+## `scripts/metrics.py`
+
+**Role.** Read-only analytics module. Loads pipeline + companies +
+applications, builds cohorts (`in_flight` / `dead` / `positive` /
+`other`), and aggregates per-component contribution averages, composite
+score distribution, and funnel-speed stats. The single public entry
+point `build_metrics()` returns a dict consumed by
+`serve.py:metrics_page()` for the `/metrics` route.
+
+No Claude calls, no mutations. All denominators (`COMPOSITE_MAX`,
+per-component weights) read from the scoring SSOT in `config.py` — no
+hardcoded numbers.
+
+### Module-level constants
+
+| Name | Purpose |
+|---|---|
+| `DEAD_STATUSES` | Presentation-only cohort definition: `{"rejected", "ghosted"}`. Scoped to this module — does not gate the pipeline anywhere. |
+| `POSITIVE_STATUSES` | Presentation-only cohort definition: `{"offer"}`. Same scope. |
+
+`IN_FLIGHT_STATUSES` is **not** redefined here — imported from
+`config.py` per the company-filter SSOT.
+
+### Functions
+
+#### `_load_data() -> tuple[dict, dict, list]`
+Returns `(jobs_by_id, companies_by_id, apps)`. Indexes pipeline and
+registry by their respective primary keys for cheap lookup.
+
+#### `_component_scores(job: dict, company: dict | None) -> dict[str, float | None]`
+Returns the per-component **weighted contribution** for one job (same
+math as `composite_score` — `raw * COMPONENTS[k].multiplier`). For
+components whose underlying raw value is missing, the entry is `None`
+rather than 0 so averages don't get pulled toward zero artificially.
+
+#### `_build_cohorts(jobs_by_id, companies_by_id, apps) -> dict[str, list[dict]]`
+Walks every application, enriches it with `_composite`, `_components`,
+`_days_to_response`, and bins into one of four cohorts. Composite
+prefers the snapshotted `composite_score_at_apply` from the application
+record; falls back to recomputing via `composite_score(job, company)`
+when missing.
+
+#### `_avg_components(records) -> dict[str, float | None]`
+Average weighted contribution per component across a list of enriched
+apps. Returns `None` for any component where no record has a value.
+
+#### `_avg_composite(records) -> float | None`
+Average composite across a cohort, or `None` if empty.
+
+#### `_score_distribution(records, bucket_size=10) -> dict[str, int]`
+Histogram: bands of `bucket_size` points from 0 to `COMPOSITE_MAX`,
+with every band initialized to 0 so the chart always has a full x-axis.
+
+#### `_funnel_speed(records) -> dict`
+Days-to-response stats for records where `response_date` is set.
+Returns `{count, min, max, median, mean}` or `{}` if no data.
+
+#### `_status_counts(apps) -> dict[str, int]`
+Flat `{status: count}` mapping for the status-breakdown table.
+
+#### `build_metrics() -> dict`
+**Public entry point.** Returns a single dict with these keys:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `total_apps` | int | Total application records. |
+| `status_counts` | `{status: count}` | All statuses, including `withdrawn`/`other`. |
+| `cohort_sizes` | `{in_flight, dead, positive, other}` | Per-cohort counts. |
+| `avg_composite` | `{in_flight, dead, positive}` | Mean composite per cohort, or `None`. |
+| `avg_components` | `{cohort: {component: float\|None}}` | Mean weighted contribution per component per cohort. |
+| `component_max` | `{component: int}` | Each component's `weight` from `COMPONENTS`. Display denominator. |
+| `composite_max` | int | Mirrors `COMPOSITE_MAX`. |
+| `score_distribution` | `{band: {in_flight, dead, positive, total}}` | Histogram data. |
+| `funnel_speed` | `{cohort: {count, min, max, median, mean} \| {}}` | Days-to-response stats per cohort. |
+| `score_band_size` | int | Histogram bucket width (10). |
+| `components_ordered` | `list[str]` | Component display order — keys from `COMPONENTS` in insertion order. |
 
 ---
 

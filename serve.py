@@ -1102,6 +1102,50 @@ STYLE = """
   .comp-reasoning    { color: #666; flex: 1; min-width: 200px; line-height: 1.45; }
   .comp-stale        { color: #888; font-size: 10px; margin-left: auto;
                        white-space: nowrap; }
+  /* Metrics page (/metrics) */
+  .metrics-summary   { display: flex; gap: 20px; flex-wrap: wrap;
+                       margin-bottom: 4px; }
+  .metrics-stat      { flex: 1; min-width: 120px; }
+  .metrics-stat .stat-label { font-size: 10px; text-transform: uppercase;
+                              letter-spacing: 0.06em; color: #888;
+                              font-weight: 500; }
+  .metrics-stat .stat-value { font-size: 22px; color: #1F3864;
+                              font-weight: 500; font-variant-numeric: tabular-nums;
+                              margin-top: 2px; }
+  .metrics-stat .stat-sub   { font-size: 11px; color: #666; margin-top: 2px; }
+  .metrics-table     { width: 100%; border-collapse: collapse; font-size: 12.5px;
+                       font-variant-numeric: tabular-nums; }
+  .metrics-table th  { text-align: left; padding: 8px 10px;
+                       border-bottom: 0.5px solid rgba(0,0,0,0.15);
+                       font-weight: 500; color: #555; }
+  .metrics-table th.num { text-align: right; }
+  .metrics-table td  { padding: 6px 10px;
+                       border-bottom: 0.5px solid rgba(0,0,0,0.06); }
+  .metrics-table td.num { text-align: right; color: #1a1a18; }
+  .metrics-table td.label { color: #555; font-weight: 500; }
+  .metrics-table tr:last-child td { border-bottom: none; }
+  .metrics-na        { color: #aaa; font-style: italic; }
+  .hist              { margin-top: 4px; }
+  .hist-row          { display: flex; align-items: center; gap: 10px;
+                       padding: 3px 0; font-size: 11.5px;
+                       font-variant-numeric: tabular-nums; }
+  .hist-band         { width: 60px; color: #555; flex-shrink: 0; }
+  .hist-bar          { flex: 1; height: 14px; display: flex;
+                       background: #f0f0ee; border-radius: 3px; overflow: hidden;
+                       min-width: 80px; }
+  .hist-seg          { height: 100%; }
+  .hist-seg-flight   { background: #2E75B6; }
+  .hist-seg-dead     { background: #c75050; }
+  .hist-seg-positive { background: #1a5c2e; }
+  .hist-seg-other    { background: #aaa; }
+  .hist-count        { color: #555; font-size: 11px; width: 60px;
+                       text-align: right; flex-shrink: 0; }
+  .hist-legend       { display: flex; gap: 14px; margin-top: 10px;
+                       font-size: 11px; color: #666; }
+  .hist-legend span::before { content: '■ '; }
+  .hist-legend .leg-flight::before  { color: #2E75B6; }
+  .hist-legend .leg-dead::before    { color: #c75050; }
+  .hist-legend .leg-positive::before { color: #1a5c2e; }
 </style>
 """
 
@@ -1112,7 +1156,7 @@ def page(title: str, body: str) -> str:
 <title>{title} — next-role</title>{STYLE}</head>
 <body><div class="wrap">
 <h1>next-role</h1>
-<p class="sub">Job search pipeline · <a href="/today">Today</a> · <a href="/">Ingest</a> · <a href="/pipeline">Pipeline</a> · <a href="/resume">Snippets</a></p>
+<p class="sub">Job search pipeline · <a href="/today">Today</a> · <a href="/">Ingest</a> · <a href="/pipeline">Pipeline</a> · <a href="/resume">Snippets</a> · <a href="/metrics">Metrics</a></p>
 {body}
 </div></body></html>"""
 
@@ -1267,6 +1311,248 @@ def pipeline_page() -> str:
 </div>
 <p><a href="/">← Add job</a></p>
 """)
+
+
+# ── /metrics — read-only analytics ────────────────────────────────────────────
+
+def _fmt_num(v, suffix: str = "") -> str:
+    """Render a number, or '—' (in a muted span) if None."""
+    if v is None:
+        return '<span class="metrics-na">—</span>'
+    if isinstance(v, float):
+        return f"{v:g}{suffix}"
+    return f"{v}{suffix}"
+
+
+def _hist_row(band: str, by_cohort: dict, max_count: int) -> str:
+    """One row of the score-distribution histogram. Stacked bar across cohorts."""
+    in_flight = by_cohort.get("in_flight", 0)
+    dead      = by_cohort.get("dead", 0)
+    positive  = by_cohort.get("positive", 0)
+    total     = in_flight + dead + positive
+
+    # Each cohort gets a slice proportional to its count within the row's
+    # total, scaled overall by row-total / max-row-total. So a band with
+    # the most apps fills the bar; smaller bands fill proportionally.
+    width_pct = (total / max_count * 100) if max_count else 0
+    segs = ""
+    if total > 0:
+        f_pct = in_flight / total * width_pct
+        d_pct = dead      / total * width_pct
+        p_pct = positive  / total * width_pct
+        if f_pct > 0:
+            segs += f'<span class="hist-seg hist-seg-flight" style="width:{f_pct:.2f}%"></span>'
+        if d_pct > 0:
+            segs += f'<span class="hist-seg hist-seg-dead"   style="width:{d_pct:.2f}%"></span>'
+        if p_pct > 0:
+            segs += f'<span class="hist-seg hist-seg-positive" style="width:{p_pct:.2f}%"></span>'
+
+    parts = []
+    if in_flight: parts.append(f"{in_flight} in-flight")
+    if dead:      parts.append(f"{dead} dead")
+    if positive:  parts.append(f"{positive} offer")
+    label = ", ".join(parts) if parts else ""
+
+    return (
+        f'<div class="hist-row">'
+        f'  <span class="hist-band">{band}</span>'
+        f'  <span class="hist-bar">{segs}</span>'
+        f'  <span class="hist-count">{label}</span>'
+        f'</div>'
+    )
+
+
+def metrics_page() -> str:
+    """Render the /metrics page from metrics.build_metrics()."""
+    from metrics import build_metrics  # local import keeps cold-start light
+
+    m = build_metrics()
+    total          = m["total_apps"]
+    cohort_sizes   = m["cohort_sizes"]
+    status_counts  = m["status_counts"]
+    avg_composite  = m["avg_composite"]
+    avg_components = m["avg_components"]
+    component_max  = m["component_max"]
+    composite_max  = m["composite_max"]
+    score_dist     = m["score_distribution"]
+    funnel_speed   = m["funnel_speed"]
+    band_size      = m["score_band_size"]
+    components_order = m["components_ordered"]
+
+    # ── Overview card ─────────────────────────────────────────────────────────
+    overview = f"""
+    <div class="card">
+      <h2>Overview</h2>
+      <div class="metrics-summary">
+        <div class="metrics-stat">
+          <div class="stat-label">Total applications</div>
+          <div class="stat-value">{total}</div>
+        </div>
+        <div class="metrics-stat">
+          <div class="stat-label">In-flight</div>
+          <div class="stat-value">{cohort_sizes['in_flight']}</div>
+          <div class="stat-sub">applied · recruiter · interview</div>
+        </div>
+        <div class="metrics-stat">
+          <div class="stat-label">Dead</div>
+          <div class="stat-value">{cohort_sizes['dead']}</div>
+          <div class="stat-sub">rejected · ghosted</div>
+        </div>
+        <div class="metrics-stat">
+          <div class="stat-label">Offers</div>
+          <div class="stat-value">{cohort_sizes['positive']}</div>
+          <div class="stat-sub">offer</div>
+        </div>
+      </div>
+    </div>"""
+
+    # ── Status breakdown ──────────────────────────────────────────────────────
+    if status_counts:
+        status_rows = "".join(
+            f'<tr><td class="label">{s}</td>'
+            f'<td class="num">{n}</td>'
+            f'<td class="num">{(n / total * 100):.1f}%</td></tr>'
+            for s, n in sorted(status_counts.items(), key=lambda x: -x[1])
+        )
+        status_card = f"""
+        <div class="card">
+          <h2>Status breakdown</h2>
+          <table class="metrics-table">
+            <thead><tr><th>Status</th><th class="num">Count</th><th class="num">Share</th></tr></thead>
+            <tbody>{status_rows}</tbody>
+          </table>
+        </div>"""
+    else:
+        status_card = ""
+
+    # ── Average composite by cohort ───────────────────────────────────────────
+    composite_card = f"""
+    <div class="card">
+      <h2>Average composite score by cohort</h2>
+      <table class="metrics-table">
+        <thead><tr>
+          <th>Cohort</th>
+          <th class="num">Count</th>
+          <th class="num">Avg composite (/{composite_max})</th>
+        </tr></thead>
+        <tbody>
+          <tr><td class="label">In-flight</td>
+              <td class="num">{cohort_sizes['in_flight']}</td>
+              <td class="num">{_fmt_num(avg_composite['in_flight'])}</td></tr>
+          <tr><td class="label">Dead</td>
+              <td class="num">{cohort_sizes['dead']}</td>
+              <td class="num">{_fmt_num(avg_composite['dead'])}</td></tr>
+          <tr><td class="label">Offer</td>
+              <td class="num">{cohort_sizes['positive']}</td>
+              <td class="num">{_fmt_num(avg_composite['positive'])}</td></tr>
+        </tbody>
+      </table>
+    </div>"""
+
+    # ── Per-component contribution averages ───────────────────────────────────
+    comp_rows = ""
+    for key in components_order:
+        max_w = component_max[key]
+        comp_rows += (
+            f'<tr>'
+            f'  <td class="label">{key.capitalize()}</td>'
+            f'  <td class="num">{_fmt_num(avg_components["in_flight"].get(key))}</td>'
+            f'  <td class="num">{_fmt_num(avg_components["dead"].get(key))}</td>'
+            f'  <td class="num">{_fmt_num(avg_components["positive"].get(key))}</td>'
+            f'  <td class="num" style="color:#888">/{max_w}</td>'
+            f'</tr>'
+        )
+    components_card = f"""
+    <div class="card">
+      <h2>Component contribution averages</h2>
+      <p style="color:#666;font-size:12px;margin-bottom:8px">
+        Each cell is the average weighted contribution to the composite — same
+        math as <code>composite_score</code>, so the rows sum to the cohort's
+        average composite shown above.
+      </p>
+      <table class="metrics-table">
+        <thead><tr>
+          <th>Component</th>
+          <th class="num">In-flight</th>
+          <th class="num">Dead</th>
+          <th class="num">Offer</th>
+          <th class="num">Max</th>
+        </tr></thead>
+        <tbody>{comp_rows}</tbody>
+      </table>
+    </div>"""
+
+    # ── Score-distribution histogram ──────────────────────────────────────────
+    # Only render bands with at least one data point so empty leading/trailing
+    # 0-9 / 130 bands don't dominate the chart vertically.
+    non_empty_bands = {b: counts for b, counts in score_dist.items()
+                       if counts["total"] > 0}
+    if non_empty_bands:
+        max_total = max(counts["total"] for counts in non_empty_bands.values())
+        hist_rows = "".join(
+            _hist_row(band, counts, max_total)
+            for band, counts in non_empty_bands.items()
+        )
+        legend = (
+            '<div class="hist-legend">'
+            '<span class="leg-flight">In-flight</span>'
+            '<span class="leg-dead">Dead</span>'
+            '<span class="leg-positive">Offer</span>'
+            '</div>'
+        )
+        histogram_card = f"""
+        <div class="card">
+          <h2>Composite-score distribution</h2>
+          <p style="color:#666;font-size:12px;margin-bottom:8px">
+            Apps grouped by composite score in bands of {band_size}.
+            Bar width is the band's count; segments split it across cohorts.
+          </p>
+          <div class="hist">{hist_rows}</div>
+          {legend}
+        </div>"""
+    else:
+        histogram_card = ""
+
+    # ── Funnel speed ──────────────────────────────────────────────────────────
+    def _fmt_speed(s: dict | None) -> str:
+        if not s:
+            return '<span class="metrics-na">no data</span>'
+        return (
+            f'{s["count"]} response(s) · '
+            f'median {s["median"]}d · mean {s["mean"]}d · '
+            f'range {s["min"]}–{s["max"]}d'
+        )
+    funnel_card = f"""
+    <div class="card">
+      <h2>Funnel speed (days to first response)</h2>
+      <table class="metrics-table">
+        <thead><tr><th>Cohort</th><th>Days-to-response</th></tr></thead>
+        <tbody>
+          <tr><td class="label">In-flight</td><td>{_fmt_speed(funnel_speed.get('in_flight'))}</td></tr>
+          <tr><td class="label">Dead</td><td>{_fmt_speed(funnel_speed.get('dead'))}</td></tr>
+          <tr><td class="label">Offer</td><td>{_fmt_speed(funnel_speed.get('positive'))}</td></tr>
+        </tbody>
+      </table>
+      <p style="color:#888;font-size:11px;margin-top:8px">
+        Only counts applications with a <code>response_date</code> set —
+        the in-flight cohort generally has none until status moves out of
+        <code>applied</code>.
+      </p>
+    </div>"""
+
+    body = overview + status_card + composite_card + components_card + histogram_card + funnel_card
+
+    if total == 0:
+        body = (
+            '<div class="card">'
+            '<h2>Metrics</h2>'
+            '<p style="color:#888">No applications logged yet. Submit one via '
+            '<code>scripts/update_status.py log</code> or the /today UI and '
+            'come back here.</p>'
+            '</div>'
+        )
+
+    return page("Metrics", body)
 
 
 _SNIPPETS_JS = """
@@ -2657,6 +2943,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(crawl_status_payload())
         elif path == "/pipeline":
             self.send_html(pipeline_page())
+        elif path == "/metrics":
+            self.send_html(metrics_page())
         elif path == "/resume":
             self.send_html(resume_page())
         elif path.startswith("/job/"):
