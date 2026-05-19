@@ -184,11 +184,27 @@ under-cap rather than silently zero an unfamiliar title.
 Clamps a raw Claude seniority score (0-25) by the title bucket's cap.
 Negative inputs are floored at 0.
 
+#### `strip_company_boilerplate(jd_text: str) -> str`
+Truncates trailing company boilerplate (About / EEO / Benefits / Pay Range
+Transparency / Compliance) before keyword scoring. Searches only the
+**trailing half** of `jd_text` for any pattern in `_BOILERPLATE_MARKERS`
+(Greenhouse `content-conclusion` / `content-pay-transparency` divs, HTML
+heading wrappers like `<strong>About …</strong>`, plaintext heading lines,
+RemoteOK's spam-protector tag) and cuts at the earliest match. Returns the
+input unchanged if no marker matches. The half-only safety bound prevents
+in-body section headings like "About this role" from triggering truncation.
+
 #### `compute_stack_score(jd_text: str) -> int`
-Mechanical keyword scan of the JD. Sums points for every keyword in
-`STACK_KEYWORDS` that appears in the lowercased JD text, then caps at
+Mechanical keyword scan of the JD. Calls `strip_company_boilerplate` first
+so keywords appearing only in the trailing About / EEO / Pay-Range sections
+don't count (e.g. "Apache Spark" in Databricks' About blurb appeared on
+every Databricks JD, even pure-frontend roles). Then sums points for every
+keyword in `STACK_KEYWORDS` whose **word-boundary regex** matches the
+lowercased body — `\bjava\b` no longer matches `javascript`. Caps at
 `STACK_SCORE_MAX`. No Claude call — runs both in the pipeline (post-fetch)
-and in the pre-filter (pre-Claude).
+and in the pre-filter (pre-Claude). Pre-filter slices to the first 800
+chars before calling, so the boilerplate strip is a no-op there but the
+word-boundary fix still applies.
 
 #### `compute_velocity_score(date_posted: str | None) -> int`
 Walks `VELOCITY_TIERS` and returns the score for the first tier whose

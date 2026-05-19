@@ -304,12 +304,71 @@ def apply_title_cap(raw_seniority: int, title: str) -> int:
 
 # ─── Scoring helpers (mechanical — no Claude needed) ─────────────────────────
 
+# Trailing company-boilerplate markers. ATS JDs typically end with About /
+# EEO / Benefits / Pay-Range-Transparency blocks that match stack keywords
+# incidentally (e.g. "Apache Spark" in Databricks' About blurb appears on
+# every Databricks JD, even pure-frontend ones). We truncate the JD at the
+# earliest marker before keyword scoring.
+#
+# Safety: only search the trailing half — a heading like "About this role"
+# inside the body description won't trip the heuristic.
+_BOILERPLATE_MARKERS: tuple[_re.Pattern, ...] = (
+    # Greenhouse structural wrappers
+    _re.compile(r'<div\s+class\s*=\s*"content-conclusion"',                              _re.I),
+    _re.compile(r'<div\s+class\s*=\s*"content-pay-transparency"',                        _re.I),
+    # HTML section headings (<strong>/<b>/<h1-6>)
+    _re.compile(r'<(?:strong|b|h[1-6])\b[^>]*>\s*about\s+\w',                            _re.I),
+    _re.compile(r'<(?:strong|b|h[1-6])\b[^>]*>\s*(?:our\s+)?commitment\s+to\s+diversity', _re.I),
+    _re.compile(r'<(?:strong|b|h[1-6])\b[^>]*>\s*equal\s+(?:opportunity|employment)',    _re.I),
+    _re.compile(r'<(?:strong|b|h[1-6])\b[^>]*>\s*e\.?e\.?o',                             _re.I),
+    _re.compile(r'<(?:strong|b|h[1-6])\b[^>]*>\s*pay\s+range\s+transparency',            _re.I),
+    _re.compile(r'<(?:strong|b|h[1-6])\b[^>]*>\s*compliance\b',                          _re.I),
+    _re.compile(r'<(?:strong|b|h[1-6])\b[^>]*>\s*benefits?\s*</',                        _re.I),
+    # Plaintext heading patterns (start of line/paragraph)
+    _re.compile(r'(?m)^\s*about\s+us\b',                                                 _re.I),
+    _re.compile(r'(?m)^\s*about\s+the\s+company\b',                                      _re.I),
+    _re.compile(r'(?m)^\s*equal\s+(?:opportunity|employment)\s+employer\b',              _re.I),
+    _re.compile(r'(?m)^\s*our\s+commitment\s+to\s+diversity\b',                          _re.I),
+    # RemoteOK spam-protector tag (always at very end of those JDs)
+    _re.compile(r'\bplease\s+mention\s+the\s+word\s+\*\*',                               _re.I),
+)
+
+
+def strip_company_boilerplate(jd_text: str) -> str:
+    """
+    Return ``jd_text`` truncated at the earliest trailing-boilerplate marker
+    in the trailing half. If no marker matches, returns the input unchanged.
+    Used by ``compute_stack_score`` to avoid scoring keywords that only
+    appear in the company's About / EEO / Benefits / Pay-Range sections.
+    """
+    if not jd_text:
+        return ""
+    n = len(jd_text)
+    search_from = n // 2
+    earliest = n
+    for pat in _BOILERPLATE_MARKERS:
+        m = pat.search(jd_text, search_from)
+        if m and m.start() < earliest:
+            earliest = m.start()
+    return jd_text[:earliest]
+
+
 def compute_stack_score(jd_text: str) -> int:
-    """Keyword-based stack match score. Mirrors artifact JS logic exactly."""
-    text = jd_text.lower()
+    """
+    Keyword-based stack match score over the role body of ``jd_text``.
+
+    Two filters distinguish this from a naive substring scan:
+      1. Trailing company boilerplate (About / EEO / Benefits / Pay Range)
+         is dropped via ``strip_company_boilerplate`` so keywords only
+         appearing there (e.g. "Apache Spark" in Databricks' About blurb)
+         don't count.
+      2. Keyword matching uses word-boundary regex (``\\bkw\\b``) so e.g.
+         "java" no longer matches "javascript".
+    """
+    text = strip_company_boilerplate(jd_text).lower()
     score = 0
     for keyword, pts in STACK_KEYWORDS.items():
-        if keyword in text:
+        if _re.search(rf"\b{_re.escape(keyword)}\b", text):
             score += pts
     return min(STACK_SCORE_MAX, score)
 
