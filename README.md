@@ -82,8 +82,15 @@ python run.py --url "https://boards.greenhouse.io/company/jobs/123456"
 # Ingest from a file (one URL per line; optional date: https://... YYYY-MM-DD)
 python run.py --url-file urls.txt
 
-# Full daily run: ingest + research top 5 companies + dashboard
-python run.py --url-file urls.txt --research-top 5
+# Research the top 20 stub companies (ranked by pre-research composite),
+# then refresh the dashboard
+python run.py --research-queue 20
+
+# Preview which stubs --research-queue would pick, without spending credits
+python run.py --research-queue 20 --dry-run
+
+# Full daily run: ingest + research queue + dashboard
+python run.py --url-file urls.txt --research-queue 20
 
 # Generate cover letters for top 3 jobs (interactive — prompts y/n)
 python run.py --cover-letters --top 3
@@ -91,6 +98,16 @@ python run.py --cover-letters --top 3
 # Same but non-interactive (generates without asking)
 python run.py --auto-cl --top 3
 ```
+
+> **Two-stage ranking.** `--research-queue` ranks stubs by the
+> **pre-research composite** (stack + domain + seniority + velocity +
+> freshness only — sponsorship and remote are zero-weighted so stub
+> defaults can't bias the order). Cover-letter generation always ranks
+> by the **full composite** so sponsorship and remote-fit matter at
+> apply time. See *Scoring* below and `CLAUDE.md` for the SSOT
+> convention. The inherited `--research-top N` flag still exists — it
+> ranks stubs by the full composite — but `--research-queue` is the
+> preferred entry point.
 
 > **Apply-queue throttle.** Both the `/today` queue and `run.py
 > --cover-letters` hide any company that already has
@@ -174,27 +191,38 @@ status.
 
 ## Scoring (summary)
 
-Each job gets a composite score out of **130**, weighted across seven
-components:
+next-role keeps **two** composite scores per job, each used at a
+different stage of the workflow:
 
-| Component | Weight | Source |
-|---|---:|---|
-| Sponsorship | 35 | Company research (Haiku) |
-| Stack match | 30 | Keyword scan of JD (`profile/stack_keywords.yaml`) |
-| Domain fit | 25 | Claude (`profile/scoring_rubric.md`) |
-| Remote fit | 12 | Company research (Haiku) |
-| Velocity | 10 | Days since posted |
-| Seniority alignment | 10 | Claude + mechanical title-bucket cap |
-| Freshness bonus | 8 | Today/yesterday/2-days-ago bump |
+| Profile | Ceiling | Used for | Weights |
+|---|---:|---|---|
+| **Pre-research composite** | 100 | Ranking stub companies for the research queue | Stack 25, Domain 32, Seniority 18, Velocity 15, Freshness 10. **Sponsorship and Remote are zero-weighted** — their stub defaults would otherwise dominate the ordering. |
+| **Full composite** | 130 | Apply-time ranking + cover-letter selection | Stack 30, Domain 25, Seniority 10, Velocity 10, Freshness 8, **Sponsorship 35, Remote 12**. |
 
-All weights, native score ranges, and the title-cap rules live in
-`scripts/config.py:COMPONENTS` and `_SENIORITY_BUCKETS`. **No other
-file may duplicate them** — see `CLAUDE.md` for the SSOT convention.
+Both profiles share one storage scale per component (e.g. Claude's
+seniority is always 0-25) and only differ in how those stored points
+get weighted into the composite total. All weights live in
+`scripts/config.py:COMPONENTS`; both scoring functions
+(`composite_score` and `composite_score_pre_research`) read from there.
+**No other file may duplicate them** — see `CLAUDE.md` for the SSOT
+convention.
 
-Company research is deferred by default. `ingest` creates a stub record
-with neutral defaults; `run.py --research-top N` runs the two-tier
-Haiku flow only for the companies attached to your N highest-ranked
-jobs.
+### Two-stage workflow
+
+1. **Ingest** creates a stub company record with neutral defaults so
+   you don't pay for research on every JD.
+2. **`run.py --research-queue N`** ranks the stub-attached active jobs
+   by *pre-research* composite (no contamination from stub defaults),
+   applies a minimum-score gate (`RESEARCH_QUEUE_MIN_SCORE`, default
+   55), and runs the two-tier Haiku flow on the top N distinct
+   companies.
+3. **Apply queue / cover letters** rank by *full* composite — so
+   sponsorship and remote-fit signal matters at the moment you decide
+   to apply.
+
+The inherited `run.py --research-top N` flag still ranks by full
+composite, but the stub defaults bias which companies surface there;
+`--research-queue` is the preferred entry point for routine research.
 
 For the per-component breakdown, the title-cap buckets, and the
 company-research field schema, see:

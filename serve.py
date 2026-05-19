@@ -48,14 +48,17 @@ DATA_DIR   = ROOT / "data"
 OUTPUT_DIR = ROOT / "output"
 
 # Ranking-related symbols come from the scoring SSOT (scripts/config.py).
-# Do not redefine composite_score, score weights, or denominators in this file.
+# Do not redefine composite_score, composite_score_pre_research, score
+# weights, or denominators in this file.
 sys.path.insert(0, str(SCRIPTS))
 from config import (  # noqa: E402
     COMPONENTS,
     COMPOSITE_MAX,
+    PRE_RESEARCH_MAX,
     MAX_ACTIVE_APPS_PER_COMPANY,
     company_block_reason,
     composite_score,
+    composite_score_pre_research,
 )
 
 # Mirrors scripts/config.py. Duplicated to keep serve.py importable without
@@ -992,6 +995,11 @@ STYLE = """
                     font-size: 13px; flex-wrap: wrap; }
   .cl-meta .score { color: #2E75B6; font-weight: 500; min-width: 30px;
                     font-variant-numeric: tabular-nums; }
+  .cl-meta .score-suffix { color: #888; font-weight: 400; font-size: 10px;
+                           margin-left: 1px; }
+  .cl-meta .score-secondary { color: #888; font-size: 10.5px; font-weight: 400;
+                              font-variant-numeric: tabular-nums; cursor: help; }
+  .pf-stub        { background: #fef3cd; color: #7a4f00; cursor: help; }
   .cl-meta .company { font-weight: 500; min-width: 130px; }
   .cl-meta .title-cell { color: #555; flex: 1; min-width: 220px; }
   .cl-location    { color: #888; font-size: 11px; }
@@ -2400,6 +2408,13 @@ def render_cl_row(job: dict, co_by_id: dict | None = None,
     location  = esc(job.get("location", ""))[:35]
     apply_url = esc(job.get("apply_url", ""))
     score     = job_score(job, co_by_id or {})
+    pre_score = composite_score_pre_research(job)
+
+    # Is the company a stub? Stub records are inflating the full composite
+    # with default sponsorship/remote values; surface that to the operator
+    # so they can choose to research before applying.
+    company_rec = (co_by_id or {}).get(job.get("company_id")) if co_by_id else None
+    is_stub     = bool(company_rec and company_rec.get("stub"))
 
     cl_done    = bool(job.get("cover_letter_generated"))
     cl_version = job.get("cover_letter_version", 0)
@@ -2423,9 +2438,11 @@ def render_cl_row(job: dict, co_by_id: dict | None = None,
     # Denominators read from the SSOT (scripts/config.py:COMPONENTS) so they
     # stay correct if weights ever change. Shows the native (raw) stored
     # value for each component; the row's headline score is the weighted
-    # composite via composite_score().
+    # full composite via composite_score(). Pre-research composite is shown
+    # alongside for transparency — and is the only meaningful score when
+    # the company is a stub.
     from config import compute_freshness_bonus  # local import to avoid cycle at top
-    sponsor_co = (co_by_id or {}).get(job.get("company_id"), {}) if co_by_id else {}
+    sponsor_co = company_rec or {}
     stack_s     = job.get("stack_match_score")        or 0
     seniority   = job.get("seniority_score")          or 0
     domain      = job.get("domain_fit_score")         or 0
@@ -2485,10 +2502,36 @@ def render_cl_row(job: dict, co_by_id: dict | None = None,
     comp_label  = "Re-estimate Comp" if comp_done else "Estimate Comp"
     comp_panel  = render_comp_panel(comp_record, job_id) if comp_done else ""
 
+    # ── Score pills ──────────────────────────────────────────────────────────
+    # Researched company: full composite is the primary, pre-research is shown
+    # alongside as context.
+    # Stub company: full composite is unreliable (sponsorship + remote at stub
+    # defaults), so de-emphasize it and surface pre-research as primary plus
+    # a "research pending" badge so the operator knows to research first.
+    if is_stub:
+        score_block = (
+            f'<span class="score" title="Pre-research composite — ranks only on signals '
+            f'available before company research.">{pre_score}<span class="score-suffix">'
+            f' /{PRE_RESEARCH_MAX} pre</span></span>'
+            f'<span class="score-secondary" title="Full composite — unreliable until '
+            f'company is researched (sponsorship + remote at stub defaults).">'
+            f'{score}/{COMPOSITE_MAX} full*</span>'
+            f'<span class="pf-badge pf-stub" title="Sponsorship + remote-fit are at '
+            f'stub defaults; run --research-queue to refine.">research pending</span>'
+        )
+    else:
+        score_block = (
+            f'<span class="score" title="Full composite — apply-time ranking signal.">'
+            f'{score}<span class="score-suffix"> /{COMPOSITE_MAX}</span></span>'
+            f'<span class="score-secondary" title="Pre-research composite (for '
+            f'context — this is what the research queue ranks by).">'
+            f'{pre_score}/{PRE_RESEARCH_MAX} pre</span>'
+        )
+
     return f"""
     <div class="cl-row" id="cl-{job_id}">
       <div class="cl-meta">
-        <span class="score">{score}</span>
+        {score_block}
         <span class="company">{company}</span>
         <span class="title-cell">{title}</span>
         <span class="cl-location">{location}</span>

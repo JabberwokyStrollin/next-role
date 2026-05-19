@@ -90,19 +90,38 @@ STACK_KEYWORDS, STACK_SCORE_MAX = _load_stack_keywords(STACK_KEYWORDS_PATH)
 # ─── SCORING SSOT ─────────────────────────────────────────────────────────────
 #
 # This block is the ONLY place composite-ranking parameters live in code.
+# Two weight profiles exist for two distinct ranking purposes:
+#
+#   FULL composite (``weight`` field, ``COMPOSITE_MAX``)
+#     Used for apply-time ranking and cover-letter selection. Sums all
+#     seven signals; requires the company record (sponsorship + remote).
+#     Computed by ``composite_score(job, company)``.
+#
+#   PRE-RESEARCH composite (``pre_research_weight`` field, ``PRE_RESEARCH_MAX``)
+#     Used ONLY to rank stub companies for the research queue. Zeros out
+#     company-derived signals (sponsorship, remote) so stub defaults don't
+#     contaminate the ranking. Computed by ``composite_score_pre_research(job)``.
+#
 # Surfaces (serve.py, dashboard.py, ingest.py, run.py, README, etc.) MUST
-# import from here and reference ``COMPONENTS[k].weight`` for display
-# denominators and ``COMPOSITE_MAX`` for the overall composite ceiling.
+# import from here and reference ``COMPONENTS[k].weight`` /
+# ``COMPONENTS[k].pre_research_weight`` for display denominators, and
+# ``COMPOSITE_MAX`` / ``PRE_RESEARCH_MAX`` for the overall ceilings.
 #
 # DO NOT:
-#   - hardcode "X/25", "/130", or any score denominator in another file
-#   - introduce a parallel ``composite_score`` function elsewhere — there is
-#     exactly one, defined in this module
+#   - hardcode "X/25", "/130", "/100", or any score denominator in another file
+#   - introduce a parallel ``composite_score`` or ``composite_score_pre_research``
+#     function elsewhere — there is exactly one of each, defined in this module
 #   - inline a partial composite (e.g. summing stack + seniority + domain +
-#     velocity for sort order) — use composite_score() with the company arg
+#     velocity for sort order) — use the canonical function instead
+#   - use ``composite_score_pre_research`` for apply-time ranking or
+#     cover-letter selection (it ignores sponsorship + remote on purpose)
+#   - use ``composite_score`` to rank candidates for the research queue
+#     (stub defaults will dominate the ordering)
 #
 # DO:
-#   - extend ``COMPONENTS`` to add a new ranking signal
+#   - extend ``COMPONENTS`` to add a new ranking signal (give it both a
+#     ``weight`` and a ``pre_research_weight``; set the latter to 0 if the
+#     signal isn't available before research)
 #   - update ``native_max`` here if the storage scale of a stored field
 #     changes (e.g. if score_jd starts emitting seniority 0-30)
 #
@@ -113,33 +132,45 @@ STACK_KEYWORDS, STACK_SCORE_MAX = _load_stack_keywords(STACK_KEYWORDS_PATH)
 #
 # Pre-filter (crawl.py, prefilter_staged.py) is INTENTIONALLY pre-LLM and
 # reads only the YAML side of this triangle. Do not call ``composite_score``
-# from a pre-filter; it would require company research per raw listing and
-# wreck the cost model.
+# OR ``composite_score_pre_research`` from a pre-filter; both require Claude
+# scoring on the job and would wreck the cost model.
 # ──────────────────────────────────────────────────────────────────────────-
 
 @dataclass(frozen=True)
 class ScoringComponent:
-    weight:     int    # contribution to composite (display denominator)
-    native_max: int    # max value the stored field can hold (storage scale)
+    weight:              int   # contribution to full composite (display denominator)
+    native_max:          int   # max value the stored field can hold (storage scale)
+    pre_research_weight: int   # contribution to pre-research composite (0 for company-derived signals)
 
     @property
     def multiplier(self) -> float:
-        """How much each stored point contributes to the composite."""
+        """How much each stored point contributes to the full composite."""
         return self.weight / self.native_max if self.native_max else 0.0
+
+    @property
+    def pre_research_multiplier(self) -> float:
+        """How much each stored point contributes to the pre-research composite."""
+        return self.pre_research_weight / self.native_max if self.native_max else 0.0
 
 
 COMPONENTS: dict[str, ScoringComponent] = {
     # Stack syncs from profile/stack_keywords.yaml so users tune it as data.
-    "stack":       ScoringComponent(weight=STACK_SCORE_MAX, native_max=STACK_SCORE_MAX),
-    "domain":      ScoringComponent(weight=25, native_max=20),  # Claude rubric 0-20
-    "seniority":   ScoringComponent(weight=10, native_max=25),  # Claude rubric 0-25 (cap applied at storage time)
-    "velocity":    ScoringComponent(weight=10, native_max=5),   # VELOCITY_TIERS top tier
-    "freshness":   ScoringComponent(weight=8,  native_max=8),   # FRESHNESS_TIERS top tier
-    "sponsorship": ScoringComponent(weight=35, native_max=15),  # Haiku research output
-    "remote":      ScoringComponent(weight=12, native_max=5),   # Haiku research output
+    "stack":       ScoringComponent(weight=STACK_SCORE_MAX, native_max=STACK_SCORE_MAX, pre_research_weight=25),
+    "domain":      ScoringComponent(weight=25, native_max=20, pre_research_weight=32),  # Claude rubric 0-20
+    "seniority":   ScoringComponent(weight=10, native_max=25, pre_research_weight=18),  # Claude rubric 0-25 (cap applied at storage time)
+    "velocity":    ScoringComponent(weight=10, native_max=5,  pre_research_weight=15),  # VELOCITY_TIERS top tier
+    "freshness":   ScoringComponent(weight=8,  native_max=8,  pre_research_weight=10),  # FRESHNESS_TIERS top tier
+    "sponsorship": ScoringComponent(weight=35, native_max=15, pre_research_weight=0),   # Haiku research output (company-derived)
+    "remote":      ScoringComponent(weight=12, native_max=5,  pre_research_weight=0),   # Haiku research output (company-derived)
 }
 
-COMPOSITE_MAX: int = sum(c.weight for c in COMPONENTS.values())
+COMPOSITE_MAX:     int = sum(c.weight              for c in COMPONENTS.values())
+PRE_RESEARCH_MAX:  int = sum(c.pre_research_weight for c in COMPONENTS.values())
+
+# Pre-research gate: jobs scoring below this on the pre-research composite
+# are not researched, regardless of research-queue depth. Spending Haiku +
+# 1 web search ($0.03-0.05) on a clearly-mediocre stub doesn't pay off.
+RESEARCH_QUEUE_MIN_SCORE: int = 55
 
 
 VELOCITY_TIERS = [
@@ -395,11 +426,16 @@ def detect_no_sponsorship(jd_text: str) -> str | None:
 
 def composite_score(job: dict, company: dict | None) -> int:
     """
-    Compute composite score from all stored components, weighted by COMPONENTS.
+    Full composite score — used for apply-time ranking and cover-letter
+    selection. Sums all seven components weighted by COMPONENTS[k].weight.
 
     Stored fields stay on their native scales (0-25 for Claude seniority, 0-15
     for sponsorship research, etc.); this function applies the per-component
-    multiplier to bring each into its share of the COMPOSITE_MAX (130).
+    multiplier to bring each into its share of the COMPOSITE_MAX.
+
+    Use ``composite_score_pre_research(job)`` instead when ranking stub
+    companies for the research queue — that variant zeros out the
+    company-derived signals so stub defaults don't dominate the order.
     """
     raw: dict[str, int] = {
         "stack":       (job.get("stack_match_score")     or 0),
@@ -411,6 +447,34 @@ def composite_score(job: dict, company: dict | None) -> int:
         "remote":      ((company or {}).get("remote_fit")        or 0),
     }
     return sum(int(raw[k] * c.multiplier) for k, c in COMPONENTS.items())
+
+
+def composite_score_pre_research(job: dict) -> int:
+    """
+    Pre-research composite — used ONLY to rank stub companies for the
+    research queue. Sums the components whose data is available at
+    ingest time (stack, domain, seniority, velocity, freshness), weighted
+    by COMPONENTS[k].pre_research_weight. Sponsorship and remote fit are
+    intentionally zero-weighted because their values come from company
+    research; including them with stub defaults (sponsorship=7, remote=3)
+    creates a constant ~23-point baseline that dominates rankings.
+
+    Returns an int in [0, PRE_RESEARCH_MAX]. Do NOT use this for apply-
+    time ranking or cover-letter selection — those need the full
+    sponsorship + remote signal via ``composite_score(job, company)``.
+    """
+    raw: dict[str, int] = {
+        "stack":     (job.get("stack_match_score")     or 0),
+        "domain":    (job.get("domain_fit_score")      or 0),
+        "seniority": (job.get("seniority_score")       or 0),
+        "velocity":  (job.get("hiring_velocity_score") or 0),
+        "freshness": compute_freshness_bonus(job),
+    }
+    return sum(
+        int(raw[k] * c.pre_research_multiplier)
+        for k, c in COMPONENTS.items()
+        if c.pre_research_weight > 0
+    )
 
 
 # ─── COMPANY-FILTER SSOT ──────────────────────────────────────────────────────

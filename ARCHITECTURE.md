@@ -88,8 +88,10 @@ file.
 | `CLAUDE_MODEL_FAST` | `str` | Haiku 4.5 model ID — used for company research (~10× cheaper). |
 | `STACK_KEYWORDS` | `dict[str, int]` | Lowercased keyword → points map, loaded from YAML at import time. |
 | `STACK_SCORE_MAX` | `int` | Cap for `compute_stack_score`; from YAML `max_score`. |
-| `COMPONENTS` | `dict[str, ScoringComponent]` | **SSOT** for composite weights + native max per signal. |
-| `COMPOSITE_MAX` | `int` | Sum of all `COMPONENTS[k].weight` — the composite-score ceiling (130). |
+| `COMPONENTS` | `dict[str, ScoringComponent]` | **SSOT** for both scoring profiles' weights + native max per signal. |
+| `COMPOSITE_MAX` | `int` | Sum of all `COMPONENTS[k].weight` — the full composite ceiling (130). |
+| `PRE_RESEARCH_MAX` | `int` | Sum of all `COMPONENTS[k].pre_research_weight` — the pre-research composite ceiling (100). |
+| `RESEARCH_QUEUE_MIN_SCORE` | `int` | Pre-research-score gate (55) for the research queue — jobs below this don't get research budget. |
 | `VELOCITY_TIERS` | `list[(int, int)]` | `(max_days_since_posted, score)`; first match wins; default 0. |
 | `FRESHNESS_TIERS` | `list[(int, int)]` | `(max_age_days, bonus)`; bonus stacks on top of velocity. |
 | `STALENESS_TIERS` | `dict[str, (int, int)]` | Inclusive day-range per tier label (`fresh` / `soft_stale` / `hard_stale`). |
@@ -113,12 +115,15 @@ file.
 ### Classes
 
 #### `ScoringComponent`
-Frozen dataclass — one entry in the `COMPONENTS` SSOT.
+Frozen dataclass — one entry in the `COMPONENTS` SSOT. Carries one
+weight per scoring profile.
 
 - **Fields**
-  - `weight: int` — this component's contribution to the composite (also the display denominator).
-  - `native_max: int` — max value the underlying stored field can hold (its storage scale).
-- **Property `multiplier -> float`** — `weight / native_max`. How much each stored point contributes to the composite. Returns `0.0` if `native_max` is 0.
+  - `weight: int` — contribution to the **full composite** (display denominator for `composite_score`).
+  - `native_max: int` — max value the underlying stored field can hold (its storage scale; shared by both profiles).
+  - `pre_research_weight: int` — contribution to the **pre-research composite** (display denominator for `composite_score_pre_research`). Set to `0` for company-derived signals (sponsorship, remote) so stub defaults can't bias the research-queue ordering.
+- **Property `multiplier -> float`** — `weight / native_max`. How much each stored point contributes to the full composite. Returns `0.0` if `native_max` is 0.
+- **Property `pre_research_multiplier -> float`** — `pre_research_weight / native_max`. Same shape, for the pre-research composite.
 
 ### Functions
 
@@ -209,14 +214,30 @@ explicit negation token near the word "sponsor". Caller (`ingest.py`) owns
 the discard decision.
 
 #### `composite_score(job: dict, company: dict | None) -> int`
-**The only composite-score function in the codebase.** Reads each stored
-score off the job + company dicts, applies the per-component multiplier from
-`COMPONENTS`, and returns the integer total (max `COMPOSITE_MAX`).
+**The only full-composite function in the codebase.** Reads each stored
+score off the job + company dicts, applies `COMPONENTS[k].multiplier` to
+each, and returns the integer total. Used for apply-time ranking and
+cover-letter selection.
 
 - **Parameters**
   - `job` — a record from `job_pipeline.json`.
   - `company` — the matching record from `company_registry.json`, or `None` if research hasn't run yet (sponsorship + remote default to 0).
 - **Returns:** `int` in `[0, COMPOSITE_MAX]`.
+
+#### `composite_score_pre_research(job: dict) -> int`
+**The only pre-research composite function in the codebase.** Sums the
+five components whose data is available at ingest time (stack, domain,
+seniority, velocity, freshness) weighted by
+`COMPONENTS[k].pre_research_multiplier`. Sponsorship and remote-fit are
+intentionally zero-weighted because their values come from company
+research; using them with stub defaults (sponsorship=7/15, remote=3/5)
+creates a ~23-point baseline that dominates rankings.
+
+Used by `run.py:research_queue` to pick which stub companies to research
+next. **Never** use for apply-time ranking — see `CLAUDE.md` rule 4.
+
+- **Parameters:** `job` — a record from `job_pipeline.json`. No company argument.
+- **Returns:** `int` in `[0, PRE_RESEARCH_MAX]`.
 
 #### `company_block_reason(company_id: str | None, apps: list[dict]) -> str | None`
 **The only company-throttle rule.** Returns a short human-readable reason
@@ -724,15 +745,36 @@ Reads a text file of URLs (one per line, optional ` YYYY-MM-DD` after
 the URL, `#` comments allowed) and calls `ingest_url` per line. Returns
 the count of successful ingests. Exits 1 if the file doesn't exist.
 
+#### `_execute_research(queue: list, dry_run: bool, label: str) -> int`
+Shared inner loop for both research entry points. Takes a list of
+`(score, job, company)` tuples already deduped by company, shells out
+to `research_company.py --name <name>` for each, clears the `stub` flag
+on success, and prints per-row progress. `label` prefixes each log line
+so the operator can tell which ranking surfaced the candidate
+(`"job score before research"` vs `"pre-research score"`). With
+`dry_run=True`, prints what would be researched without calling Claude.
+Returns the number processed.
+
+#### `research_queue(n: int, dry_run: bool = False) -> int`
+**Preferred research entry point.** Ranks active jobs by
+`composite_score_pre_research(job)` — which zero-weights sponsorship +
+remote — so stub-default values can't bias the ordering. Applies the
+`RESEARCH_QUEUE_MIN_SCORE` gate (jobs scoring below are not eligible
+for research budget). Picks the top N distinct stub companies and runs
+`_execute_research` on them.
+
+- **Returns:** number of companies actually researched (or counted in dry-run).
+- **Wired to CLI** as `--research-queue [N]` (default 20 if no value).
+
 #### `research_top_stubs(n: int, dry_run: bool = False) -> int`
-Loads pipeline + companies, computes full composite for every active job,
-sorts descending, finds the top N stub companies (within the first
-`max(n*3, 15)` ranked jobs, deduped by company_id), and shells out to
-`research_company.py --name <name>` for each. On success, clears the
-`stub` flag from the registry record so subsequent runs don't re-research
-the same company.
+**Inherited surface.** Ranks active jobs by full `composite_score(job,
+company)` and picks the top N stub companies (within the first
+`max(n*3, 15)` ranked jobs, deduped by `company_id`). Stub-default
+sponsorship + remote values influence this ordering, which is why
+`research_queue` exists.
 
 - **Returns:** number of companies actually researched.
+- **Wired to CLI** as `--research-top N` (preserved for backwards compatibility — prefer `--research-queue` for routine use).
 
 #### `generate_cover_letters(top_n: int = 5, auto: bool = False) -> None`
 Selects candidates from `active` / `cover_letter_ready` jobs whose
@@ -749,12 +791,16 @@ Country selection (`CA`/`IE`) is derived from the job's location string
 Argparse entry point. Flags:
 
 - Ingest: `--url URL`, `--url-file FILE` (mutually exclusive), `--posted DATE`.
-- Pipeline: `--crawl`, `--research-top N`, `--cover-letters`, `--auto-cl` (implies `--cover-letters`), `--dashboard`.
+- Pipeline: `--crawl`, `--research-queue [N]` (default N=20), `--research-top N`, `--cover-letters`, `--auto-cl` (implies `--cover-letters`), `--dashboard`.
 - Modifiers: `--dry-run`, `--top N` (default 5).
 
-Order of operations: crawl → ingest → research → cover letters → dashboard.
+Order of operations: crawl → ingest → research-queue → research-top → cover letters → dashboard.
 When no action flag is passed, defaults to `--dashboard`. `--dashboard` is
 also auto-appended whenever the run ingested anything.
+
+`--research-queue` honors `--dry-run` (prints the queue without spending
+API credits). `--research-top` skips entirely on `--dry-run` (inherited
+behavior; do not change).
 
 ---
 

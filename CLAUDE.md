@@ -51,55 +51,83 @@ is yes — bias toward updating.
 
 ## Scoring SSOT — single source of truth
 
-The composite ranking system has exactly three canonical sources of truth.
-**Never duplicate the values in another file.** If you need a denominator,
-weight, or rule, import it from one of these.
+The composite ranking system has exactly two scoring functions and three
+canonical sources of truth for their inputs. **Never duplicate the values
+in another file.** If you need a denominator, weight, or rule, import it
+from one of these.
+
+### Two scoring profiles, one canonical location
+
+| Profile | Canonical function | Ceiling | When to use |
+|---|---|---|---|
+| **Full composite** | `composite_score(job, company)` | `COMPOSITE_MAX` (130) | Apply-time ranking; cover-letter selection; anywhere the operator is about to act on a researched job. Requires `company` argument — needs sponsorship + remote. |
+| **Pre-research composite** | `composite_score_pre_research(job)` | `PRE_RESEARCH_MAX` (100) | Ranking stub companies for the research queue. Zeros out sponsorship + remote so stub defaults can't bias the order. **Never** use for apply-time decisions — sponsorship is too important to ignore there. |
 
 | Concern | Canonical location | How to read it |
 |---|---|---|
-| Composite component weights + display denominators | `scripts/config.py:COMPONENTS` + `COMPOSITE_MAX` | `from config import COMPONENTS, COMPOSITE_MAX` |
+| Component weights (both profiles) + display denominators | `scripts/config.py:COMPONENTS` + `COMPOSITE_MAX` + `PRE_RESEARCH_MAX` | `from config import COMPONENTS, COMPOSITE_MAX, PRE_RESEARCH_MAX` |
 | Title → seniority cap | `scripts/config.py:_SENIORITY_BUCKETS` (via `title_seniority_cap()` / `apply_title_cap()`) | `from config import apply_title_cap` |
 | Stack keyword scores + stack max + pre-filter title/location lists | `profile/stack_keywords.yaml` | loaded once by `_load_stack_keywords()` and `load_crawl_config()` |
 | Claude's native output ranges (seniority 0-25, domain 0-20) | `profile/scoring_rubric.md` | mirrored in `COMPONENTS[k].native_max`; update both together |
+| Research-queue minimum score | `scripts/config.py:RESEARCH_QUEUE_MIN_SCORE` | `from config import RESEARCH_QUEUE_MIN_SCORE` |
 
 ### Rules
 
-1. **Never define a parallel `composite_score` function** anywhere outside
-   `scripts/config.py`. There is exactly one. A duplicate copy silently
+1. **Never define a parallel scoring function** anywhere outside
+   `scripts/config.py`. There is exactly one `composite_score` and
+   exactly one `composite_score_pre_research`. A duplicate copy silently
    falls behind config.py whenever a weight changes.
 
 2. **Never inline a partial composite** for sort order or display, even
-   "just to skip the company lookup." Skipping sponsorship, remote, and
-   freshness surfaces US-only stack-heavy roles above sponsorship-history
-   Canada matches — which inverts the apply queue. If you need to sort, do:
+   "just to skip the company lookup." If sponsorship + remote are at
+   stub defaults, that's what `composite_score_pre_research` is for —
+   use it instead of hand-rolling a subset of the full composite. If you
+   need to sort the apply queue, do:
    ```python
    co_by_id = load_companies_by_id()
    sorted_jobs = sorted(jobs, key=lambda j: composite_score(j, co_by_id.get(j.get("company_id"))), reverse=True)
    ```
+   To sort the research queue:
+   ```python
+   sorted_jobs = sorted(jobs, key=composite_score_pre_research, reverse=True)
+   ```
 
 3. **Never hardcode a score denominator** in display code. No `/35`,
-   `/130`, `f"Stack X/25"`, etc. Always read from `COMPONENTS[k].native_max`
-   (when showing the stored value) or `COMPONENTS[k].weight` (when showing
-   the contribution to composite) or `COMPOSITE_MAX` (for the overall total).
+   `/130`, `/100`, `f"Stack X/25"`, etc. Always read from
+   `COMPONENTS[k].native_max` (when showing the stored value),
+   `COMPONENTS[k].weight` (contribution to full composite),
+   `COMPONENTS[k].pre_research_weight` (contribution to pre-research
+   composite), `COMPOSITE_MAX`, or `PRE_RESEARCH_MAX`.
 
-4. **Pre-filter is intentionally separate.** `scripts/crawl.py:pre_filter`
+4. **Cover-letter generation only triggers from the post-research full
+   composite ranked queue.** Stub companies should be researched first via
+   `--research-queue` before they enter the apply path. The `/today`
+   apply queue and `run.py:generate_cover_letters` both rank by
+   `composite_score(job, company)`; never swap that for the pre-research
+   variant in apply-time surfaces.
+
+5. **Pre-filter is intentionally separate.** `scripts/crawl.py:pre_filter`
    and `scripts/prefilter_staged.py:pre_filter_relaxed` run BEFORE any
-   Claude calls — they MUST NOT call `composite_score` or any function
-   that requires Claude/research output. Doing so would multiply API
-   costs by ~1000x (raw aggregator output vs the few that pass filtering).
-   The pre-filter has its own SSOT in `profile/stack_keywords.yaml`.
+   Claude calls — they MUST NOT call `composite_score`,
+   `composite_score_pre_research`, or any function that requires Claude/
+   research output. Doing so would multiply API costs by ~1000x (raw
+   aggregator output vs the few that pass filtering). The pre-filter has
+   its own SSOT in `profile/stack_keywords.yaml`.
 
-5. **Extending the composite:** add a new key to `COMPONENTS` AND a new
-   line in `composite_score()`'s `raw` dict. Don't add code in other
-   files that reaches around the SSOT.
+6. **Extending the composite:** add a new key to `COMPONENTS` with both
+   a `weight` (full) and a `pre_research_weight` (set to 0 if the signal
+   isn't available before research) AND a new line in *both* scoring
+   functions' `raw` dict. Don't add code in other files that reaches
+   around the SSOT.
 
-6. **Tuning a weight:** edit `COMPONENTS` only. Display denominators auto-
-   update because surfaces read from it.
+7. **Tuning a weight:** edit `COMPONENTS` only — both profiles live
+   there. Display denominators auto-update because surfaces read from
+   `COMPONENTS[k]` / `COMPOSITE_MAX` / `PRE_RESEARCH_MAX`.
 
-7. **Tuning Claude's output range** (e.g. changing seniority from /25
+8. **Tuning Claude's output range** (e.g. changing seniority from /25
    to /30): edit `profile/scoring_rubric.md` AND `COMPONENTS["seniority"].native_max`
    in lockstep. The rubric tells Claude the range; `native_max` tells the
-   composite math how to multiply it.
+   composite math how to multiply it (for both profiles).
 
 ## Company-filter SSOT — single source of truth
 
