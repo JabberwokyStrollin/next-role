@@ -92,7 +92,7 @@ file.
 | `COMPONENTS` | `dict[str, ScoringComponent]` | **SSOT** for both scoring profiles' weights + native max per signal. |
 | `COMPOSITE_MAX` | `int` | Sum of all `COMPONENTS[k].weight` — the full composite ceiling (130). |
 | `PRE_RESEARCH_MAX` | `int` | Sum of all `COMPONENTS[k].pre_research_weight` — the pre-research composite ceiling (100). |
-| `RESEARCH_QUEUE_MIN_SCORE` | `int` | Pre-research-score gate (55) for the research queue — jobs below this don't get research budget. |
+| `RESEARCH_QUEUE_MIN_SCORE` | `int` | Pre-research-score gate (45) for the research queue — jobs below this don't get research budget. |
 | `VELOCITY_TIERS` | `list[(int, int)]` | `(max_days_since_posted, score)`; first match wins; default 0. |
 | `FRESHNESS_TIERS` | `list[(int, int)]` | `(max_age_days, bonus)`; bonus stacks on top of velocity. |
 | `STALENESS_TIERS` | `dict[str, (int, int)]` | Inclusive day-range per tier label (`fresh` / `soft_stale` / `hard_stale`). |

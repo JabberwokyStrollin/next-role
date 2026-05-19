@@ -220,7 +220,7 @@ convention.
 2. **`run.py --research-queue N`** ranks the stub-attached active jobs
    by *pre-research* composite (no contamination from stub defaults),
    applies a minimum-score gate (`RESEARCH_QUEUE_MIN_SCORE`, default
-   55), and runs the two-tier Haiku flow on the top N distinct
+   45), and runs the two-tier Haiku flow on the top N distinct
    companies.
 3. **Apply queue / cover letters** rank by *full* composite — so
    sponsorship and remote-fit signal matters at the moment you decide

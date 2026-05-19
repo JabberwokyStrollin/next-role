@@ -170,7 +170,7 @@ PRE_RESEARCH_MAX:  int = sum(c.pre_research_weight for c in COMPONENTS.values())
 # Pre-research gate: jobs scoring below this on the pre-research composite
 # are not researched, regardless of research-queue depth. Spending Haiku +
 # 1 web search ($0.03-0.05) on a clearly-mediocre stub doesn't pay off.
-RESEARCH_QUEUE_MIN_SCORE: int = 55
+RESEARCH_QUEUE_MIN_SCORE: int = 45
 
 
 VELOCITY_TIERS = [
