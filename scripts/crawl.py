@@ -68,7 +68,10 @@ def load_crawl_config() -> dict:
 
     cfg = dict(CRAWL_CONFIG_DEFAULTS)
     if "seniority_titles" in crawl:
-        cfg["seniority_titles"] = [str(t).strip().lower() for t in crawl["seniority_titles"]]
+        # Preserve trailing whitespace — entries like 'sr ' rely on the
+        # trailing space to avoid bare 'sr' matching inside 'disruptive',
+        # 'israel-based', etc. via the substring check in pre_filter.
+        cfg["seniority_titles"] = [str(t).lower() for t in crawl["seniority_titles"]]
     if "title_exclude" in crawl:
         cfg["title_exclude"] = [str(t).strip().lower() for t in crawl["title_exclude"]]
     if "location_allow" in crawl:
@@ -108,6 +111,24 @@ def html_to_text(html: str) -> str:
 # title + JD prefix) come from profile/stack_keywords.yaml, which is the
 # canonical SSOT for pre-filter configuration.
 
+def title_excluded(title_lower: str, terms: list[str]) -> str | None:
+    """Return the first term in ``terms`` that appears as a whole word inside
+    ``title_lower`` — or None if none match. Surrounds each term with
+    non-letter boundaries so single-word terms like ``"intern"`` don't match
+    inside longer words like ``"international"``. Multi-word terms
+    (``"solutions architect"``) and terms ending in non-letter chars
+    (``"jr."``, ``"entry-level"``) work too because the boundaries only
+    forbid an adjacent ASCII letter.
+
+    Both ``title_lower`` and entries in ``terms`` MUST already be lowercase
+    — callers lowercase once at config-load time and per-row in pre_filter.
+    """
+    for bad in terms:
+        if re.search(rf"(?<![a-z]){re.escape(bad)}(?![a-z])", title_lower):
+            return bad
+    return None
+
+
 def pre_filter(title: str, location: str, text: str, cfg: dict) -> tuple[bool, str]:
     """Returns (passes, reason_string)."""
     t = title.lower()
@@ -116,9 +137,9 @@ def pre_filter(title: str, location: str, text: str, cfg: dict) -> tuple[bool, s
     if not any(kw in t for kw in cfg["seniority_titles"]):
         return False, f"title seniority miss ({title[:50]})"
 
-    for bad in cfg.get("title_exclude", []):
-        if bad in t:
-            return False, f"title excluded by '{bad}' ({title[:50]})"
+    bad = title_excluded(t, cfg.get("title_exclude", []))
+    if bad:
+        return False, f"title excluded by '{bad}' ({title[:50]})"
 
     if not any(kw in l for kw in cfg["location_allow"]):
         return False, f"location miss ({location[:40]})"

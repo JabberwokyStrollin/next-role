@@ -212,7 +212,7 @@ pre-filter (run before any Claude call) and the aggregator queries:
 | Key | Purpose |
 |---|---|
 | `seniority_titles` | List of terms; the job title must contain at least one. |
-| `title_exclude` | List of terms; reject the title if it contains any (filters pre-sales / customer-success roles that slip past `architect` / `lead`). |
+| `title_exclude` | List of terms; reject the title if any appears as a whole word (filters pre-sales / customer-success roles that slip past `architect` / `lead`). Whole-word match is letter-boundary-aware, so `intern` blocks `"Software Intern"` but not `"... International"`; multi-word terms like `solutions architect` work too. Variants that share a prefix need separate entries — e.g. list both `intern` and `internship`. |
 | `location_allow` | List of regions; the location must contain at least one (or `remote`). |
 | `aggregator_tags` | List of tag groups for the RemoteOK API. Each top-level item is one API call; tags within an inner list are AND-filtered (e.g. `- [kafka, java]`). For one-or-the-other alternates (technologies that don't co-occur), write them as separate items. |
 | `aggregator_keywords` | List of Remotive full-text search queries. Each item is one query string (e.g. `- kafka flink java`). |

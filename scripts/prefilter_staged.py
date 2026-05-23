@@ -28,7 +28,7 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
 
-from crawl import load_crawl_config  # noqa: E402
+from crawl import load_crawl_config, title_excluded  # noqa: E402
 
 STAGED_PATH   = ROOT / "data" / "email_staged.json"
 MIN_JD_LENGTH = 200
@@ -52,9 +52,9 @@ def pre_filter_relaxed(title: str, location: str, jd_text: str, cfg: dict) -> tu
     if not any(kw in t for kw in cfg["seniority_titles"]):
         return False, "title seniority miss"
 
-    for bad in cfg.get("title_exclude", []):
-        if bad in t:
-            return False, f"title excluded by '{bad}'"
+    bad = title_excluded(t, cfg.get("title_exclude", []))
+    if bad:
+        return False, f"title excluded by '{bad}'"
 
     if not any(kw in l for kw in cfg["location_allow"]):
         return False, f"location miss ({location[:40]})"

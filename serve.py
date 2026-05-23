@@ -481,6 +481,97 @@ def pop_cl_flash() -> dict | None:
     return f
 
 
+_research_flash: dict | None = None
+
+
+def set_research_flash(kind: str, text: str) -> None:
+    """One-shot flash for 'Research now' actions on stub companies. Surfaces
+    on whichever page the user was returned to (cover-letters body or
+    /job/<id>)."""
+    global _research_flash
+    _research_flash = {"kind": kind, "text": text}
+
+
+def pop_research_flash() -> dict | None:
+    global _research_flash
+    f, _research_flash = _research_flash, None
+    return f
+
+
+def _flash_notice_html(flash: dict | None) -> str:
+    """Render a popped flash dict as a .notice div, or empty string."""
+    if not flash:
+        return ""
+    kind = flash.get("kind", "info")
+    cls  = "notice-warn" if kind == "warn" else ("notice-ok" if kind == "ok" else "notice-info")
+    from html import escape as esc
+    return f'<div class="notice {cls}">{esc(flash.get("text", ""))}</div>'
+
+
+def run_company_research(company_id: str) -> tuple[bool, str]:
+    """Shell out to scripts/research_company.py --company-id <id>, then strip
+    the stub flag on success (mirrors run.py:_execute_research). Returns
+    (ok, message) where message is a short summary suitable for a flash.
+
+    Blocks the request thread for the duration of the research call (Haiku
+    + 1 web search, typically 20-30s). Timeout is 120s to match comp_estimate.
+    """
+    company_registry_path = DATA_DIR / "company_registry.json"
+    try:
+        companies = json.loads(company_registry_path.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        return False, f"Could not read company registry: {e}"
+
+    pre = next((c for c in companies if c.get("company_id") == company_id), None)
+    if not pre:
+        return False, f"Unknown company_id: {company_id}"
+    pre_name = pre.get("name", "")
+
+    cmd = [sys.executable, "-u", str(SCRIPTS / "research_company.py"),
+           "--company-id", company_id]
+    try:
+        result = subprocess.run(
+            cmd, cwd=ROOT,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            encoding="utf-8", errors="replace",
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "Research timed out after 120s."
+    except Exception as e:  # noqa: BLE001
+        return False, f"Failed to launch research_company.py: {e}"
+
+    if result.returncode != 0:
+        tail = "; ".join(
+            [l for l in (result.stdout or "").splitlines() if l.strip()][-3:]
+        )
+        return False, f"Research failed — {tail or 'see server log'}"
+
+    # research_company.py exits 0 even when it just prints "Error: company ID
+    # X not found." — guard against that by checking the registry state.
+    try:
+        companies = json.loads(company_registry_path.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        return False, f"Researched ok but couldn't re-read registry: {e}"
+
+    post = next((c for c in companies if c.get("company_id") == company_id), None)
+    if not post:
+        return False, f"Research call exited 0 but {pre_name} is no longer in the registry."
+    if post.get("stub") and post.get("record_updated") == pre.get("record_updated"):
+        return False, (
+            f"Research did not update {pre_name} — check server log "
+            f"(stdout tail: {(result.stdout or '').strip().splitlines()[-1][:120]})"
+        )
+
+    # Strip the stub flag (same logic as run.py:_execute_research).
+    post.pop("stub", None)
+    company_registry_path.write_text(
+        json.dumps(companies, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return True, f"Researched {pre_name}."
+
+
 def run_linkedin_fetch() -> tuple[bool, int, str]:
     """Run scripts/linkedin_fetch.py. Returns (ok, n_fetched, output)."""
     cmd = [sys.executable, "-u", str(SCRIPTS / "linkedin_fetch.py")]
@@ -849,6 +940,17 @@ STYLE = """
   .wrap { max-width: 760px; margin: 0 auto; padding: 32px 20px; }
   h1 { font-size: 20px; font-weight: 500; color: #1F3864; margin-bottom: 4px; }
   .sub { color: #888; font-size: 12px; margin-bottom: 28px; }
+  .nav-bar { display: flex; align-items: center; gap: 16px;
+             margin-bottom: 28px; flex-wrap: wrap; }
+  .nav-bar .sub { flex: 1; min-width: 260px; }
+  .nav-search { display: flex; align-items: center; gap: 6px;
+                margin: 0; }
+  .nav-search input[type=search] {
+    width: 220px; padding: 5px 8px; font-size: 12px;
+    border: 0.5px solid rgba(0,0,0,0.2); border-radius: 5px;
+    background: #fff; font-family: inherit;
+  }
+  .nav-search .btn-mini { margin: 0; }
   .card { background: #fff; border: 0.5px solid rgba(0,0,0,0.12);
           border-radius: 10px; padding: 24px; margin-bottom: 20px; }
   label { display: block; font-size: 11px; font-weight: 500;
@@ -1149,14 +1251,25 @@ STYLE = """
 </style>
 """
 
-def page(title: str, body: str) -> str:
+def page(title: str, body: str, nav_query: str = "") -> str:
+    from html import escape as esc
+    q_val = esc(nav_query)
+    search_form = (
+        '<form method="GET" action="/search" class="nav-search">'
+        f'<input name="q" type="search" value="{q_val}" placeholder="search company or role…" autocomplete="off">'
+        '<button class="btn-mini" type="submit">Search</button>'
+        '</form>'
+    )
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title} — next-role</title>{STYLE}</head>
 <body><div class="wrap">
 <h1>next-role</h1>
-<p class="sub">Job search pipeline · <a href="/today">Today</a> · <a href="/">Ingest</a> · <a href="/pipeline">Pipeline</a> · <a href="/resume">Snippets</a> · <a href="/metrics">Metrics</a></p>
+<div class="nav-bar">
+  <p class="sub" style="margin-bottom:0">Job search pipeline · <a href="/today">Today</a> · <a href="/">Ingest</a> · <a href="/pipeline">Pipeline</a> · <a href="/resume">Snippets</a> · <a href="/metrics">Metrics</a></p>
+  {search_form}
+</div>
 {body}
 </div></body></html>"""
 
@@ -1311,6 +1424,145 @@ def pipeline_page() -> str:
 </div>
 <p><a href="/">← Add job</a></p>
 """)
+
+
+# ── /search — find a role by company or title ────────────────────────────────
+
+def search_page(query: str) -> str:
+    """Find a role by company name or job title across non-archived pipeline
+    entries (active + applied + in-flight + post-response). Built for
+    recruiter-call prep: type the company, click the role, land on /job/<id>
+    with the JD, company research, comp estimate, and application timeline.
+
+    Match: case-insensitive substring against company_name and title.
+    Sort:  jobs with an application first (date_applied desc), then the rest
+           by composite score desc.
+    Empty query: browse all (still sorted the same way), capped so the page
+    stays light."""
+    from html import escape as esc
+
+    q       = (query or "").strip()
+    q_lower = q.lower()
+    jobs    = load_pipeline()
+    apps    = load_applications()
+    co_by_id = load_companies_by_id()
+
+    apps_by_job = {a.get("job_id"): a for a in apps if a.get("job_id")}
+
+    candidates = [j for j in jobs if j.get("pipeline_status") != "archived"]
+
+    if q_lower:
+        def matches(j: dict) -> bool:
+            return (
+                q_lower in (j.get("company_name") or "").lower()
+                or q_lower in (j.get("title") or "").lower()
+            )
+        candidates = [j for j in candidates if matches(j)]
+
+    with_app    = [j for j in candidates if apps_by_job.get(j.get("job_id"))]
+    without_app = [j for j in candidates if not apps_by_job.get(j.get("job_id"))]
+    with_app.sort(
+        key=lambda j: apps_by_job[j["job_id"]].get("date_applied", ""),
+        reverse=True,
+    )
+    without_app.sort(key=lambda j: job_score(j, co_by_id), reverse=True)
+
+    BROWSE_CAP = 40
+    truncated  = False
+    if not q_lower:
+        combined = with_app + without_app
+        if len(combined) > BROWSE_CAP:
+            combined  = combined[:BROWSE_CAP]
+            truncated = True
+    else:
+        combined = with_app + without_app
+
+    n = len(combined)
+    if q_lower:
+        header_text = (
+            f'<strong>{n}</strong> result{"s" if n != 1 else ""} '
+            f'for <span style="font-family:ui-monospace,Consolas,monospace">{esc(q)}</span>'
+        )
+    else:
+        header_text = (
+            f'Showing <strong>{n}</strong> non-archived role{"s" if n != 1 else ""}'
+            + (' — top 40, type a query to narrow.' if truncated else '')
+        )
+
+    if not combined:
+        if q_lower:
+            empty = (
+                '<p style="color:#888;font-size:13px">'
+                'No matches. Try a shorter or different query — match is '
+                'case-insensitive substring against company name and job title.'
+                '</p>'
+            )
+        else:
+            empty = (
+                '<p style="color:#888;font-size:13px">'
+                'No active or in-flight jobs in the pipeline yet.'
+                '</p>'
+            )
+        body = f"""
+<div class="card">
+  <h2>Search</h2>
+  <form method="GET" action="/search" style="margin-bottom:12px">
+    <input name="q" type="search" value="{esc(q)}" placeholder="company name or job title…"
+           autocomplete="off" style="font-size:13px">
+    <button class="btn btn-primary" type="submit" style="margin-top:10px">Search</button>
+  </form>
+  {empty}
+</div>"""
+        return page("Search", body, nav_query=q)
+
+    rows = []
+    for job in combined:
+        job_id     = esc(job.get("job_id", ""))
+        score      = job_score(job, co_by_id)
+        company    = esc((job.get("company_name") or "?")[:30])
+        title      = esc((job.get("title") or "?")[:55])
+        location   = esc((job.get("location") or "")[:30])
+        apply_url  = esc(job.get("apply_url", ""))
+        apply_link = (
+            f'<a class="apply-link" href="{apply_url}" target="_blank" rel="noopener">Apply ↗</a>'
+            if apply_url else ""
+        )
+
+        app = apps_by_job.get(job.get("job_id"))
+        if app:
+            status     = app.get("status", "applied")
+            applied    = app.get("date_applied", "")
+            sub_label  = f'applied {applied}' if applied else 'applied'
+        else:
+            status    = job.get("pipeline_status", "active")
+            sub_label = status.replace("_", " ")
+        status_cls = _STATUS_LABEL_CLASS.get(status, "pf-badge")
+
+        rows.append(f"""
+        <a href="/job/{job_id}" style="text-decoration:none;color:inherit">
+          <div class="job-row" style="cursor:pointer">
+            <span class="score">{score}</span>
+            <span class="company">{company}</span>
+            <span class="title-cell">{title}</span>
+            <span style="color:#888;font-size:11px">{location}</span>
+            <span class="app-status {status_cls}">{esc(sub_label)}</span>
+            {apply_link}
+          </div>
+        </a>""")
+
+    body = f"""
+<div class="card">
+  <h2>Search</h2>
+  <form method="GET" action="/search" style="margin-bottom:14px">
+    <input name="q" type="search" value="{esc(q)}" placeholder="company name or job title…"
+           autocomplete="off" autofocus style="font-size:13px">
+    <button class="btn btn-primary" type="submit" style="margin-top:10px">Search</button>
+  </form>
+  <p style="color:#666;font-size:12px;margin-bottom:10px">{header_text}</p>
+  <div class="pipeline">{"".join(rows)}</div>
+</div>"""
+
+    return page("Search", body, nav_query=q)
 
 
 # ── /metrics — read-only analytics ────────────────────────────────────────────
@@ -1725,6 +1977,144 @@ _STATUS_LABEL_CLASS = {
 }
 
 
+def render_company_card(company: dict | None, return_to: str = "") -> str:
+    """Researched company fields, surfaced on /job/<id> for recruiter prep.
+    Reads sponsorship + remote denominators from COMPONENTS so the values
+    stay in sync with the scoring SSOT (see CLAUDE.md). When the record is
+    a stub, renders a 'Research now' button that POSTs to
+    /today/company/research and brings the user back to ``return_to``."""
+    from html import escape as esc
+
+    if not company:
+        return (
+            '<div class="card"><h2>Company</h2>'
+            '<p style="color:#888;font-size:12px">No company record on file.</p>'
+            '</div>'
+        )
+
+    company_id  = esc(company.get("company_id", ""))
+    name        = esc(company.get("name", "?"))
+    industry    = esc(company.get("industry") or "—")
+    size        = esc(company.get("size_tier") or "—")
+    country     = esc(company.get("country_hq") or "—")
+    portal      = (company.get("job_portal_url") or "").strip()
+    portal_html = (
+        f'<a href="{esc(portal)}" target="_blank" rel="noopener">careers ↗</a>'
+        if portal else "—"
+    )
+    is_stub = bool(company.get("stub"))
+
+    spons_score = company.get("sponsorship_score")
+    spons_notes = esc((company.get("sponsorship_notes") or "").strip())
+    remote      = company.get("remote_fit")
+    layoffs     = bool(company.get("recent_layoffs"))
+    layoff_notes = esc((company.get("layoff_notes") or "").strip())
+    gd_rating   = company.get("glassdoor_rating")
+    gd_sent     = esc(company.get("glassdoor_engineering_sentiment") or "unknown")
+    blind       = esc(company.get("blind_sentiment") or "unknown")
+
+    spons_max   = COMPONENTS["sponsorship"].native_max
+    remote_max  = COMPONENTS["remote"].native_max
+
+    if is_stub and company_id:
+        rt_input = (
+            f'<input type="hidden" name="return_to" value="{esc(return_to)}">'
+            if return_to else ''
+        )
+        stub_banner = f"""
+        <div class="notice notice-warn" style="margin-bottom:12px">
+          <div style="margin-bottom:8px">
+            Stub record — not researched yet. Fields below are neutral defaults.
+          </div>
+          <form method="POST" action="/today/company/research" class="cl-form" style="display:inline">
+            <input type="hidden" name="company_id" value="{company_id}">
+            {rt_input}
+            <button class="btn-mini" type="submit">Research now</button>
+          </form>
+          <span style="color:#888;font-size:11px;margin-left:8px">~20–30s · Haiku + 1 web search</span>
+        </div>
+        """
+    else:
+        stub_banner = ""
+
+    spons_val = (
+        f'<strong>{spons_score}</strong> / {spons_max}'
+        if spons_score is not None else "—"
+    )
+    if spons_notes:
+        spons_val += f' — <span style="color:#555">{spons_notes}</span>'
+
+    remote_val = (
+        f'<strong>{remote}</strong> / {remote_max}'
+        if remote is not None else "—"
+    )
+
+    gd_val = (
+        f'{gd_rating if gd_rating is not None else "—"}'
+        f' · engineering: {gd_sent}'
+    )
+
+    layoff_row = ""
+    if layoffs:
+        layoff_row = (
+            '<tr><td class="comp-label">Recent layoffs</td>'
+            f'<td><span class="app-status pf-fail">yes</span> '
+            f'<span style="color:#555">{layoff_notes}</span></td></tr>'
+        )
+
+    ethics_flags = company.get("ethics_flags") or []
+    ethics_notes = esc((company.get("ethics_notes") or "").strip())
+    ethics_block = ""
+    if ethics_flags:
+        flag_items = []
+        for flag in ethics_flags:
+            cat  = esc(flag.get("category", "") or "—")
+            stat = esc(flag.get("status", "") or "—")
+            desc = esc(flag.get("description", "") or "")
+            src  = esc(flag.get("source", "") or "")
+            sd   = esc(flag.get("source_date", "") or "")
+            src_line = ""
+            if src:
+                src_line = f' <span style="color:#888;font-size:11px">— {src}{(", " + sd) if sd else ""}</span>'
+            stat_cls = "pf-fail" if stat == "confirmed" else "pf-badge"
+            flag_items.append(
+                '<li style="padding:6px 0;border-bottom:0.5px solid rgba(0,0,0,0.06);font-size:12.5px">'
+                f'<span class="app-status {stat_cls}">{stat}</span> '
+                f'<strong>{cat}</strong> — {desc}{src_line}'
+                '</li>'
+            )
+        notes_html = (
+            f'<p style="color:#666;font-size:11.5px;margin-top:8px">{ethics_notes}</p>'
+            if ethics_notes else ""
+        )
+        ethics_block = (
+            '<div style="margin-top:14px">'
+            '<div class="section-label">Ethics flags</div>'
+            f'<ul style="list-style:none;padding:0;margin:0">{"".join(flag_items)}</ul>'
+            f'{notes_html}'
+            '</div>'
+        )
+
+    return f"""
+    <div class="card">
+      <h2>Company <span style="color:#888;font-weight:400;font-size:12px">— {name}</span></h2>
+      {stub_banner}
+      <table class="comp-table">
+        <tr><td class="comp-label">Industry</td><td>{industry}</td></tr>
+        <tr><td class="comp-label">Size</td><td>{size}</td></tr>
+        <tr><td class="comp-label">HQ</td><td>{country}</td></tr>
+        <tr><td class="comp-label">Careers page</td><td>{portal_html}</td></tr>
+        <tr><td class="comp-label">Sponsorship</td><td>{spons_val}</td></tr>
+        <tr><td class="comp-label">Remote fit</td><td>{remote_val}</td></tr>
+        <tr><td class="comp-label">Glassdoor</td><td>{gd_val}</td></tr>
+        <tr><td class="comp-label">Blind sentiment</td><td>{blind}</td></tr>
+        {layoff_row}
+      </table>
+      {ethics_block}
+    </div>
+    """
+
+
 def job_detail_page(job_id: str) -> str:
     """Per-job detail surface: pulls together JD, comp estimate, cover letter,
     application timeline. The compensation card is pinned at the top when the
@@ -1931,13 +2321,17 @@ def job_detail_page(job_id: str) -> str:
     </div>
     """
 
-    # ── Assemble (comp card pinned high for interview-stage) ───────────────
+    # ── Company card (recruiter-prep payload) ──────────────────────────────
+    company_card = render_company_card(company, return_to=f"/job/{job_id}")
+
+    # ── Assemble (comp + company cards pinned high for interview-stage) ────
     nav = '<p style="margin-bottom:14px"><a href="/pipeline">← Pipeline</a> · <a href="/today">Today</a></p>'
+    flash = _flash_notice_html(pop_research_flash())
 
     if is_interview_stage:
-        body = nav + header_card + comp_card + timeline_card + jd_card + cl_card + score_card
+        body = nav + flash + header_card + comp_card + company_card + timeline_card + jd_card + cl_card + score_card
     else:
-        body = nav + header_card + timeline_card + cl_card + comp_card + jd_card + score_card
+        body = nav + flash + header_card + company_card + timeline_card + cl_card + comp_card + jd_card + score_card
 
     # Reuse the cover-letters JS so Copy buttons + form debounce work on this page.
     body += """
@@ -2404,6 +2798,10 @@ def render_cover_letters_body() -> str:
         }.get(flash["kind"], "notice notice-info")
         parts.append(f'<div class="{cls}">{esc(flash["text"])}</div>')
 
+    research_notice = _flash_notice_html(pop_research_flash())
+    if research_notice:
+        parts.append(research_notice)
+
     jobs     = load_pipeline()
     co_by_id = load_companies_by_id()
     apps     = load_applications()
@@ -2795,6 +3193,19 @@ def render_cl_row(job: dict, co_by_id: dict | None = None,
     # defaults), so de-emphasize it and surface pre-research as primary plus
     # a "research pending" badge so the operator knows to research first.
     if is_stub:
+        stub_company_id = esc(company_rec.get("company_id", "")) if company_rec else ""
+        research_form = (
+            f'<form method="POST" action="/today/company/research" class="cl-form" '
+            f'style="display:inline;margin:0">'
+            f'<input type="hidden" name="company_id" value="{stub_company_id}">'
+            f'<button class="btn-mini pf-stub" type="submit" '
+            f'title="Run Haiku research now (~20–30s). Sponsorship + remote-fit '
+            f'are at stub defaults until this completes.">research now</button>'
+            f'</form>'
+        ) if stub_company_id else (
+            f'<span class="pf-badge pf-stub" title="Sponsorship + remote-fit are at '
+            f'stub defaults; run --research-queue to refine.">research pending</span>'
+        )
         score_block = (
             f'<span class="score" title="Pre-research composite — ranks only on signals '
             f'available before company research.">{pre_score}<span class="score-suffix">'
@@ -2802,8 +3213,7 @@ def render_cl_row(job: dict, co_by_id: dict | None = None,
             f'<span class="score-secondary" title="Full composite — unreliable until '
             f'company is researched (sponsorship + remote at stub defaults).">'
             f'{score}/{COMPOSITE_MAX} full*</span>'
-            f'<span class="pf-badge pf-stub" title="Sponsorship + remote-fit are at '
-            f'stub defaults; run --research-queue to refine.">research pending</span>'
+            + research_form
         )
     else:
         score_block = (
@@ -2943,6 +3353,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(crawl_status_payload())
         elif path == "/pipeline":
             self.send_html(pipeline_page())
+        elif path == "/search":
+            qs = parse_qs(parsed.query)
+            self.send_html(search_page(qs.get("q", [""])[0]))
         elif path == "/metrics":
             self.send_html(metrics_page())
         elif path == "/resume":
@@ -3128,6 +3541,21 @@ class Handler(BaseHTTPRequestHandler):
                     set_cl_flash("warn", f"Failed to launch generate_cl.js: {e}")
 
             self.redirect_or_today(params, "cover_letters", fragment=f"cl-{job_id}")
+            return
+
+        if path == "/today/company/research":
+            length = int(self.headers.get("Content-Length", 0))
+            raw    = self.rfile.read(length).decode("utf-8")
+            params = parse_qs(raw)
+            company_id = params.get("company_id", [""])[0].strip()
+
+            if not company_id:
+                set_research_flash("warn", "Research failed — missing company_id.")
+            else:
+                ok, msg = run_company_research(company_id)
+                set_research_flash("ok" if ok else "warn", msg)
+
+            self.redirect_or_today(params, "cover_letters")
             return
 
         if path == "/today/comp/estimate":

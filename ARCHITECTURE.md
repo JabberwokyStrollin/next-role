@@ -585,11 +585,23 @@ missing.
 Strips tags via BeautifulSoup and rejoins non-empty lines. Used to
 normalize aggregator-provided HTML JD bodies into plain text.
 
+#### `title_excluded(title_lower: str, terms: list[str]) -> str | None`
+Word-aware membership check used by both `pre_filter` (here) and
+`prefilter_staged.pre_filter_relaxed`. Returns the first term in `terms`
+that appears as a whole word inside `title_lower`, otherwise `None`.
+Surrounds each term with non-letter lookarounds (`(?<![a-z])TERM(?![a-z])`)
+so a single-word term like `"intern"` does not match inside a longer
+word like `"international"`; multi-word terms (`"solutions architect"`)
+and terms with non-letter chars (`"jr."`, `"entry-level"`) work too.
+Both inputs MUST already be lowercase — callers lowercase the title
+per-row and the terms once at config-load time.
+
 #### `pre_filter(title: str, location: str, text: str, cfg: dict) -> tuple[bool, str]`
 Returns `(passes, reason_string)`. Cheap mechanical gate run on every raw
 listing. Reasons start with stable prefixes (`title seniority`, `title
 excluded`, `location`, `stack score`) so `_categorize_reason` can bucket
-them in the funnel log without parsing free text.
+them in the funnel log without parsing free text. `title_exclude` uses
+`title_excluded` for word-aware matching.
 
 #### `detect_ats(url: str) -> tuple[str, str] | None`
 Pattern-matches an apply URL against five ATS shapes (Greenhouse hosted
@@ -692,7 +704,8 @@ Same pre-LLM constraint as `crawl.pre_filter` — see the SSOT banner in
 #### `pre_filter_relaxed(title: str, location: str, jd_text: str, cfg: dict) -> tuple[bool, str]`
 Like `crawl.pre_filter` but skips the stack-score check when `jd_text` is
 shorter than `MIN_JD_LENGTH`. Lazy-imports `compute_stack_score` so the
-no-JD path stays fast. Returns `(passes, reason)`.
+no-JD path stays fast. Uses `crawl.title_excluded` for word-aware
+`title_exclude` matching. Returns `(passes, reason)`.
 
 #### `main() -> None`
 Loads `email_staged.json`, runs every row through `pre_filter_relaxed`,
@@ -873,7 +886,11 @@ HTTP server (`BaseHTTPRequestHandler`) with three top-level surfaces:
   updates, crawl, LinkedIn ingest, cover letters & apply. Each section
   has its own POST handlers; the page round-trips state through query
   params (`?open=<section>&view=<view>`).
-- `/pipeline`, `/resume`, `/job/<id>` — supporting views.
+- `/pipeline`, `/resume`, `/job/<id>`, `/search` — supporting views. The
+  top-nav search box (rendered by `page()` on every surface) submits to
+  `/search?q=...` for finding a role by company name or title — built
+  for recruiter-call prep, where you need to locate an applied / in-flight
+  role and pull up its JD, company research, and application timeline.
 
 Imports `composite_score`, `company_block_reason`, etc. from the
 **scoring + company-filter SSOTs in `scripts/config.py`**. Never inline
@@ -899,7 +916,7 @@ calling `linkedin_fetch._fetch_jd_text`.
 | `CRAWL_TAIL_MAX`, `INGESTED_RE` | Background crawl: tail-line cap (50) + regex to capture `Ingested: N` from stdout. |
 | `crawl_state_lk`, `crawl_state` | Threading lock + state dict for the background crawl. |
 | `LINKEDIN_REQUIRED_ENV` | `("NEXTROLE_IMAP_HOST", "NEXTROLE_IMAP_USER", "NEXTROLE_IMAP_APP_PASSWORD")`. |
-| `_linkedin_flash`, `_cl_flash` | One-shot flash-message slots displayed on the next `/today` render. |
+| `_linkedin_flash`, `_cl_flash`, `_research_flash` | One-shot flash-message slots. `_linkedin_flash` + `_cl_flash` render in their respective `/today` sections; `_research_flash` is popped from both the cover-letters body and `/job/<id>` so the result of "Research now" follows the user back wherever they were. |
 | `CL_RENDER_CAP` | 30 — rows visible in the cover-letters section by default. |
 | `RESUME_MD_PATH`, `PROFILE_LINKS`, `_MONTH_ABBREVS`, `_DATE_RANGE_RE` | Resume-snippet parsing config (Experience + Education sections of `profile/resume.md`). |
 | `_STATE_AT_END_RE` | Regex for trailing US state codes in education entries. |
@@ -912,9 +929,10 @@ calling `linkedin_fetch._fetch_jd_text`.
 #### `GET /today?open=<section>&view=<view>` — daily checklist.
 #### `GET /today/crawl/status` — JSON: background crawl state for polling.
 #### `GET /pipeline` — full ranked table of active jobs.
+#### `GET /search?q=<text>` — find a role by company name or title (case-insensitive substring across non-archived pipeline entries; results link to `/job/<id>`).
 #### `GET /metrics` — read-only analytics dashboard rendered from `scripts/metrics.py:build_metrics()`.
 #### `GET /resume` — Experience + Education snippet builder.
-#### `GET /job/<id>` — per-job detail (composite breakdown, JD viewer, comp panel).
+#### `GET /job/<id>` — per-job detail (composite breakdown, JD viewer, comp panel, company-research card).
 #### `POST /ingest` — handle the ingest form; auto-fetch JD or render paste form.
 #### `POST /today/crawl/start` — kick off background crawl worker.
 #### `POST /today/linkedin/fetch` — shell out to `linkedin_fetch.py`.
@@ -925,6 +943,7 @@ calling `linkedin_fetch._fetch_jd_text`.
 #### `POST /today/linkedin/discard` — drop one staged row by `staging_id`.
 #### `POST /today/cl/generate` — shell out to `generate_cl.js --job-id`.
 #### `POST /today/comp/estimate` — shell out to `comp_estimate.py --job-id`.
+#### `POST /today/company/research` — shell out to `research_company.py --company-id`; strip the stub flag on success and flash the result. Used by the "Research now" button on the stub banner in `render_company_card` and the stub badge in `render_cl_row`. Honors `return_to` so the user lands back on `/job/<id>` (or the cover-letters apply queue).
 #### `POST /today/cl/open` — open generated `.docx` in the OS default app.
 #### `POST /today/cl/archive` — flip job to `archived` (e.g. closed posting).
 #### `POST /today/apply/log` — shell out to `update_status.py log`.
@@ -978,6 +997,11 @@ the web view stays in sync with the CLI.
 #### Cover-letter flash helpers
 - `set_cl_flash(kind, text)` / `pop_cl_flash() -> dict | None` — same shape as the LinkedIn flash slot.
 
+#### Research-now action + flash helpers
+- `set_research_flash(kind, text)` / `pop_research_flash() -> dict | None` — slot for the result of `/today/company/research`. Popped at the top of `render_cover_letters_body` and `job_detail_page` so feedback follows the user back to either surface.
+- `_flash_notice_html(flash) -> str` — render a popped flash dict as a `.notice` div, or empty string. Generic over the three flash kinds (`ok`/`warn`/`info`).
+- `run_company_research(company_id) -> tuple[bool, str]` — pre-checks that the id exists in the registry (skips the subprocess on bogus input), shells out to `research_company.py --company-id`, verifies via `record_updated` that the upsert actually ran (since the script exits 0 even when it just prints an error), then strips the stub flag and writes the registry. Returns `(ok, message)` for the flash.
+
 #### Resume-snippet parsing (private helpers)
 - `_to_mm_yyyy(month, year) -> str` — `"Jan 2020"` → `"01/2020"`.
 - `_split_date_range(text) -> (frm, to)` — parses one date range from a free-text segment.
@@ -991,17 +1015,19 @@ the web view stays in sync with the CLI.
 - `parse_resume_snippets() -> dict` — convenience: `{"experience": [...], "education": [...]}` (or `"error"` if `resume.md` is missing or unreadable).
 
 #### Template / page renderers
-- `page(title, body) -> str` — outer HTML skeleton with the shared `STYLE` block.
+- `page(title, body, nav_query='') -> str` — outer HTML skeleton with the shared `STYLE` block. Injects the top-nav search box on every page; `nav_query` pre-fills it (only `search_page` passes a value).
 - `ingest_form(...) -> str` — the `/` ingest form (and the paste-mode variant).
 - `pipeline_card() -> str` — short top-10 pipeline preview on the ingest landing page.
 - `pipeline_page() -> str` — the full `/pipeline` table.
+- `search_page(query) -> str` — the `/search` results view. Case-insensitive substring match on `company_name` and `title` across non-archived pipeline jobs; sort puts jobs that have an `application_tracker.json` entry first (by `date_applied` desc), then the rest by composite score. Empty query falls back to a browse list (capped at 40). Each row links to `/job/<id>`.
 - `metrics_page() -> str` — the `/metrics` analytics page; calls `scripts/metrics.py:build_metrics()` and renders five cards (overview, status breakdown, avg composite by cohort, component contribution averages, score-distribution histogram, funnel speed).
 - `_fmt_num(v, suffix='') -> str` / `_hist_row(band, by_cohort, max_count) -> str` — helpers for the metrics page (number formatting + one stacked histogram row).
 - `_sanitize_snippet(value: str) -> str` — escape HTML-unsafe chars inside snippet textareas.
 - `_snippet_field(field_id, label, value, multiline=False) -> str` — one field + copy button.
 - `render_experience_entry(idx, exp) -> str` / `render_education_entry(idx, edu) -> str` — collapsible snippet rows.
 - `render_links_card() -> str` — LinkedIn + GitHub copy snippets at the bottom of `/resume`.
-- `job_detail_page(job_id) -> str` — full per-job view with score breakdown, JD viewer, comp panel.
+- `render_company_card(company, return_to='') -> str` — researched-company panel surfaced on `/job/<id>` for recruiter-call prep: industry, size, HQ, careers URL, sponsorship score+notes, remote_fit, glassdoor/blind sentiment, recent layoffs, and ethics flags. Reads `COMPONENTS["sponsorship"].native_max` + `COMPONENTS["remote"].native_max` for denominators (per the scoring SSOT). When the company record is still a stub, renders a warning banner with a "Research now" form that POSTs to `/today/company/research` and brings the user back to `return_to`.
+- `job_detail_page(job_id) -> str` — full per-job view with score breakdown, JD viewer, comp panel, and the company-research card (pinned high — right under the header for non-interview status, right under the comp card for interview-stage).
 - `resume_page() -> str` — `/resume` view.
 - `render_section_body(sid, linkedin_view='default') -> str` — dispatches to the per-section body renderer.
 - `render_linkedin_body(view='default') -> str` — LinkedIn-ingest section body; `view` controls passing-only vs. all-rows filter.

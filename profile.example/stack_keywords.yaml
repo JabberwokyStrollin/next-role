@@ -27,9 +27,10 @@ crawl:
     - architect
     - tech lead
 
-  # Reject title if it contains any of these (case-insensitive). Filters the
-  # false positives a broad seniority match drags in (e.g. pre-sales
-  # architects, customer-success leads).
+  # Reject title if any of these appears as a whole word (case-insensitive,
+  # letter-boundary aware: "intern" matches "Software Intern" but not
+  # "... International"). Multi-word terms work as written; for variants
+  # that share a prefix, list each one (e.g. both "intern" and "internship").
   title_exclude:
     - solutions architect
     - delivery architect
