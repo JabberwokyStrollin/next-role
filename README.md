@@ -66,7 +66,10 @@ sections you tick off as you work through them:
    you like.
 4. **Cover letters & apply** — ranked apply queue. For each job:
    generate a cover letter, optionally generate a comp estimate, open
-   the `.docx`, log the application.
+   the `.docx`, log the application. The **Answer Questions** button on
+   each row opens `/answer-questions?job_id=…` for ad-hoc application
+   prompts ("Why this company?", "Tell us about a time you…") — paste
+   the question, hit Generate, copy the result.
 
 The plain `/` route is the single-URL ingest form — paste a posting URL,
 fill in title/company/location, submit. The server auto-fetches the JD
@@ -262,6 +265,7 @@ prompt.
 | Research one company | Haiku 4.5 + 1 web search | ~$0.03–0.05 |
 | Generate cover letter | Sonnet 4.6 | ~$0.03 |
 | Generate comp estimate | Opus 4.7 | ~$0.15–0.20 |
+| Answer one application question | Sonnet 4.6 | ~$0.02–0.05 |
 
 Bulk re-score under a new rubric:
 `python scripts/rescore_all.py --dry-run` prints a projected bill before
@@ -292,6 +296,7 @@ scripts/
   update_status.py      — application logging + status transitions
   metrics.py            — read-only analytics for the /metrics page
   comp_estimate.py      — Opus-driven salary + bonus estimator
+  answer_questions.py   — Sonnet-driven ad-hoc application question answers
   generate_cl.js        — cover-letter generator → .docx (Node)
   rescore_all.py        — bulk re-score under a new rubric
   scan_no_sponsorship.py — retroactive no-sponsorship sweep

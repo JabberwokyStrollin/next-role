@@ -41,15 +41,41 @@ APPLICATION_TRACKER_PATH = DATA_DIR / "application_tracker.json"
 PROCESS_LOG_PATH         = DATA_DIR / "process_log.json"
 TARGET_BOARDS_PATH       = DATA_DIR / "target_boards.json"
 CRAWL_LOG_PATH           = DATA_DIR / "crawl_log.jsonl"
-COMP_ESTIMATES_PATH      = DATA_DIR / "comp_estimates.json"
+COMP_ESTIMATES_PATH        = DATA_DIR / "comp_estimates.json"
+APPLICATION_QUESTIONS_PATH = DATA_DIR / "application_questions.json"
+RESUME_ENTRY_NOTES_PATH    = DATA_DIR / "resume_entry_notes.json"
 
 # ─── Rules files ──────────────────────────────────────────────────────────────
 
-PROFILE_DIR           = ROOT / "profile"
-COVER_LETTER_RULES    = PROFILE_DIR / "cover_letter_rules.md"
-RESUME_PATH           = PROFILE_DIR / "resume.md"
-SCORING_RUBRIC_PATH   = PROFILE_DIR / "scoring_rubric.md"
-STACK_KEYWORDS_PATH   = PROFILE_DIR / "stack_keywords.yaml"
+PROFILE_DIR             = ROOT / "profile"
+COVER_LETTER_RULES      = PROFILE_DIR / "cover_letter_rules.md"
+RESUME_PATH             = PROFILE_DIR / "resume.md"
+SCORING_RUBRIC_PATH     = PROFILE_DIR / "scoring_rubric.md"
+STACK_KEYWORDS_PATH     = PROFILE_DIR / "stack_keywords.yaml"
+ANSWER_QUESTIONS_RULES  = PROFILE_DIR / "answer_questions_rules.md"
+
+# ─── Resume entry slugs (canonical names for sections of profile/resume.md) ──
+#
+# Slugs are short stable identifiers the answer-questions generator uses to
+# label which resume entries it drew on for a given answer (so the operator
+# can override the selection). Display labels are short human-readable
+# strings shown in the chip UI. Add a new entry here when adding a new
+# project / role to profile/resume.md that the generator should be able to
+# cite.
+
+RESUME_ENTRY_SLUGS: dict[str, str] = {
+    "haloc_distilled":            "HALOC Distilled (Spark microbatching, petabyte-scale cost reduction)",
+    "haloc_flink_distilled":      "HALOC Flink Distilled (Flink streaming framework, Java, petabyte-scale)",
+    "jailer":                     "Jailer re-architecture (reverse-engineered, 24x dup pattern, >50% cost reduction)",
+    "yaml_ingestion":             "YAML ingestion framework (12+ Spark dataflows, config-only onboarding)",
+    "mass_gpc":                   "MASS/GPC (enterprise-wide event-driven initiatives, six-team stakeholder group)",
+    "splunk_base":                "Splunk Base queries (pre-aggregation, dashboard restoration)",
+    "storm_portal_microservices": "7 Spring Boot microservices (Insight Global, 100% coverage)",
+    "storm_portal_arch_docs":     "Storm Portal architecture documentation (Insight Global)",
+    "raytheon_consolidation":     "6-repo consolidation + data orchestration program (Raytheon)",
+    "ingersoll_crossdomain":      "Cross-domain classification bridge (Ingersoll Consulting)",
+    "next_role":                  "next-role AI job search pipeline (Anthropic API, Sonnet+Haiku)",
+}
 
 # ─── Output directory for generated cover letters ─────────────────────────────
 
@@ -67,8 +93,9 @@ if not ANTHROPIC_API_KEY:
 
 # ─── Models ───────────────────────────────────────────────────────────────────
 
-CLAUDE_MODEL      = "claude-sonnet-4-5-20250929"  # JD scoring, cover letters
+CLAUDE_MODEL      = "claude-sonnet-4-5-20250929"  # JD scoring
 CLAUDE_MODEL_FAST = "claude-haiku-4-5-20251001"   # Company research (10x cheaper)
+CL_MODEL          = "claude-sonnet-4-6"           # Cover letters, answer-questions (matches generate_cl.js)
 
 # ─── Scoring constants (loaded from profile/stack_keywords.yaml) ─────────────
 
@@ -223,6 +250,68 @@ def save_json(path: Path, data: list) -> None:
     """Write a JSON array to disk with readable formatting."""
     with open(path, "w", encoding="utf-8") as f:
         json.dump(_sanitize(data), f, indent=2, ensure_ascii=False)
+
+
+# ─── Answer-text sanitization (for application question outputs) ─────────────
+#
+# Application forms are typically plain-text inputs that mangle smart quotes,
+# em dashes, bullets, and any HTML-ish characters. We strip these at
+# generation time so the stored answer is already copy-paste safe. The web UI
+# binds the copy button to the stored value, so no second pass is needed.
+
+_ANSWER_SANITIZE_MAP: list[tuple[str, str]] = [
+    ("‘", "'"),    # left single quote
+    ("’", "'"),    # right single quote
+    ("“", '"'),    # left double quote
+    ("”", '"'),    # right double quote
+    ("•", ""),     # bullet
+    ("·", ""),     # middle dot
+    (" ", " "),    # non-breaking space
+    (">",      ""),
+    ("<",      ""),
+    ("*",      ""),
+    ("#",      ""),
+]
+
+# Dash handling lives in regex instead of the char map because:
+#   1) ``--`` and `` - `` (single hyphen between spaces) need surrounding-
+#      whitespace context, not char-by-char substitution.
+#   2) A single hyphen between digits (``5-10``) or inside a compound word
+#      (``well-known``) must be preserved -- only prose-em-dash usage should
+#      collapse to a comma.
+# Every dash variant collapses to ``", "`` because that reads as natural
+# prose. If a colon would have been better in a given spot, the operator
+# can swap it via the editable answer textarea on the /answer-questions
+# card (the manual-edit path also runs through this sanitizer).
+import re as _aq_re
+_DASH_PROSE_RE  = _aq_re.compile(r"\s*(?:—|–|--)\s*")
+_DASH_SINGLE_RE = _aq_re.compile(r"(?<!\d)\s+-\s+(?!\d)")
+_COMMA_CHAIN_RE = _aq_re.compile(r",(?:\s*,)+")
+_MULTISPACE_RE  = _aq_re.compile(r"  +")
+
+
+def sanitize_answer_text(text: str) -> str:
+    """
+    Strip / replace characters unsafe for plain-text application fields,
+    and collapse AI-tell dash patterns to commas. Called on every generated
+    answer AND on every manual edit before storage; the copy button uses
+    the stored (already sanitized) value, so no second pass at copy time.
+
+    Dash policy (applied after char-substitutions, in this order):
+      - em / en / double-hyphen with any surrounding whitespace -> ``", "``
+      - single hyphen with whitespace on both sides -> ``", "``, but only
+        when not flanked by digits (so ``"5 - 10"`` survives intact)
+      - chains like ``", , ,"`` collapse to a single ``","``
+    """
+    if not text:
+        return ""
+    for char, replacement in _ANSWER_SANITIZE_MAP:
+        text = text.replace(char, replacement)
+    text = _DASH_PROSE_RE.sub(", ", text)
+    text = _DASH_SINGLE_RE.sub(", ", text)
+    text = _COMMA_CHAIN_RE.sub(",", text)
+    text = _MULTISPACE_RE.sub(" ", text)
+    return text.strip()
 
 
 # ─── Date/time helpers ────────────────────────────────────────────────────────

@@ -464,6 +464,105 @@ per-job detail page.
 
 ---
 
+## `data/application_questions.json`
+
+**Role.** All ad-hoc application questions and their generated answers,
+keyed by `job_id`. Surfaces only on `/answer-questions?job_id=<uuid>`
+(reachable from the Cover Letters & Apply queue's per-job action strip).
+
+**Lifecycle.**
+
+- **Top level is a dict** `{ job_id: { motivation: [...], behavioral: [...] } }` — *not* an array. Empty / missing file is treated as `{}`.
+- **Created** by `answer_questions.add_question` on first add per job + class.
+- **Mutated** by `answer_questions.generate_answer` (appends a new `draft_history` version), `finalize_answer`, `unfinalize_answer`, `update_question_override`, `update_resume_entries`.
+- **Deleted from** only by `answer_questions.delete_question` — refuses to delete a question with `status == "finalized"`.
+- **`draft_history` is append-only**; regeneration never overwrites a prior version.
+- **`finalized_answer` is never overwritten by regeneration** — only by `finalize_answer` / `unfinalize_answer`.
+
+### Schema per question record
+
+| Field | Type | Notes |
+|---|---|---|
+| `question_id` | UUID v4 | Primary key within the job + class list. |
+| `question_text` | string | The verbatim question pasted by the operator. |
+| `question_class` | `"motivation"` / `"behavioral"` | Drives which strategy section of `profile/answer_questions_rules.md` the prompt invokes. |
+| `char_cap` | int / `null` | Hard character cap. Set once at add time; to change, delete and re-add. |
+| `resume_entries_used` | list of slug strings | Slugs from `scripts/config.py:RESUME_ENTRY_SLUGS`. Initially `[]`; the model populates it on first generate; the operator can override via chips. |
+| `question_override_notes` | string | Per-question one-shot context (e.g. "Lead with Jailer here"). Auto-saved on textarea blur. Survives regeneration; never propagates to other questions. |
+| `draft_history` | list of draft objects | Append-only; each has `version` (1-indexed), `answer`, `char_count`, `generated_at`, and `source` (`"generated"` for Claude calls, `"manual_edit"` for operator edits via the editable answer textarea — older entries written before this field existed have no key). |
+| `finalized_answer` | string / `null` | Set by `finalize_answer` (clones latest draft); cleared by `unfinalize_answer`. |
+| `finalized_at` | ISO datetime / `null` | When the finalize click happened. |
+| `status` | `"draft"` / `"finalized"` | Mirrors the presence of `finalized_answer`. |
+
+### Example
+
+```json
+{
+  "24127a68-a2e7-419b-82ff-bef0021397cd": {
+    "motivation": [
+      {
+        "question_id": "e0c2f1a4-7d1b-4d39-9e02-1b0f88c6b5ac",
+        "question_text": "What is it about Miro that makes you interested in joining?",
+        "question_class": "motivation",
+        "char_cap": 900,
+        "resume_entries_used": ["haloc_flink_distilled", "mass_gpc"],
+        "question_override_notes": "",
+        "draft_history": [
+          { "version": 1, "answer": "...", "char_count": 412, "generated_at": "2026-05-25T14:23:00+00:00" }
+        ],
+        "finalized_answer": null,
+        "finalized_at": null,
+        "status": "draft"
+      }
+    ],
+    "behavioral": []
+  }
+}
+```
+
+---
+
+## `data/resume_entry_notes.json`
+
+**Role.** Global supplemental notes per resume-entry slug. Every entry that
+has a non-empty note is injected into **every** answer-generation prompt
+that draws on that entry. Treat as authoritative corrections / constraints
+(e.g. "partial adoption only — not full team rollout"). Edited via the
+"Resume entry notes" panel at the bottom of `/answer-questions`.
+
+**Lifecycle.**
+
+- **Top level is a flat dict** keyed by slug (`{slug: note_text}`).
+- **Initialized** by `answer_questions.load_entry_notes` on first access — all keys from `RESUME_ENTRY_SLUGS` written with empty-string values.
+- **Backfilled** on every load: any new slug added to `RESUME_ENTRY_SLUGS` since the last save shows up with an empty value automatically.
+- **Mutated** by `answer_questions.save_entry_notes` (called by `/answer-questions/entry-notes` on textarea blur). Unknown slugs are dropped on save.
+
+### Schema
+
+| Field | Type | Notes |
+|---|---|---|
+| `<slug>` | string | One key per entry in `RESUME_ENTRY_SLUGS`. Empty string = no note. Trimmed/lowercased? No — notes preserve operator formatting. |
+
+### Example
+
+```json
+{
+  "haloc_distilled":       "The intermediate dataset design was the hardest part — not exactly-once. Solo work — not team-led.",
+  "jailer":                "Partial adoption — I proposed and architected; the implementing team built it. The >50% cost reduction came from partial adoption only.",
+  "mass_gpc":              "I pitched the message structure and authored the standards.",
+  "haloc_flink_distilled": "",
+  "yaml_ingestion":        "",
+  "splunk_base":           "",
+  "storm_portal_microservices": "",
+  "storm_portal_arch_docs": "",
+  "raytheon_consolidation": "",
+  "ingersoll_crossdomain":  "",
+  "next_role":              ""
+}
+```
+
+---
+
 ## `data/process_log.json`
 
 **Role.** Append-only audit trail for pipeline events. Read manually
@@ -502,6 +601,9 @@ forensics.
 | `application_status_change` | `update_status.cmd_status` | `"Status: <old> → <new>."` |
 | `cover_letter_generated` | `generate_cl.js` | `"Cover letter v<n> generated → <filename>"` |
 | `comp_estimate_generated` | `comp_estimate.py` | `"base target <CUR> <n>; confidence <HIGH\|MED\|LOW>"` |
+| `application_question_generated` | `answer_questions.generate_answer` | `"class=<motivation\|behavioral> version=<n> chars=<n> tokens_in=<n> tokens_out=<n>"` |
+| `application_question_edited` | `answer_questions.save_edit` | `"version=<n> chars=<n>"` |
+| `application_question_finalized` | `answer_questions.finalize_answer` | `"version=<n> chars=<n>"` |
 
 ### Example
 

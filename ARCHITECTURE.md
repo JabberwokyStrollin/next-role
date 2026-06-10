@@ -78,15 +78,20 @@ file.
 | `TARGET_BOARDS_PATH` | `Path` | `data/target_boards.json` — ATS boards the crawler polls. |
 | `CRAWL_LOG_PATH` | `Path` | `data/crawl_log.jsonl` — JSONL append-only crawler log. |
 | `COMP_ESTIMATES_PATH` | `Path` | `data/comp_estimates.json` — comp-estimate results keyed by job_id. |
+| `APPLICATION_QUESTIONS_PATH` | `Path` | `data/application_questions.json` — answer-questions records keyed by job_id (dict, not list). |
+| `RESUME_ENTRY_NOTES_PATH` | `Path` | `data/resume_entry_notes.json` — global supplemental notes per resume-entry slug. |
 | `PROFILE_DIR` | `Path` | `<ROOT>/profile` — gitignored user-rules directory. |
 | `COVER_LETTER_RULES` | `Path` | `profile/cover_letter_rules.md` — tone + section structure. |
 | `RESUME_PATH` | `Path` | `profile/resume.md` — active resume. |
 | `SCORING_RUBRIC_PATH` | `Path` | `profile/scoring_rubric.md` — Claude system prompt for JD scoring. |
 | `STACK_KEYWORDS_PATH` | `Path` | `profile/stack_keywords.yaml` — keyword weights + crawl pre-filter. |
+| `ANSWER_QUESTIONS_RULES` | `Path` | `profile/answer_questions_rules.md` — system-prompt rules for `scripts/answer_questions.py`. |
+| `RESUME_ENTRY_SLUGS` | `dict[str, str]` | Slug → human-readable label registry for the resume entries `answer_questions.py` can cite. SSOT — both the prompt and the UI chip picker read from here. |
 | `OUTPUT_DIR` | `Path` | `<ROOT>/output` — generated `.docx` cover letters. Auto-created. |
 | `ANTHROPIC_API_KEY` | `str` | Read from environment; module-level `EnvironmentError` if unset. |
-| `CLAUDE_MODEL` | `str` | Sonnet 4.5 model ID — used for JD scoring and cover letters. |
+| `CLAUDE_MODEL` | `str` | Sonnet 4.5 model ID — used for JD scoring. |
 | `CLAUDE_MODEL_FAST` | `str` | Haiku 4.5 model ID — used for company research (~10× cheaper). |
+| `CL_MODEL` | `str` | Sonnet 4.6 model ID — used for cover letters (`generate_cl.js`) and answer-questions (`answer_questions.py`). |
 | `STACK_KEYWORDS` | `dict[str, int]` | Lowercased keyword → points map, loaded from YAML at import time. |
 | `STACK_SCORE_MAX` | `int` | Cap for `compute_stack_score`; from YAML `max_score`. |
 | `COMPONENTS` | `dict[str, ScoringComponent]` | **SSOT** for both scoring profiles' weights + native max per signal. |
@@ -153,6 +158,27 @@ Reads a JSON file from disk and returns the parsed value. Returns `[]` (not
 Writes `data` to `path` as pretty-printed UTF-8 JSON (`indent=2`,
 `ensure_ascii=False`). Runs `_sanitize` first so surrogate chars don't
 poison the dump.
+
+#### `sanitize_answer_text(text: str) -> str`
+Strip / replace characters unsafe for plain-text application-form inputs
+on generated answers, then collapse AI-tell dash patterns to commas.
+Char-level pass (via `_ANSWER_SANITIZE_MAP`) replaces smart quotes with
+ASCII, normalizes non-breaking space to a regular space, and removes
+bullets / middle dots / asterisks / hashes / `<` / `>`. Regex pass then
+collapses em-dashes, en-dashes, and double-hyphens (with any surrounding
+whitespace) to `", "`, plus single hyphens with whitespace on both sides
+when not flanked by digits (so `"5-10"` and `"well-known"` survive
+intact). Final cleanup collapses `", , ,"` chains and double spaces, then
+trims.
+
+Called by `answer_questions.generate_answer` before persisting Claude's
+output AND by `answer_questions.save_edit` before persisting an operator
+edit — same policy in both paths. The copy button binds to the stored
+value, so no second pass is needed at copy time.
+
+Module-level state:
+- `_ANSWER_SANITIZE_MAP` — char replacement table.
+- `_DASH_PROSE_RE`, `_DASH_SINGLE_RE`, `_COMMA_CHAIN_RE`, `_MULTISPACE_RE` — pre-compiled regex passes applied in order.
 
 #### `today() -> str`
 Returns today's date as an ISO `YYYY-MM-DD` string. **Always use this — never
@@ -933,6 +959,7 @@ calling `linkedin_fetch._fetch_jd_text`.
 #### `GET /metrics` — read-only analytics dashboard rendered from `scripts/metrics.py:build_metrics()`.
 #### `GET /resume` — Experience + Education snippet builder.
 #### `GET /job/<id>` — per-job detail (composite breakdown, JD viewer, comp panel, company-research card).
+#### `GET /answer-questions?job_id=<uuid>` — ad-hoc application question answerer page for one job. Two question lists (motivation, behavioral) + the global resume-entry-notes editor. Reachable from the "Answer Questions" button on every cover-letters row.
 #### `POST /ingest` — handle the ingest form; auto-fetch JD or render paste form.
 #### `POST /today/crawl/start` — kick off background crawl worker.
 #### `POST /today/linkedin/fetch` — shell out to `linkedin_fetch.py`.
@@ -949,6 +976,15 @@ calling `linkedin_fetch._fetch_jd_text`.
 #### `POST /today/apply/log` — shell out to `update_status.py log`.
 #### `POST /today/toggle` — flip a section's done flag in `daily_checklist.json`.
 #### `POST /today/status` — shell out to `update_status.py status`.
+#### `POST /answer-questions/add` — create a new question (JSON in/out: `{job_id, question_text, question_class, char_cap}` → `{ok, card_html, error}`). Driven by `scripts/answer_questions.py:add_question`.
+#### `POST /answer-questions/delete` — delete a draft question (JSON). Refuses to delete finalized questions.
+#### `POST /answer-questions/generate` — generate/regenerate an answer for one question (JSON). Blocks the request thread for the Sonnet 4.6 call (~15–30s). Appends a new draft version; never overwrites `finalized_answer`.
+#### `POST /answer-questions/save-edit` — persist a manually-edited answer as a new draft version with `source="manual_edit"`. Body: `{job_id, question_id, answer}`. Runs through `sanitize_answer_text` before storage. Driven by the editable answer textarea + "Save edit" button on each card.
+#### `POST /answer-questions/finalize` — snapshot the latest draft as the finalized answer (JSON). The client-side click handler in `_AQ_PAGE_JS` first checks whether the editable answer textarea has an unsaved edit (compares `value` against the dirty-baseline `dataset.savedValue`); if dirty, it POSTs to `/answer-questions/save-edit` first so the finalize uses the operator's edited text, not the previously persisted draft. The server endpoint itself is single-purpose and always locks `history[-1]`.
+#### `POST /answer-questions/unfinalize` — clear the finalized snapshot; preserves draft history (JSON).
+#### `POST /answer-questions/override` — save per-question one-shot notes; silent autosave on textarea blur (JSON in, `{ok, error}` only — no card_html).
+#### `POST /answer-questions/entries` — replace `resume_entries_used` for one question; called on chip add / × click (JSON).
+#### `POST /answer-questions/entry-notes` — save the full global entry-notes dict; silent autosave on textarea blur (JSON).
 
 ### Functions
 
@@ -1039,6 +1075,10 @@ the web view stays in sync with the CLI.
 - `render_comp_panel(comp_record, job_id) -> str` — comp-estimate accordion inside a cover-letter row.
 - `render_cl_row(job, co_by_id=None, ...) -> str` — one cover-letter row in the apply queue.
 - `daily_checklist_page(open_section=None, linkedin_view='default') -> str` — the `/today` page assembly.
+- `_aq_chip_html(slug, label) -> str` — one resume-entry chip on the answer-questions card.
+- `_aq_card_html(job_id, question) -> str` — full question card HTML, used both for initial page render and as the `card_html` payload returned by every `/answer-questions/*` mutating endpoint so the client can swap a single card's `outerHTML` without a full reload.
+- `render_answer_questions_page(job_id) -> str` — the `/answer-questions` full-page view: header (back link + job header + composite score), motivation section, behavioral section, global resume-entry-notes panel, and the page-local JS (`_AQ_PAGE_JS`). Lazy-imports `answer_questions` so the module's API-key check doesn't fire on server startup.
+- `_AQ_PAGE_JS` — module-level string holding the page-local `<script>` block. Event-delegated (matches `closest('.aq-card')`) so dynamically-replaced cards stay bound without rebinding. Every mutating endpoint returns `{ok, card_html, error}`; on success the client replaces the matching card's `outerHTML` with `card_html` (delete returns `null` and removes the card instead). Tracks dirty edit state by stamping `textarea.dataset.savedValue` on first keystroke (baseline = `defaultValue`) so the **Save edit** button can disable itself when the textarea matches what was last persisted. **Finalize chains `save-edit` first when dirty** so the locked snapshot reflects what the operator sees, not the previously persisted draft. Helpers: `currentCard(qid)` re-queries the DOM after each `replaceCard` (the prior `card` reference is detached and stale); `isDirtyEdit(card)` is the single source of truth for "are there unsaved edits".
 
 #### `Handler(BaseHTTPRequestHandler)`
 Single HTTP handler class — one method per HTTP verb plus small helpers.
@@ -1049,7 +1089,9 @@ Single HTTP handler class — one method per HTTP verb plus small helpers.
 - `do_GET(self)` — dispatch on `urlparse(self.path).path`. Routes listed above.
 - `redirect_today(self, open_section=None, fragment=None)` — 303 to `/today?open=…#…`.
 - `redirect_or_today(self, params, open_section=None, fragment=None)` — same-origin `return_to` redirect or fall back to `redirect_today`.
-- `do_POST(self)` — dispatch on path; each route consumes the body, runs the action, sets a flash, and redirects.
+- `do_POST(self)` — dispatch on path; each route consumes the body, runs the action, sets a flash, and redirects. The `/answer-questions/*` prefix is dispatched first and uses the JSON shell below instead of the redirect pattern.
+- `_read_json_body(self) -> dict` — parse a JSON-encoded request body. Returns `{}` on missing / invalid JSON (the dispatcher then returns `{"ok": false, "error": "..."}`).
+- `_aq_handle(self, fn) -> None` — shared shell for `/answer-questions/*` JSON handlers. Lazy-imports `answer_questions`, reads the body, calls `fn(aq, body)` which returns `(ok, card_html, error)`, and writes the JSON response. Any exception is caught and serialized as `{"ok": false, "error": str(e)}`.
 
 #### `main() -> None`
 Argparse: `--port PORT` (default 5000), `--no-browser`. Starts an
@@ -1396,6 +1438,139 @@ Pipeline: load job → load company → derive currency → load resume → buil
 prompts → call Claude → parse → validate → upsert + log → print summary
 (base range, target ask, confidence). On `--dry-run`, the validated result
 is printed and nothing is written.
+
+---
+
+## `scripts/answer_questions.py`
+
+**Role.** Ad-hoc application question answerer. Operator pastes a question
+("Why this company?", "Tell us about a time you made a high-impact
+architectural decision…"); the module assembles a prompt from
+`profile/answer_questions_rules.md` + the resume + `RESUME_ENTRY_SLUGS` +
+non-empty global entry notes + any per-question override, calls Sonnet 4.6,
+sanitizes the answer, and appends it to `draft_history` for that question.
+
+Web-UI only — no CLI entrypoint, no `main()`. Driven by `serve.py`'s
+`/answer-questions/*` JSON routes.
+
+Two question classes (`motivation`, `behavioral`) get separate strategy
+sections in the rules file but share the same accuracy/tone constraints.
+`char_cap` is honored as a hard limit at prompt time; over-cap drafts still
+get persisted so the operator can see what happened and regenerate.
+
+`draft_history` is append-only — regeneration **never** overwrites a prior
+version. `finalized_answer` is only set by an explicit `finalize_answer`
+call and is preserved across regenerations until the operator unfinalizes.
+
+### Module-level constants
+
+| Name | Purpose |
+|---|---|
+| `MAX_TOKENS` | 1500 — enough for the JSON payload + a long answer with room for reasoning. |
+| `QUESTION_CLASSES` | `("motivation", "behavioral")` — validated by `add_question`. |
+| `QUESTION_STATUSES` | `("draft", "finalized")` — only used for documentation; status is set by the lifecycle helpers. |
+
+### Functions
+
+#### `load_questions() -> dict`
+Reads `data/application_questions.json` and returns the top-level dict
+keyed by `job_id`. Returns `{}` if file missing. Coerces a stray empty
+list (from a brand-new `load_json` return) to `{}`.
+
+#### `save_questions(data: dict) -> None`
+Persists via `save_json`.
+
+#### `load_entry_notes() -> dict`
+Reads `data/resume_entry_notes.json` and returns the slug→note dict. On
+first access, seeds the file with every slug from `RESUME_ENTRY_SLUGS`
+mapped to `""`. On subsequent loads, backfills any newly-added slugs so
+the UI never hits a KeyError.
+
+#### `save_entry_notes(notes: dict) -> None`
+Persists. Drops unknown slugs on write — only the canonical
+`RESUME_ENTRY_SLUGS` set survives.
+
+#### `get_job_questions(job_id: str) -> dict`
+Returns `{"motivation": [...], "behavioral": [...]}` for the job. Both
+class keys are always present even if the job has no questions yet.
+
+#### `_find_question(data: dict, job_id: str, question_id: str) -> tuple[str | None, dict | None]`
+Internal lookup. Returns `(class_key, record)` or `(None, None)`.
+
+#### `add_question(job_id: str, question_text: str, question_class: str, char_cap: int | None) -> dict`
+Creates a new question with a fresh UUID, appends it to the job + class
+list, persists, returns the new record. Raises `ValueError` on unknown
+`question_class` or empty `question_text`.
+
+#### `delete_question(job_id: str, question_id: str) -> bool`
+Removes a draft question. Refuses (`ValueError`) to delete a question
+with `status == "finalized"` — operator must unfinalize first. Returns
+`True` if found and removed, `False` if not found.
+
+#### `update_question_override(job_id: str, question_id: str, override_notes: str) -> dict`
+Writes `question_override_notes`. Per-question, one-shot, survives
+regeneration but never propagates to other questions.
+
+#### `update_resume_entries(job_id: str, question_id: str, slugs: list[str]) -> dict`
+Replaces `resume_entries_used` with the operator's chip selection.
+Filters to slugs that exist in `RESUME_ENTRY_SLUGS` (unknown ones are
+dropped) and deduplicates while preserving order.
+
+#### `_format_slug_registry() -> str`
+Builds the `RESUME_ENTRY_SLUGS:` block of the system prompt — one line
+per slug with its display label. Tells the model which slug strings are
+valid for `resume_entries_used`.
+
+#### `_format_entry_notes(notes: dict) -> str`
+Builds the global-notes block. Skips slugs with empty notes; if all are
+empty, returns `""` so the prompt stays clean.
+
+#### `build_prompt(job: dict, company: dict | None, question_record: dict, entry_notes: dict) -> tuple[str, str]`
+Returns `(system_prompt, user_message)`. System prompt assembles the rules
+file, the resume, the slug registry, non-empty entry notes, and a final
+"This question is class X" pointer. User message carries job + JD + the
+question itself + the char-cap line + override notes + previously-used
+slugs (regeneration hint).
+
+#### `_parse_answer_json(raw: str) -> dict`
+Tolerant JSON parser. Mirrors `comp_estimate.parse_comp_json` exactly:
+strips ` ```json ... ``` ` fences, generic ` ``` ... ``` ` fences, then
+leading prose before `{`.
+
+#### `_call_claude(system: str, user_message: str) -> tuple[str, int, int]`
+Single Anthropic call against `CL_MODEL` (Sonnet 4.6). Returns
+`(response_text, input_tokens, output_tokens)`.
+
+#### `_append_log(event: dict) -> None`
+Appends to `data/process_log.json`. Event types written:
+`application_question_generated`, `application_question_finalized`.
+
+#### `generate_answer(job_id: str, question_id: str) -> dict`
+End-to-end generation. Loads the question, job, company, and entry notes;
+builds the prompt; calls Claude; parses; sanitizes via
+`config.sanitize_answer_text`; appends a new `draft_history` version with
+the computed `char_count`; writes the model's `resume_entries_used` back
+onto the record (filtered to known slugs). Never touches
+`finalized_answer`. Returns the updated record.
+
+Raises `ValueError` for: question not found, job not found, non-JSON
+response, missing/blank `answer`, non-list `resume_entries_used`.
+
+#### `save_edit(job_id: str, question_id: str, answer_text: str) -> dict`
+Persist a manually-edited answer as a new `draft_history` entry with
+`source = "manual_edit"`. The submitted text is run through
+`config.sanitize_answer_text` first so the dash policy and other
+invariants apply uniformly to operator edits and Claude output. Never
+mutates a prior version — every save appends. Raises `ValueError` if the
+sanitized text is empty.
+
+#### `finalize_answer(job_id: str, question_id: str) -> dict`
+Snapshots the latest draft into `finalized_answer` + `finalized_at` and
+sets `status = "finalized"`. Raises `ValueError` if there are no drafts.
+
+#### `unfinalize_answer(job_id: str, question_id: str) -> dict`
+Clears `finalized_answer` / `finalized_at` and sets `status = "draft"`.
+Draft history is preserved.
 
 ---
 

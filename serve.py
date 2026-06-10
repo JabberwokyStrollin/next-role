@@ -1248,6 +1248,71 @@ STYLE = """
   .hist-legend .leg-flight::before  { color: #2E75B6; }
   .hist-legend .leg-dead::before    { color: #c75050; }
   .hist-legend .leg-positive::before { color: #1a5c2e; }
+
+  /* ── Answer Questions page ──────────────────────────────────────────── */
+  .aq-add-form     { margin-bottom: 14px; }
+  .aq-new-text     { width: 100%; padding: 8px; font-size: 13px;
+                     border: 0.5px solid rgba(0,0,0,0.2); border-radius: 5px;
+                     font-family: inherit; resize: vertical; }
+  .aq-new-cap      { padding: 5px 8px; font-size: 12px;
+                     border: 0.5px solid rgba(0,0,0,0.2); border-radius: 5px; }
+  .aq-list         { display: flex; flex-direction: column; gap: 14px;
+                     margin-top: 12px; }
+  .aq-card         { border: 0.5px solid rgba(0,0,0,0.12); border-radius: 8px;
+                     padding: 14px; background: #fafaf9; }
+  .aq-card.aq-busy { opacity: 0.7; pointer-events: none; }
+  .aq-card-head    { display: flex; gap: 8px; align-items: center;
+                     margin-bottom: 8px; flex-wrap: wrap; }
+  .aq-class        { text-transform: capitalize; }
+  .aq-cap          { font-size: 11px; color: #666; }
+  .aq-question-text{ font-size: 13.5px; font-weight: 500; color: #1F3864;
+                     margin-bottom: 12px; line-height: 1.4; }
+  .aq-section      { margin-top: 10px; }
+  .aq-chips        { display: flex; gap: 6px; flex-wrap: wrap;
+                     align-items: center; margin-top: 6px; }
+  .aq-chip         { display: inline-flex; align-items: center; gap: 4px;
+                     padding: 3px 6px 3px 8px; border-radius: 12px;
+                     background: #e6f1fb; color: #0c447c; font-size: 11px; }
+  .aq-chip-remove  { border: none; background: transparent; cursor: pointer;
+                     color: #0c447c; font-size: 13px; padding: 0 2px;
+                     line-height: 1; }
+  .aq-chip-remove:hover { color: #c75050; }
+  .aq-chip-add     { font-size: 11px; padding: 3px 6px;
+                     border: 0.5px solid rgba(0,0,0,0.2); border-radius: 4px;
+                     background: #fff; }
+  .aq-override-text{ width: 100%; min-height: 48px; padding: 6px 8px;
+                     font-size: 12px; font-family: inherit;
+                     border: 0.5px solid rgba(0,0,0,0.15); border-radius: 5px;
+                     resize: vertical; background: #fff; margin-top: 4px; }
+  .aq-controls     { display: flex; gap: 8px; align-items: center;
+                     flex-wrap: wrap; margin-bottom: 8px; }
+  .aq-version-picker { font-size: 11px; padding: 4px 6px;
+                       border: 0.5px solid rgba(0,0,0,0.2); border-radius: 4px;
+                       background: #fff; }
+  .aq-version-meta { font-size: 11px; color: #666; }
+  .aq-answer-text  { width: 100%; min-height: 120px; padding: 10px;
+                     font-size: 13px; font-family: ui-monospace, Consolas, monospace;
+                     border: 0.5px solid rgba(0,0,0,0.2); border-radius: 5px;
+                     resize: vertical; background: #fff; line-height: 1.45; }
+  .aq-empty-answer { padding: 14px; background: #fff;
+                     border: 0.5px dashed rgba(0,0,0,0.2); border-radius: 5px;
+                     color: #888; font-size: 12px; }
+  .aq-finalized    { margin-top: 12px; padding: 10px; border-radius: 6px;
+                     background: #d4edda; border: 0.5px solid #b7d8c0; }
+  .aq-finalized-label { font-size: 11px; font-weight: 500; color: #155724;
+                        margin-bottom: 4px; text-transform: uppercase; }
+  .aq-finalized-text { width: 100%; min-height: 100px; padding: 8px;
+                       font-size: 13px; font-family: ui-monospace, Consolas, monospace;
+                       background: #fff; border: 0.5px solid rgba(0,0,0,0.15);
+                       border-radius: 4px; line-height: 1.45; }
+  .aq-notes-grid   { display: grid; grid-template-columns: 1fr; gap: 10px;
+                     margin-top: 12px; }
+  .aq-note-row     { display: flex; flex-direction: column; gap: 4px; }
+  .aq-note-label   { font-size: 11.5px; color: #1F3864; font-weight: 500; }
+  .aq-note-text    { width: 100%; min-height: 40px; padding: 6px 8px;
+                     font-size: 12px; font-family: inherit;
+                     border: 0.5px solid rgba(0,0,0,0.15); border-radius: 4px;
+                     resize: vertical; background: #fff; }
 </style>
 """
 
@@ -3246,6 +3311,8 @@ def render_cl_row(job: dict, co_by_id: dict | None = None,
           <input type="hidden" name="job_id" value="{job_id}">
           <button class="btn-mini" type="submit">{comp_label}</button>
         </form>
+        <a class="btn-mini" href="/answer-questions?job_id={job_id}"
+           style="text-decoration:none;display:inline-flex;align-items:center">Answer Questions</a>
         {open_copy}
         {apply_link}
         {detail_link}
@@ -3260,6 +3327,561 @@ def render_cl_row(job: dict, co_by_id: dict | None = None,
       </div>
     </div>
     """
+
+
+# ── /answer-questions — ad-hoc application question answers ──────────────────
+#
+# Full page surfaced from the cover-letters apply queue. Driven by
+# scripts/answer_questions.py for all generation/persistence; the renderer
+# below only assembles HTML. POST handlers below return JSON
+# ({"ok": bool, "card_html": str|None, "error": str|None}) so the client can
+# swap a single card's outerHTML without a full reload — generate is too slow
+# (15-30s Sonnet call) to tolerate a reload-on-every-action UX.
+
+def _aq_chip_html(slug: str, label: str) -> str:
+    from html import escape as esc
+    return (
+        f'<span class="aq-chip" data-slug="{esc(slug)}" title="{esc(label)}">'
+        f'<span class="aq-chip-label">{esc(slug)}</span>'
+        f'<button type="button" class="aq-chip-remove" aria-label="Remove">×</button>'
+        f'</span>'
+    )
+
+
+def _aq_card_html(job_id: str, question: dict) -> str:
+    """Render a single question card. Used both for initial page render and
+    for the JSON response after any mutation so the client can swap
+    outerHTML with the freshest server-rendered card."""
+    from html import escape as esc
+    from config import RESUME_ENTRY_SLUGS
+
+    qid     = esc(question.get("question_id", ""))
+    qtext   = esc(question.get("question_text", ""))
+    qclass  = esc(question.get("question_class", ""))
+    cap     = question.get("char_cap")
+    status  = question.get("status", "draft")
+    is_final = status == "finalized"
+    override = esc(question.get("question_override_notes", "") or "")
+    history  = question.get("draft_history") or []
+    used     = question.get("resume_entries_used") or []
+
+    cap_label = f"{cap} char cap" if cap else "no cap"
+    status_cls = "pf-pass" if is_final else "pf-badge"
+    status_lbl = "finalized" if is_final else f"draft (v{len(history)})" if history else "draft (empty)"
+
+    chips_html = "".join(
+        _aq_chip_html(slug, RESUME_ENTRY_SLUGS.get(slug, slug))
+        for slug in used
+    )
+    add_options = "".join(
+        f'<option value="{esc(slug)}">{esc(slug)} — {esc(label)}</option>'
+        for slug, label in RESUME_ENTRY_SLUGS.items()
+        if slug not in used
+    )
+    chip_picker = (
+        f'<select class="aq-chip-add"><option value="">+ add entry</option>{add_options}</select>'
+        if add_options else ""
+    )
+
+    # Embed full draft history as JSON for client-side version switching.
+    history_json = esc(json.dumps([
+        {"v": h.get("version"), "answer": h.get("answer", ""),
+         "chars": h.get("char_count", 0), "at": h.get("generated_at", "")}
+        for h in history
+    ]))
+
+    if history:
+        latest = history[-1]
+        latest_answer = latest.get("answer", "")
+        latest_chars  = latest.get("char_count", 0)
+        cap_warn = ""
+        if cap and latest_chars > cap:
+            cap_warn = f' <span class="pf-fail">over by {latest_chars - cap}</span>'
+        version_opts = "".join(
+            f'<option value="{h.get("version")}"{" selected" if h is latest else ""}>'
+            f'v{h.get("version")} ({h.get("char_count", 0)} chars'
+            f'{" · edit" if h.get("source") == "manual_edit" else ""})</option>'
+            for h in history
+        )
+        version_picker = (
+            f'<select class="aq-version-picker">{version_opts}</select>'
+            f' <span class="aq-version-meta">{latest_chars} chars{cap_warn}</span>'
+        )
+        # Editable so the operator can tweak wording inline. Save runs the
+        # text through sanitize_answer_text and appends a new draft version
+        # (source=manual_edit) — never mutates a prior version.
+        answer_block = (
+            f'<textarea class="aq-answer-text">{esc(latest_answer)}</textarea>'
+        )
+        copy_btn      = '<button type="button" class="btn-mini aq-copy">Copy</button>'
+        save_edit_btn = (
+            '<button type="button" class="btn-mini aq-save-edit" disabled '
+            'title="Save edits as a new draft version">Save edit</button>'
+        )
+        gen_label = "Regenerate"
+    else:
+        version_picker = '<span style="color:#888;font-size:11px">no drafts yet</span>'
+        answer_block = (
+            '<div class="aq-empty-answer">'
+            'No answer generated yet. Click <strong>Generate</strong> to produce a draft.'
+            '</div>'
+        )
+        copy_btn      = ""
+        save_edit_btn = ""
+        gen_label     = "Generate"
+
+    if is_final:
+        finalized_text = esc(question.get("finalized_answer") or "")
+        final_block = (
+            '<div class="aq-finalized">'
+            '<div class="aq-finalized-label">Finalized answer (locked):</div>'
+            f'<textarea class="aq-finalized-text" readonly>{finalized_text}</textarea>'
+            '<button type="button" class="btn-mini aq-copy-finalized">Copy finalized</button>'
+            '</div>'
+        )
+        finalize_btn = '<button type="button" class="btn-mini aq-unfinalize">Unfinalize</button>'
+        delete_btn   = ''
+    else:
+        final_block  = ''
+        finalize_btn = (
+            '<button type="button" class="btn-mini aq-finalize">Finalize</button>'
+            if history else ''
+        )
+        delete_btn   = '<button type="button" class="btn-mini aq-delete">Delete</button>'
+
+    return f"""
+<div class="aq-card" data-question-id="{qid}" data-job-id="{esc(job_id)}" data-class="{qclass}">
+  <div class="aq-card-head">
+    <span class="aq-class pf-badge">{qclass}</span>
+    <span class="aq-cap">{cap_label}</span>
+    <span class="app-status {status_cls}">{status_lbl}</span>
+  </div>
+  <div class="aq-question-text">{qtext}</div>
+
+  <div class="aq-section">
+    <div class="section-label">Resume entries used</div>
+    <div class="aq-chips" data-question-id="{qid}">{chips_html}{chip_picker}</div>
+  </div>
+
+  <div class="aq-section">
+    <div class="section-label">For this question only (one-shot notes)</div>
+    <textarea class="aq-override-text"
+              placeholder="Per-question hints — e.g. 'Lead with Jailer here.'"
+              >{override}</textarea>
+  </div>
+
+  <div class="aq-section">
+    <div class="aq-controls">
+      <button type="button" class="btn btn-primary aq-generate">{gen_label}</button>
+      {version_picker}
+      {save_edit_btn}
+      {copy_btn}
+      {finalize_btn}
+      {delete_btn}
+    </div>
+    <div class="aq-history" data-history='{history_json}'></div>
+    <div class="aq-answer-wrap">{answer_block}</div>
+    {final_block}
+  </div>
+</div>
+"""
+
+
+def render_answer_questions_page(job_id: str) -> str:
+    """Full page: motivation + behavioral question lists for one job, plus
+    the global resume-entry-notes editor."""
+    from html import escape as esc
+
+    # Lazy-import so the answer_questions module's config-time API-key check
+    # doesn't fire on server startup (matches the pattern other scripts/
+    # modules follow in this file).
+    sys.path.insert(0, str(SCRIPTS))
+    import answer_questions as aq
+    from config import RESUME_ENTRY_SLUGS
+
+    jobs = load_pipeline()
+    job  = next((j for j in jobs if j.get("job_id") == job_id), None)
+    if not job:
+        return page("Not found", "<div class='card'><h2>Job not found</h2></div>")
+
+    co_by_id = load_companies_by_id()
+    company  = co_by_id.get(job.get("company_id")) or {}
+
+    buckets     = aq.get_job_questions(job_id)
+    entry_notes = aq.load_entry_notes()
+
+    title    = esc(job.get("title", "?"))
+    company_name = esc(job.get("company_name") or company.get("name") or "?")
+    score    = job_score(job, co_by_id)
+    location = esc(job.get("location", "") or "")
+
+    def render_bucket(class_key: str, heading: str, hint: str) -> str:
+        cards = "".join(_aq_card_html(job_id, q) for q in buckets.get(class_key, []))
+        empty = (
+            '<p style="color:#888;font-size:12px;margin:6px 0 0 0">'
+            'No questions yet — paste one above and click Add.'
+            '</p>'
+        ) if not buckets.get(class_key) else ""
+        return f"""
+<div class="card">
+  <h2>{heading}</h2>
+  <p style="color:#666;font-size:12px;margin-top:-4px">{hint}</p>
+  <form class="aq-add-form" data-class="{class_key}" data-job-id="{esc(job_id)}">
+    <textarea name="question_text" class="aq-new-text" rows="2"
+              placeholder="Paste the question text here…" required></textarea>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+      <input type="number" name="char_cap" class="aq-new-cap"
+             placeholder="char cap (optional)" min="100" max="5000"
+             style="width:200px">
+      <button type="submit" class="btn-mini">Add question</button>
+    </div>
+  </form>
+  <div class="aq-list" data-class="{class_key}">{cards}{empty}</div>
+</div>
+"""
+
+    motivation_section = render_bucket(
+        "motivation",
+        "Why this company / role? (Motivation)",
+        "Connect a specific thing in the JD to a specific thing in the resume. "
+        "No emotional or culture claims.",
+    )
+    behavioral_section = render_bucket(
+        "behavioral",
+        "Behavioral / Experience (Describe a time you…)",
+        "One project per answer. Build-to-win narrative arc — context, choice, outcome.",
+    )
+
+    notes_rows = "".join(
+        f"""
+<div class="aq-note-row" data-slug="{esc(slug)}">
+  <div class="aq-note-label" title="{esc(slug)}">{esc(label)}</div>
+  <textarea class="aq-note-text" data-slug="{esc(slug)}"
+            placeholder="Optional correction/constraint — applies to every answer using this entry."
+            >{esc(entry_notes.get(slug, '') or '')}</textarea>
+</div>"""
+        for slug, label in RESUME_ENTRY_SLUGS.items()
+    )
+
+    notes_section = f"""
+<div class="card">
+  <h2>Resume entry notes (global)</h2>
+  <p style="color:#666;font-size:12px;margin-top:-4px">
+    These notes are injected into <strong>every</strong> question's prompt for
+    the entry they belong to. Treat them as authoritative overrides — corrections
+    or constraints the model must respect. Auto-saves on blur.
+  </p>
+  <div class="aq-notes-grid">{notes_rows}</div>
+  <div class="aq-notes-saved" style="color:#888;font-size:11px;margin-top:6px"></div>
+</div>
+"""
+
+    header = f"""
+<p style="margin-bottom:14px">
+  <a href="/today?open=cover_letters">← Back to Apply Queue</a> ·
+  <a href="/job/{esc(job_id)}">Job detail</a>
+</p>
+<div class="card">
+  <h1 style="margin-bottom:6px">{company_name} — {title}</h1>
+  <p class="sub" style="margin:0">
+    {location} · composite <strong>{score}</strong>/{COMPOSITE_MAX}
+  </p>
+</div>
+"""
+
+    body = header + motivation_section + behavioral_section + notes_section + _AQ_PAGE_JS
+    return page(f"Answer Questions — {company_name}", body)
+
+
+# Page-local JS. Event-delegated so dynamically-replaced cards rebind for
+# free. All mutating endpoints return {"ok": bool, "card_html": str|None,
+# "error": str|None}; the client swaps the matching card's outerHTML.
+_AQ_PAGE_JS = """
+<script>
+(function() {
+  function postJSON(path, body) {
+    return fetch(path, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body || {}),
+    }).then(r => r.json());
+  }
+  function findCard(el) { return el.closest('.aq-card'); }
+  function currentCard(questionId) {
+    return document.querySelector('.aq-card[data-question-id="' + questionId + '"]');
+  }
+  function replaceCard(card, html) {
+    const tmp = document.createElement('div');
+    tmp.innerHTML = html.trim();
+    const fresh = tmp.firstElementChild;
+    if (fresh) card.replaceWith(fresh);
+    return fresh;
+  }
+  function isDirtyEdit(card) {
+    const ta = card.querySelector('.aq-answer-text');
+    return !!(ta && ta.dataset.savedValue !== undefined
+              && ta.value !== ta.dataset.savedValue);
+  }
+  function flashErr(msg) { alert(msg || 'Error'); }
+  function showCopied(btn, label) {
+    const orig = btn.textContent;
+    btn.textContent = label || 'Copied';
+    setTimeout(() => { btn.textContent = orig; }, 1200);
+  }
+  function setBusy(card, busy, label) {
+    card.classList.toggle('aq-busy', !!busy);
+    const btn = card.querySelector('.aq-generate');
+    if (btn) {
+      if (busy) {
+        btn.dataset.origLabel = btn.textContent;
+        btn.textContent = label || 'Generating…';
+        btn.disabled = true;
+      } else {
+        if (btn.dataset.origLabel) btn.textContent = btn.dataset.origLabel;
+        btn.disabled = false;
+      }
+    }
+  }
+
+  // ── Add question
+  document.addEventListener('submit', function(e) {
+    const form = e.target.closest('.aq-add-form');
+    if (!form) return;
+    e.preventDefault();
+    const textEl = form.querySelector('.aq-new-text');
+    const capEl  = form.querySelector('.aq-new-cap');
+    const text   = (textEl.value || '').trim();
+    if (!text) return;
+    const cap = capEl.value ? parseInt(capEl.value, 10) : null;
+    postJSON('/answer-questions/add', {
+      job_id: form.dataset.jobId,
+      question_text: text,
+      question_class: form.dataset.class,
+      char_cap: cap,
+    }).then(r => {
+      if (!r.ok) return flashErr(r.error);
+      const list = document.querySelector(`.aq-list[data-class="${form.dataset.class}"]`);
+      const tmp = document.createElement('div');
+      tmp.innerHTML = r.card_html.trim();
+      // Drop any 'no questions yet' placeholder.
+      const placeholder = list.querySelector('p');
+      if (placeholder) placeholder.remove();
+      list.appendChild(tmp.firstElementChild);
+      textEl.value = '';
+      capEl.value  = '';
+    }).catch(e => flashErr(String(e)));
+  });
+
+  // ── Generate / Regenerate
+  document.addEventListener('click', function(e) {
+    const btn = e.target.closest('.aq-generate');
+    if (!btn) return;
+    const card = findCard(btn);
+    if (!card) return;
+    setBusy(card, true, 'Generating… (15-30s)');
+    postJSON('/answer-questions/generate', {
+      job_id: card.dataset.jobId,
+      question_id: card.dataset.questionId,
+    }).then(r => {
+      if (!r.ok) { setBusy(card, false); return flashErr(r.error); }
+      replaceCard(card, r.card_html);
+    }).catch(err => { setBusy(card, false); flashErr(String(err)); });
+  });
+
+  // ── Finalize / Unfinalize / Delete
+  function cardAction(path, btnSelector, confirmMsg) {
+    document.addEventListener('click', function(e) {
+      const btn = e.target.closest(btnSelector);
+      if (!btn) return;
+      const card = findCard(btn);
+      if (!card) return;
+      if (confirmMsg && !confirm(confirmMsg)) return;
+      postJSON(path, {
+        job_id: card.dataset.jobId,
+        question_id: card.dataset.questionId,
+      }).then(r => {
+        if (!r.ok) return flashErr(r.error);
+        if (r.card_html) replaceCard(card, r.card_html);
+        else card.remove();  // delete returns no html
+      }).catch(err => flashErr(String(err)));
+    });
+  }
+  cardAction('/answer-questions/unfinalize', '.aq-unfinalize', null);
+  cardAction('/answer-questions/delete',     '.aq-delete',     'Delete this question? Drafts will be lost.');
+
+  // ── Finalize: if the answer textarea has unsaved edits, persist them as a
+  // new draft version FIRST so the finalized snapshot reflects what the
+  // operator sees on screen (otherwise finalize_answer locks in the last
+  // saved draft and silently drops the in-flight edit).
+  document.addEventListener('click', async function(e) {
+    const btn = e.target.closest('.aq-finalize');
+    if (!btn) return;
+    const card = findCard(btn);
+    if (!card) return;
+    const jid = card.dataset.jobId;
+    const qid = card.dataset.questionId;
+
+    if (isDirtyEdit(card)) {
+      const ta = card.querySelector('.aq-answer-text');
+      const r = await postJSON('/answer-questions/save-edit', {
+        job_id: jid, question_id: qid, answer: ta.value,
+      });
+      if (!r.ok) return flashErr(r.error);
+      const after = currentCard(qid);
+      if (after && r.card_html) replaceCard(after, r.card_html);
+    }
+
+    const r2 = await postJSON('/answer-questions/finalize', {
+      job_id: jid, question_id: qid,
+    });
+    if (!r2.ok) return flashErr(r2.error);
+    const after2 = currentCard(qid);
+    if (after2 && r2.card_html) replaceCard(after2, r2.card_html);
+  });
+
+  // ── Override notes auto-save on blur
+  document.addEventListener('blur', function(e) {
+    const ta = e.target.closest('.aq-override-text');
+    if (!ta) return;
+    const card = findCard(ta);
+    if (!card) return;
+    postJSON('/answer-questions/override', {
+      job_id: card.dataset.jobId,
+      question_id: card.dataset.questionId,
+      override_notes: ta.value,
+    });  // fire-and-forget
+  }, true);
+
+  // ── Resume entries chips: add via picker, remove via × button
+  document.addEventListener('change', function(e) {
+    const sel = e.target.closest('.aq-chip-add');
+    if (!sel) return;
+    const slug = sel.value;
+    if (!slug) return;
+    const card = findCard(sel);
+    if (!card) return;
+    const current = Array.from(card.querySelectorAll('.aq-chip[data-slug]')).map(el => el.dataset.slug);
+    if (current.includes(slug)) return;
+    current.push(slug);
+    postJSON('/answer-questions/entries', {
+      job_id: card.dataset.jobId,
+      question_id: card.dataset.questionId,
+      slugs: current,
+    }).then(r => {
+      if (!r.ok) return flashErr(r.error);
+      replaceCard(card, r.card_html);
+    });
+  });
+  document.addEventListener('click', function(e) {
+    const x = e.target.closest('.aq-chip-remove');
+    if (!x) return;
+    const chip = x.closest('.aq-chip');
+    const card = findCard(chip);
+    if (!card) return;
+    const removeSlug = chip.dataset.slug;
+    const current = Array.from(card.querySelectorAll('.aq-chip[data-slug]'))
+                         .map(el => el.dataset.slug)
+                         .filter(s => s !== removeSlug);
+    postJSON('/answer-questions/entries', {
+      job_id: card.dataset.jobId,
+      question_id: card.dataset.questionId,
+      slugs: current,
+    }).then(r => {
+      if (!r.ok) return flashErr(r.error);
+      replaceCard(card, r.card_html);
+    });
+  });
+
+  // ── Version picker: swap displayed answer client-side from embedded JSON
+  document.addEventListener('change', function(e) {
+    const sel = e.target.closest('.aq-version-picker');
+    if (!sel) return;
+    const card = findCard(sel);
+    if (!card) return;
+    const histEl = card.querySelector('.aq-history');
+    if (!histEl) return;
+    let history;
+    try { history = JSON.parse(histEl.dataset.history || '[]'); } catch (err) { return; }
+    const want = parseInt(sel.value, 10);
+    const entry = history.find(h => h.v === want);
+    if (!entry) return;
+    const ta = card.querySelector('.aq-answer-text');
+    if (ta) {
+      ta.value = entry.answer;
+      ta.dataset.savedValue = entry.answer;  // reset dirty baseline
+    }
+    const saveBtn = card.querySelector('.aq-save-edit');
+    if (saveBtn) saveBtn.disabled = true;
+    const meta = card.querySelector('.aq-version-meta');
+    if (meta) meta.firstChild.textContent = entry.chars + ' chars';
+  });
+
+  // ── Manual edit: typing in the answer textarea enables "Save edit"
+  document.addEventListener('input', function(e) {
+    const ta = e.target.closest('.aq-answer-text');
+    if (!ta) return;
+    const card = findCard(ta);
+    if (!card) return;
+    const saveBtn = card.querySelector('.aq-save-edit');
+    if (!saveBtn) return;
+    // Capture baseline on first input event so we can detect a real diff.
+    if (ta.dataset.savedValue === undefined) ta.dataset.savedValue = ta.defaultValue;
+    saveBtn.disabled = (ta.value === ta.dataset.savedValue);
+  });
+  document.addEventListener('click', function(e) {
+    const btn = e.target.closest('.aq-save-edit');
+    if (!btn || btn.disabled) return;
+    const card = findCard(btn);
+    if (!card) return;
+    const ta = card.querySelector('.aq-answer-text');
+    if (!ta) return;
+    postJSON('/answer-questions/save-edit', {
+      job_id:      card.dataset.jobId,
+      question_id: card.dataset.questionId,
+      answer:      ta.value,
+    }).then(r => {
+      if (!r.ok) return flashErr(r.error);
+      replaceCard(card, r.card_html);
+    });
+  });
+
+  // ── Copy buttons
+  function bindCopy(btnClass, sourceClass) {
+    document.addEventListener('click', function(e) {
+      const btn = e.target.closest(btnClass);
+      if (!btn) return;
+      const card = findCard(btn);
+      if (!card) return;
+      const src = card.querySelector(sourceClass);
+      if (!src) return;
+      navigator.clipboard.writeText(src.value).then(() => showCopied(btn));
+    });
+  }
+  bindCopy('.aq-copy',           '.aq-answer-text');
+  bindCopy('.aq-copy-finalized', '.aq-finalized-text');
+
+  // ── Resume-entry-notes panel autosave on blur (whole dict)
+  let savedTimer = null;
+  document.addEventListener('blur', function(e) {
+    const ta = e.target.closest('.aq-note-text');
+    if (!ta) return;
+    const notes = {};
+    document.querySelectorAll('.aq-note-text').forEach(el => {
+      notes[el.dataset.slug] = el.value;
+    });
+    const status = document.querySelector('.aq-notes-saved');
+    postJSON('/answer-questions/entry-notes', {notes: notes}).then(r => {
+      if (!r.ok) { if (status) status.textContent = 'Save failed: ' + (r.error || '?'); return; }
+      if (status) {
+        status.textContent = 'Saved.';
+        clearTimeout(savedTimer);
+        savedTimer = setTimeout(() => { status.textContent = ''; }, 1500);
+      }
+    });
+  }, true);
+})();
+</script>
+"""
 
 
 def daily_checklist_page(open_section: str | None = None, linkedin_view: str = "default") -> str:
@@ -3360,6 +3982,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(metrics_page())
         elif path == "/resume":
             self.send_html(resume_page())
+        elif path == "/answer-questions":
+            qs     = parse_qs(parsed.query)
+            job_id = qs.get("job_id", [""])[0].strip()
+            self.send_html(render_answer_questions_page(job_id))
         elif path.startswith("/job/"):
             job_id = path[len("/job/"):].strip("/")
             self.send_html(job_detail_page(job_id))
@@ -3387,8 +4013,134 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.redirect_today(open_section, fragment)
 
+    def _read_json_body(self) -> dict:
+        """Parse a JSON-encoded request body. Returns {} on missing / invalid."""
+        length = int(self.headers.get("Content-Length", 0))
+        if not length:
+            return {}
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return {}
+
+    def _aq_handle(self, fn) -> None:
+        """Shared shell for /answer-questions/* JSON handlers. Loads
+        answer_questions lazily, calls ``fn(aq, body)`` which returns a tuple
+        ``(ok, card_html_or_none, error_or_none)``. Always responds with JSON."""
+        sys.path.insert(0, str(SCRIPTS))
+        try:
+            import answer_questions as aq
+        except Exception as e:  # noqa: BLE001
+            self.send_json({"ok": False, "error": f"answer_questions import failed: {e}"})
+            return
+        body = self._read_json_body()
+        try:
+            ok, card_html, error = fn(aq, body)
+        except Exception as e:  # noqa: BLE001
+            self.send_json({"ok": False, "error": str(e)})
+            return
+        self.send_json({"ok": ok, "card_html": card_html, "error": error})
+
     def do_POST(self):
         path = urlparse(self.path).path
+
+        # ── /answer-questions/* — JSON in, JSON out ─────────────────────────
+        if path == "/answer-questions/add":
+            def _do(aq, body):
+                job_id   = (body.get("job_id") or "").strip()
+                qtext    = (body.get("question_text") or "").strip()
+                qclass   = (body.get("question_class") or "").strip()
+                cap      = body.get("char_cap")
+                if not job_id or not qtext or qclass not in ("motivation", "behavioral"):
+                    return False, None, "missing job_id / question_text / question_class"
+                rec = aq.add_question(job_id, qtext, qclass, cap)
+                return True, _aq_card_html(job_id, rec), None
+            self._aq_handle(_do); return
+
+        if path == "/answer-questions/delete":
+            def _do(aq, body):
+                job_id = (body.get("job_id") or "").strip()
+                qid    = (body.get("question_id") or "").strip()
+                if not job_id or not qid:
+                    return False, None, "missing job_id / question_id"
+                removed = aq.delete_question(job_id, qid)
+                if not removed:
+                    return False, None, "question not found"
+                return True, None, None
+            self._aq_handle(_do); return
+
+        if path == "/answer-questions/generate":
+            def _do(aq, body):
+                job_id = (body.get("job_id") or "").strip()
+                qid    = (body.get("question_id") or "").strip()
+                if not job_id or not qid:
+                    return False, None, "missing job_id / question_id"
+                rec = aq.generate_answer(job_id, qid)
+                return True, _aq_card_html(job_id, rec), None
+            self._aq_handle(_do); return
+
+        if path == "/answer-questions/save-edit":
+            def _do(aq, body):
+                job_id = (body.get("job_id") or "").strip()
+                qid    = (body.get("question_id") or "").strip()
+                text   = body.get("answer") or ""
+                if not job_id or not qid:
+                    return False, None, "missing job_id / question_id"
+                rec = aq.save_edit(job_id, qid, text)
+                return True, _aq_card_html(job_id, rec), None
+            self._aq_handle(_do); return
+
+        if path == "/answer-questions/finalize":
+            def _do(aq, body):
+                job_id = (body.get("job_id") or "").strip()
+                qid    = (body.get("question_id") or "").strip()
+                if not job_id or not qid:
+                    return False, None, "missing job_id / question_id"
+                rec = aq.finalize_answer(job_id, qid)
+                return True, _aq_card_html(job_id, rec), None
+            self._aq_handle(_do); return
+
+        if path == "/answer-questions/unfinalize":
+            def _do(aq, body):
+                job_id = (body.get("job_id") or "").strip()
+                qid    = (body.get("question_id") or "").strip()
+                if not job_id or not qid:
+                    return False, None, "missing job_id / question_id"
+                rec = aq.unfinalize_answer(job_id, qid)
+                return True, _aq_card_html(job_id, rec), None
+            self._aq_handle(_do); return
+
+        if path == "/answer-questions/override":
+            def _do(aq, body):
+                job_id = (body.get("job_id") or "").strip()
+                qid    = (body.get("question_id") or "").strip()
+                if not job_id or not qid:
+                    return False, None, "missing job_id / question_id"
+                aq.update_question_override(job_id, qid, body.get("override_notes") or "")
+                return True, None, None  # silent autosave, no card swap
+            self._aq_handle(_do); return
+
+        if path == "/answer-questions/entries":
+            def _do(aq, body):
+                job_id = (body.get("job_id") or "").strip()
+                qid    = (body.get("question_id") or "").strip()
+                slugs  = body.get("slugs") or []
+                if not job_id or not qid:
+                    return False, None, "missing job_id / question_id"
+                if not isinstance(slugs, list):
+                    return False, None, "slugs must be a list"
+                rec = aq.update_resume_entries(job_id, qid, slugs)
+                return True, _aq_card_html(job_id, rec), None
+            self._aq_handle(_do); return
+
+        if path == "/answer-questions/entry-notes":
+            def _do(aq, body):
+                notes = body.get("notes")
+                if not isinstance(notes, dict):
+                    return False, None, "notes must be a dict"
+                aq.save_entry_notes(notes)
+                return True, None, None
+            self._aq_handle(_do); return
 
         if path == "/today/crawl/start":
             length = int(self.headers.get("Content-Length", 0))
