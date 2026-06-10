@@ -934,6 +934,9 @@ STYLE = """
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
          background: #f5f5f3; color: #1a1a18; font-size: 14px; }
   .wrap { max-width: 760px; margin: 0 auto; padding: 32px 20px; }
+  /* The /today page opts into a wider column so the status-update button row
+     (7 buttons) fits on one line on a maximized browser without wrapping. */
+  .wrap.wide { max-width: 1100px; }
   h1 { font-size: 20px; font-weight: 500; color: #1F3864; margin-bottom: 4px; }
   .sub { color: #888; font-size: 12px; margin-bottom: 28px; }
   .nav-bar { display: flex; align-items: center; gap: 16px;
@@ -1312,7 +1315,7 @@ STYLE = """
 </style>
 """
 
-def page(title: str, body: str, nav_query: str = "") -> str:
+def page(title: str, body: str, nav_query: str = "", wide: bool = False) -> str:
     from html import escape as esc
     q_val = esc(nav_query)
     search_form = (
@@ -1325,7 +1328,7 @@ def page(title: str, body: str, nav_query: str = "") -> str:
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title} — next-role</title>{STYLE}</head>
-<body><div class="wrap">
+<body><div class="wrap{' wide' if wide else ''}">
 <h1>next-role</h1>
 <div class="nav-bar">
   <p class="sub" style="margin-bottom:0">Job search pipeline · <a href="/today">Today</a> · <a href="/">Ingest</a> · <a href="/pipeline">Pipeline</a> · <a href="/resume">Snippets</a> · <a href="/metrics">Metrics</a></p>
@@ -4029,7 +4032,7 @@ def daily_checklist_page(open_section: str | None = None, view: str = "default")
         </details>
         """
 
-    return page("Today", summary_html + sections_html)
+    return page("Today", summary_html + sections_html, wide=True)
 
 
 # ── Request handler ───────────────────────────────────────────────────────────

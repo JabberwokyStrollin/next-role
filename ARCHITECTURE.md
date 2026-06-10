@@ -1081,7 +1081,7 @@ sync with the CLI.
 - `parse_resume_snippets() -> dict` — convenience: `{"experience": [...], "education": [...]}` (or `"error"` if `resume.md` is missing or unreadable).
 
 #### Template / page renderers
-- `page(title, body, nav_query='') -> str` — outer HTML skeleton with the shared `STYLE` block. Injects the top-nav search box on every page; `nav_query` pre-fills it (only `search_page` passes a value).
+- `page(title, body, nav_query='', wide=False) -> str` — outer HTML skeleton with the shared `STYLE` block. Injects the top-nav search box on every page; `nav_query` pre-fills it (only `search_page` passes a value). `wide=True` adds the `.wrap.wide` modifier (1100px column instead of 760px) — used by the `/today` page so the 7-button status-update row fits on one line.
 - `ingest_form(...) -> str` — the `/` ingest form (and the paste-mode variant).
 - `pipeline_card() -> str` — short top-10 pipeline preview on the ingest landing page.
 - `pipeline_page() -> str` — the full `/pipeline` table.
