@@ -1,0 +1,8 @@
+# next-role Python dependencies.
+# Install with: pip install -r requirements.txt
+# See SETUP.md for full setup steps.
+
+anthropic>=0.99.0
+requests>=2.33.1
+beautifulsoup4>=4.15.0
+PyYAML>=6.0.3

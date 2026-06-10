@@ -23,7 +23,7 @@ cd next-role
 python -m venv venv
 venv\Scripts\activate          # Windows
 # source venv/bin/activate     # Mac/Linux
-pip install anthropic requests beautifulsoup4 pyyaml
+pip install -r requirements.txt
 
 # Node dependencies (cover letter generator)
 npm install

@@ -277,6 +277,7 @@ SETUP.md                — one-time install + configuration
 ARCHITECTURE.md         — per-script tech reference
 DATA.md                 — per-file data schema reference
 CLAUDE.md               — SSOT conventions for code changes
+requirements.txt        — Python dependencies (pip install -r)
 run.py                  — CLI orchestrator
 serve.py                — local web UI (localhost:5000)
 scripts/
