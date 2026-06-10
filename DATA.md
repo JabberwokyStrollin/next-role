@@ -101,6 +101,7 @@ status transitions, and the `/today` apply queue all read from this file.
 | `domain_fit_score` | int 0-20 | ✅ | From `score_jd`. Native max 20. |
 | `hiring_velocity_score` | int 0-5 | ✅ | From `config.compute_velocity_score`. Native max 5. |
 | `score_notes` | string | ✅ | One- to three-sentence Claude rationale for seniority + domain. |
+| `role_exposure` | enum | ✅ | Gov/defense screen role classification: `insulated`, `ambiguous`, `exposed`. Resolved at ingest by `config.classify_role_exposure(title, claude_judgment)` — deterministic title rules (SA / professional services / support, etc.) over `score_jd`'s JD-level read. Defaults `insulated`. |
 | `seniority_raw` | int 0-25 | optional | Pre-cap value (only present when `apply_title_cap` reduced the score). Audit trail. |
 | `seniority_cap_title` | string | optional | The title that triggered the cap. Only present when `seniority_raw` is. |
 | `cover_letter_generated` | bool | ✅ | `false` at ingest; `true` after `generate_cl.js` runs. |
@@ -195,6 +196,8 @@ advisory.
 | `ethics_hard_exclude` | bool | **filter (ingest-time)** | When `true`, `ingest.get_or_stub_company` returns `None` and the JD is discarded. Hard kill switch. |
 | `ethics_flags` | list[object] | advisory | See ethics-flag schema below. |
 | `ethics_notes` | string / `""` | advisory | One-sentence summary across all flags. |
+| `gov_defense_flag` | enum | advisory + apply-time ranking | Government/defense entanglement tier: `none`, `tier_c`, `tier_b`, `tier_a`. Set by Haiku research, then floored to `tier_a` for industry-detected defense contractors via `config.reconcile_gov_defense_flag`. Combined with a job's `role_exposure` at display time via `config.gov_screen_result`: a `flag` applies a `−GOV_SCREEN_FLAG_PENALTY_PCT`% penalty to the **apply-rank only** (`apply_rank_score`; composite is unchanged), and a `fail` (tier_a) hides the role from apply surfaces (`gov_screen_block_reason`). Industry-detected `tier_a` is additionally excluded at ingest via `ethics_hard_exclude`. |
+| `flag_evidence` | list[string] | advisory | Short strings naming each gov/defense signal Haiku matched (empty for `none`). |
 | `confirmed_clean` | bool | metadata | Operator-only — manually flipped to `true` after a review. |
 | `record_created` | ISO datetime | metadata | Preserved across `upsert_company`. |
 | `record_updated` | ISO datetime | metadata | Bumped on every upsert. |
@@ -240,6 +243,8 @@ advisory.
     }
   ],
   "ethics_notes": "Generally clean reputation; addressed platform misuse issues...",
+  "gov_defense_flag": "none",
+  "flag_evidence": [],
   "confirmed_clean": false,
   "record_created": "2026-05-06T02:57:08.075147+00:00",
   "record_updated": "2026-05-06T04:13:52.322265+00:00"
@@ -259,6 +264,8 @@ advisory.
   "remote_fit": 3,
   "ethics_hard_exclude": false,
   "ethics_flags": [],
+  "gov_defense_flag": "none",
+  "flag_evidence": [],
   "record_created": "2026-05-10T01:57:12.971015+00:00",
   "record_updated": "2026-05-10T01:57:12.971015+00:00",
   "stub": true

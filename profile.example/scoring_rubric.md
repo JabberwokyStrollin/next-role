@@ -26,9 +26,25 @@ Write 2-3 sentences covering:
 3. Which 2-3 of these projects are the strongest match:
    [List your key projects here — use the same names as in your resume]
 
+## Role exposure (gov-screen)
+Classify how customer-facing this specific role is — used by the
+government/defense screen to gauge personal assignment risk. One of:
+- insulated: product engineering, core database/platform/infra, internal
+  tooling, developer experience, OSS maintenance, build/release. Work product
+  is customer-agnostic.
+- exposed: solutions architect, professional services, forward-deployed /
+  field engineering, sales engineering, technical account management, support
+  engineering. Plausibly assigned to a specific customer's workload.
+- ambiguous: a product role whose JD still includes customer-escalation duty,
+  embedded/rotational customer work, or "work directly with strategic
+  customers" language.
+Judge from the JD body; the pipeline also applies deterministic title rules on
+top of your answer, so when unsure default to insulated.
+
 ## Required JSON output format
 {
   "seniority_score": <integer 0-25>,
   "domain_fit_score": <integer 0-20>,
-  "score_notes": "<2-3 sentence string>"
+  "score_notes": "<2-3 sentence string>",
+  "role_exposure": "<insulated|exposed|ambiguous>"
 }

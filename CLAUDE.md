@@ -231,6 +231,59 @@ funnel through one SSOT entry point:
    the retroactive step must also set `pipeline_status="archived"` and
    `archived_reason` on the affected company's active jobs.
 
+## Government / defense entanglement screen (SSOT)
+
+A graded screen layered on top of the tier_a defense exclusion above. The
+concern is **personal assignment risk** in a specific role, not whether a
+company merely has government customers — so the surfaced result is a function
+of a company-level flag AND the role's exposure.
+
+**Ranking effects are apply-time only** (Phase 2). A `flag` reduces the
+apply-rank by `GOV_SCREEN_FLAG_PENALTY_PCT`; a `fail` (tier_a) hides the role
+from apply surfaces. The canonical `composite_score` stays **pure** — the
+penalty lives only in the `apply_rank_score` wrapper, never inside the
+composite (so `metrics.py`'s "components sum to composite" invariant holds).
+
+| Concern | Canonical location |
+|---|---|
+| Config (flagged regions, penalty pct, support-exposed toggle) | `scripts/config.py:GOV_SCREEN_FLAGGED_REGIONS` / `GOV_SCREEN_FLAG_PENALTY_PCT` / `GOV_SCREEN_SUPPORT_ROLES_EXPOSED` |
+| Company flag (`gov_defense_flag`) detection | Haiku in `research_company.py` (Tier-1 prompt), floored to `tier_a` by `config.reconcile_gov_defense_flag` |
+| Role exposure (`role_exposure`) classification | Sonnet in `score_jd.py` (rubric) + deterministic title rules in `config.classify_role_exposure` (applied at `ingest.py`) |
+| Combination matrix → `(result, emit_questions)` | `config.gov_screen_result` (+ `_GOV_SCREEN_MATRIX`) — Part 3 of the spec, authoritative |
+| Apply-rank penalty (`flag`) | `config.apply_rank_score` (= `composite_score` × `gov_screen_penalty_factor`) |
+| Apply-surface exclusion (`fail`) | `config.gov_screen_block_reason` (parallel to `company_block_reason`) |
+| Interview questions | `config.GOV_SCREEN_INTERVIEW_QUESTIONS` |
+| Surfacing | `serve.py:_render_gov_company_block` (company card), `_render_gov_job_block` (job detail), and the apply-queue badge in `render_cl_row` |
+
+### Rules
+
+1. **Same division of labor as the ethics auto-excludes.** Claude detects and
+   describes (flag tier, role exposure); Python owns the policy (the matrix,
+   the `tier_a` floor, the support-exposed toggle). Don't put the combination
+   matrix in a prompt.
+
+2. **`result` is derived on display, never stored.** Only the two inputs
+   persist (`gov_defense_flag` on the company, `role_exposure` on the job).
+   Compute the result with `config.gov_screen_result` at surface time so a
+   later company re-research can't leave a stale result behind.
+
+3. **Two exclusion paths for `tier_a`, both correct.** An *industry*-detected
+   defense contractor is excluded at **ingest** via `is_defense_contractor` →
+   `ethics_hard_exclude` (the job never enters). A Haiku-only `tier_a` (not
+   caught by the industry regex) is excluded at **apply time** via
+   `gov_screen_block_reason` (result `fail`) — the job still ingests and is
+   visible on `/job/<id>`, but is hidden from the apply queue + cover-letter
+   generation. This is intentional: ingest stays permissive; apply surfaces
+   enforce.
+
+4. **The penalty lives ONLY in `apply_rank_score`.** Never bake the gov
+   penalty into `composite_score` (it would break the metrics
+   "components sum to composite" invariant and silently move the canonical
+   score). Apply-time sort surfaces — `serve.render_cover_letters_body` and
+   `run.generate_cover_letters` — rank by `apply_rank_score` while still
+   *displaying* the pure composite. Pre-research ranking is never penalized
+   (the company flag isn't known before research).
+
 ## Other project notes
 
 - This is a **closed-source / proprietary** project. No `LICENSE` file, no

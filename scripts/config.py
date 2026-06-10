@@ -687,6 +687,157 @@ def company_auto_exclude_reason(company: dict) -> str | None:
     return None
 
 
+# ─── Government / defense entanglement screen (Phase 1: surface-only) ─────────
+#
+# Extends the tier_a defense-contractor exclusion above with a graded
+# company-level flag (gov_defense_flag) plus a per-role exposure modifier
+# (role_exposure). The surfaced result is a function of BOTH, because the
+# concern is personal assignment risk, not mere association: product/infra
+# roles are insulated even at a company with government customers; field
+# roles (SA / professional services / support) are exposed.
+#
+# PHASE 1 IS SURFACE-ONLY. We detect, store, and surface the result + the
+# interview questions; we do NOT yet apply a composite penalty for a `flag`
+# (GOV_SCREEN_FLAG_PENALTY_PCT is reserved for a future scoring phase). `fail`
+# still means "exclude", but only tier_a produces it, and tier_a's actual
+# hard-exclude continues to flow through the deterministic
+# `is_defense_contractor` rule above — Haiku-only tier_a on a non-defense
+# industry is surfaced, not newly auto-excluded.
+#
+# Division of labor (per the "deterministic rules in code" principle):
+#   - Detection of gov_defense_flag + flag_evidence  → Haiku research (judgment)
+#   - role_exposure read of the JD                    → Sonnet score_jd (judgment)
+#   - support-role-is-exposed toggle, the combination matrix, and the tier_a
+#     floor                                           → Python here (policy)
+
+# User-editable config. flagged_regions uses ISO 3166-1 alpha-2 codes; the
+# region (tier_c) escalation logic ships but stays dormant until populated.
+GOV_SCREEN_FLAGGED_REGIONS: list[str] = []
+GOV_SCREEN_FLAG_PENALTY_PCT: int = 20            # reserved for Phase 2 scoring; UNUSED in Phase 1
+GOV_SCREEN_SUPPORT_ROLES_EXPOSED: bool = True    # treat support engineering as exposed (follow-the-sun routing)
+
+GOV_DEFENSE_FLAGS: tuple[str, ...] = ("none", "tier_c", "tier_b", "tier_a")
+ROLE_EXPOSURES:    tuple[str, ...] = ("insulated", "ambiguous", "exposed")
+
+GOV_SCREEN_INTERVIEW_QUESTIONS: list[str] = [
+    "How is customer-specific work assigned and scoped for this role?",
+    "Does this role involve professional services engagements or customer "
+    "escalations, and can engineers opt out of specific engagements?",
+    "What does the public-sector side of the business look like, and which "
+    "teams touch it?",
+]
+
+# Titles that are exposed regardless of JD body text. Support engineering is
+# listed separately because it's gated by GOV_SCREEN_SUPPORT_ROLES_EXPOSED.
+_ROLE_EXPOSED_TITLE_RE: _re.Pattern = _re.compile(
+    r"\b(?:solutions?\s+architect|professional\s+services|forward[-\s]deployed|"
+    r"field\s+engineer(?:ing)?|sales\s+engineer(?:ing)?|"
+    r"technical\s+account\s+manager|customer\s+engineer|"
+    r"implementation\s+(?:engineer|consultant|specialist)|"
+    r"deployment\s+strategist|solutions?\s+engineer)\b",
+    _re.I,
+)
+_ROLE_SUPPORT_TITLE_RE: _re.Pattern = _re.compile(
+    r"\bsupport\s+engineer(?:ing)?\b", _re.I
+)
+
+
+def classify_role_exposure(title: str, claude_exposure: str | None = None) -> str:
+    """Resolve a role's gov-screen exposure (insulated | ambiguous | exposed).
+
+    Deterministic title rules win first (support gated by
+    GOV_SCREEN_SUPPORT_ROLES_EXPOSED); otherwise fall back to Claude's
+    JD-level judgment, defaulting to 'insulated' when absent/invalid. Called
+    by ingest.py with the title that score_jd doesn't see."""
+    t = title or ""
+    if _ROLE_EXPOSED_TITLE_RE.search(t):
+        return "exposed"
+    if _ROLE_SUPPORT_TITLE_RE.search(t) and GOV_SCREEN_SUPPORT_ROLES_EXPOSED:
+        return "exposed"
+    if claude_exposure in ROLE_EXPOSURES:
+        return claude_exposure
+    return "insulated"
+
+
+def reconcile_gov_defense_flag(company: dict | None) -> str:
+    """Resolve a company's gov_defense_flag, forcing it to at least `tier_a`
+    for industry-detected defense contractors regardless of the LLM's
+    classification (mirrors the ethics_hard_exclude floor). Returns a value in
+    GOV_DEFENSE_FLAGS. Called in research_company after the Haiku merge."""
+    if is_defense_contractor(company):
+        return "tier_a"
+    raw = (company or {}).get("gov_defense_flag") or "none"
+    return raw if raw in GOV_DEFENSE_FLAGS else "none"
+
+
+# Part 3 combination matrix. Rows = gov_defense_flag, cols = role_exposure.
+# Value = (result, emit_interview_questions). The spec's Part 2 note that
+# `ambiguous` is "treated as insulated for scoring" is moot in Phase 1 (no
+# scoring); this matrix is authoritative for the surfaced result.
+_GOV_SCREEN_MATRIX: dict[str, dict[str, tuple[str, bool]]] = {
+    "none":   {"insulated": ("pass", False), "ambiguous": ("pass", True),  "exposed": ("pass", False)},
+    "tier_c": {"insulated": ("pass", False), "ambiguous": ("pass", True),  "exposed": ("flag", False)},
+    "tier_b": {"insulated": ("pass", True),  "ambiguous": ("flag", False), "exposed": ("flag", False)},
+    "tier_a": {"insulated": ("fail", False), "ambiguous": ("fail", False), "exposed": ("fail", False)},
+}
+
+
+def gov_screen_result(gov_defense_flag: str | None,
+                      role_exposure: str | None) -> tuple[str, bool]:
+    """SSOT for the Part 3 combination matrix. Returns
+    ``(result, emit_questions)`` where result is one of pass | flag | fail.
+    Unknown inputs degrade safely to `none` / `insulated`. Derived on display
+    from the live company flag + the job's stored role_exposure, so a later
+    company re-research never leaves a stale result behind."""
+    flag = gov_defense_flag if gov_defense_flag in GOV_DEFENSE_FLAGS else "none"
+    exp  = role_exposure    if role_exposure    in ROLE_EXPOSURES    else "insulated"
+    return _GOV_SCREEN_MATRIX[flag][exp]
+
+
+# ─── Gov-screen ranking effects (Phase 2) ────────────────────────────────────
+#
+# A `flag` result reranks (a configurable penalty) but never excludes; a `fail`
+# result excludes from apply surfaces. Both effects are APPLY-TIME only and are
+# the ONLY places the gov screen touches ordering — the canonical
+# ``composite_score`` stays pure (so ``metrics.py``'s "components sum to
+# composite" invariant holds). Never bake the penalty into ``composite_score``;
+# always go through ``apply_rank_score``.
+
+def gov_screen_penalty_factor(job: dict, company: dict | None) -> float:
+    """Multiplier applied to the composite at apply-time ranking:
+    ``1 - GOV_SCREEN_FLAG_PENALTY_PCT/100`` when the gov-screen result is
+    `flag`, else ``1.0``. `fail` is handled by exclusion, not penalty, so it
+    returns 1.0 here (the role is hidden before ranking)."""
+    result, _ = gov_screen_result(
+        (company or {}).get("gov_defense_flag"),
+        (job or {}).get("role_exposure"),
+    )
+    if result == "flag":
+        return max(0.0, 1.0 - GOV_SCREEN_FLAG_PENALTY_PCT / 100.0)
+    return 1.0
+
+
+def apply_rank_score(job: dict, company: dict | None) -> int:
+    """Apply-time ranking value: the full composite reduced by the gov-screen
+    penalty. Use this ONLY for apply-queue / cover-letter ordering;
+    ``composite_score`` remains the canonical displayed score. This is a thin
+    wrapper over the SSOT composite (not a parallel/partial composite), plus a
+    documented policy factor."""
+    return int(composite_score(job, company) * gov_screen_penalty_factor(job, company))
+
+
+def gov_screen_block_reason(job: dict, company: dict | None) -> str | None:
+    """Return a short reason if a role must be hidden from apply surfaces due
+    to the gov-screen (result == `fail`, i.e. tier_a / defense entanglement),
+    else None. Apply-time only, parallel to ``company_block_reason`` — consulted
+    by ``serve.render_cover_letters_body`` and ``run.generate_cover_letters``."""
+    flag = (company or {}).get("gov_defense_flag") or "none"
+    result, _ = gov_screen_result(flag, (job or {}).get("role_exposure"))
+    if result == "fail":
+        return f"gov/defense {flag} (exclude)"
+    return None
+
+
 def composite_score(job: dict, company: dict | None) -> int:
     """
     Full composite score — used for apply-time ranking and cover-letter

@@ -104,6 +104,12 @@ file.
 | `GHOSTED_DAYS` | `int` | Applications with no response after N days (21) auto-flip to `ghosted` (see `auto_age_application`). |
 | `GHOSTED_REJECTED_DAYS` | `int` | A `ghosted` application still un-answered after N days (45) since applying auto-converts to `rejected` (reason `ghosted_timeout`). Must exceed `GHOSTED_DAYS`. |
 | `REJECTION_REASONS` | `dict[str, str]` | SSOT for rejection-reason key → human label: `generic`, `position_filled`, `interview_failed`, `ghosted_timeout`. Consumed by serve.py status buttons and `metrics.py`. |
+| `GOV_SCREEN_FLAGGED_REGIONS` | `list[str]` | User-editable ISO 3166-1 alpha-2 region codes for the gov/defense screen's tier_c escalation. Empty by default (region logic dormant). |
+| `GOV_SCREEN_FLAG_PENALTY_PCT` | `int` | Apply-rank penalty (%) for a gov-screen `flag` result. Consumed by `gov_screen_penalty_factor` / `apply_rank_score`. |
+| `GOV_SCREEN_SUPPORT_ROLES_EXPOSED` | `bool` | Whether support engineering counts as `exposed` (follow-the-sun ticket routing). Read by `classify_role_exposure`. |
+| `GOV_DEFENSE_FLAGS` / `ROLE_EXPOSURES` | `tuple[str, ...]` | Valid values for `gov_defense_flag` (`none`/`tier_c`/`tier_b`/`tier_a`) and `role_exposure` (`insulated`/`ambiguous`/`exposed`). |
+| `GOV_SCREEN_INTERVIEW_QUESTIONS` | `list[str]` | Role-clarity questions surfaced when the combination matrix emits them. |
+| `_GOV_SCREEN_MATRIX` | `dict` | Part 3 combination matrix: `{flag: {exposure: (result, emit_questions)}}`. Consumed by `gov_screen_result`. |
 | `MAX_ACTIVE_APPS_PER_COMPANY` | `int` | Apply-time throttle — hide a company once N in-flight apps exist (3). |
 | `IN_FLIGHT_STATUSES` | `frozenset[str]` | What "in-flight" means for the throttle: `applied`, `recruiter_screen`, `interview`. `ghosted` is intentionally excluded so dead apps free the slot. |
 | `_SENIORITY_BUCKETS` | `list[(str, Pattern, int)]` | Ordered (bucket, regex, cap) — first match wins. Used by `title_seniority_cap`. |
@@ -358,6 +364,46 @@ log unless `--force`) and `serve.py:render_cl_row` (warning badge + Mark-Applied
 confirm). Catches the same role reposted under a different listing URL, which
 `ingest.check_duplicate` (exact-URL, non-archived only) cannot see.
 
+#### `classify_role_exposure(title, claude_exposure=None) -> str`
+Gov-screen role exposure resolver (`insulated` | `ambiguous` | `exposed`).
+Deterministic title rules win first (SA / professional services / forward-
+deployed / sales / TAM / support, with support gated by
+`GOV_SCREEN_SUPPORT_ROLES_EXPOSED`); else falls back to Claude's JD-level
+judgment, defaulting `insulated`. Called by `ingest.py` (which has the title
+`score_jd` doesn't).
+
+#### `reconcile_gov_defense_flag(company) -> str`
+Resolves a company's `gov_defense_flag`, forcing it to `tier_a` for industry-
+detected defense contractors (`is_defense_contractor`) regardless of the LLM's
+classification — mirrors the `ethics_hard_exclude` floor. Called in
+`research_company` after the Haiku merge.
+
+#### `gov_screen_result(gov_defense_flag, role_exposure) -> tuple[str, bool]`
+SSOT for the Part 3 combination matrix. Returns `(result, emit_questions)`,
+result ∈ `pass`/`flag`/`fail`. Unknown inputs degrade to `none`/`insulated`.
+**Derived on display** (serve.py) from the live company flag + the job's stored
+`role_exposure`; the result is never persisted, so re-research can't leave a
+stale value.
+
+#### `gov_screen_penalty_factor(job, company) -> float`
+`1 - GOV_SCREEN_FLAG_PENALTY_PCT/100` when the gov-screen result is `flag`,
+else `1.0` (`fail` is handled by exclusion, not penalty). Consumed by
+`apply_rank_score`.
+
+#### `apply_rank_score(job, company) -> int`
+Apply-time ranking value = `composite_score(job, company)` × the gov penalty
+factor. A thin wrapper over the canonical composite (not a parallel/partial
+composite) plus a documented policy factor. Used **only** at the two apply-time
+sort sites (`serve.render_cover_letters_body`, `run.generate_cover_letters`);
+`composite_score` stays the displayed score everywhere else, and `metrics.py`
+is unaffected.
+
+#### `gov_screen_block_reason(job, company) -> str | None`
+Apply-time exclusion predicate parallel to `company_block_reason`: returns a
+reason when the gov-screen result is `fail` (tier_a / defense entanglement),
+else `None`. Hides the role from the apply queue + cover-letter generation
+without touching ingest.
+
 ---
 
 ## `scripts/score_jd.py`
@@ -374,6 +420,12 @@ required keys; clamps the integers to the rubric ranges (0-25 seniority,
 0-20 domain); then applies the title-based seniority cap mechanically (see
 `apply_title_cap` in `config.py`) because the model has been observed
 reclassifying Principal titles based on JD scope language.
+
+Also passes through an optional `role_exposure` (gov-screen JD judgment) when
+the model returns a valid value (`insulated`/`ambiguous`/`exposed`), else
+`None` — intentionally **not** required so a model miss can't break ingest.
+`ingest.py` resolves the final value via `config.classify_role_exposure`
+(deterministic title rules over this raw judgment) and stores it on the job.
 
 ### Functions
 
@@ -586,8 +638,10 @@ Full per-job pipeline:
    (before any Claude call).
 7. Compute mechanical scores (`compute_stack_score`,
    `compute_velocity_score`, `compute_staleness`).
-8. Call `score_jd.score_jd(jd_text)` for seniority + domain.
-9. Assemble the record (UUIDs, ISO timestamps, default flags), append to
+8. Call `score_jd.score_jd(jd_text)` for seniority + domain (+ raw
+   `role_exposure` judgment).
+9. Assemble the record (UUIDs, ISO timestamps, default flags), resolving
+   `role_exposure` via `config.classify_role_exposure(title, …)`, append to
    `job_pipeline.json`, save, log `validation_summary`, return the record.
 
 - **Parameters:** all required. `source` is a free-text label (`direct_scrape`, `manual`, `remoteok`, `lever`, ...).
@@ -788,7 +842,7 @@ Cost target: ~$0.03-0.05 per company vs $0.27+ with open-ended web search.
 
 | Name | Purpose |
 |---|---|
-| `TIER1_SYSTEM` | Multi-section system prompt: scoring bands for sponsorship + remote, ethics categories + statuses, required JSON schema. |
+| `TIER1_SYSTEM` | Multi-section system prompt: scoring bands for sponsorship + remote, ethics categories + statuses, the gov/defense `gov_defense_flag` tier guidance (folded in — no extra search), required JSON schema. |
 | `TIER2_SYSTEM` | System prompt for the single-search recency check; same JSON schema for the merge. |
 
 ### Functions
@@ -809,6 +863,10 @@ Calls Tier 1 then Tier 2 and merges:
   deterministic rule fires (defense contractor / employee surveillance /
   mass surveillance), `ethics_hard_exclude` is forced `True` (additive —
   never downgrades an LLM-set `True`) and the reason is printed.
+- `gov_defense_flag` is resolved via `config.reconcile_gov_defense_flag`
+  (Haiku's value, floored to `tier_a` for defense industries); `flag_evidence`
+  is coerced to a list of strings. The Tier-1 user message also injects
+  `GOV_SCREEN_FLAGGED_REGIONS` so region-based tier_b/tier_c can fire.
 - `sponsorship_score` clamped to `0..15`, `remote_fit` clamped to `0..5`.
 
 Default `model` is Haiku (`CLAUDE_MODEL_FAST`); pass Sonnet for higher-stakes
@@ -816,7 +874,8 @@ runs.
 
 #### `build_registry_record(research: dict, existing_id: str | None = None) -> dict`
 Wraps the research dict in a full registry record: UUID, default values
-for advisory fields, `record_created` / `record_updated` timestamps.
+for advisory fields (including `gov_defense_flag` → `"none"` and
+`flag_evidence` → `[]`), `record_created` / `record_updated` timestamps.
 `confirmed_clean` starts `False` so `upsert_company` can preserve it
 when updating.
 
@@ -902,9 +961,10 @@ sponsorship + remote values influence this ordering, which is why
 - **Wired to CLI** as `--research-top N` (preserved for backwards compatibility — prefer `--research-queue` for routine use).
 
 #### `generate_cover_letters(top_n: int = 5, auto: bool = False) -> None`
-Selects candidates from `active` / `cover_letter_ready` jobs whose
-company isn't blocked by `company_block_reason`, sorts by full
-`composite_score`, takes the top N, prints them with their score, and:
+Selects candidates from `active` / `cover_letter_ready` jobs whose company
+isn't blocked by `company_block_reason` **or** `gov_screen_block_reason`
+(gov/defense `fail`), sorts by `apply_rank_score` (full composite minus the
+gov-screen `flag` penalty), takes the top N, prints them with their score, and:
 
 - If `auto=True`, generates a `.docx` for each.
 - Otherwise prompts `y/n/<comma-list>` and generates for the chosen rows.
@@ -1092,18 +1152,19 @@ sync with the CLI.
 - `_snippet_field(field_id, label, value, multiline=False) -> str` — one field + copy button.
 - `render_experience_entry(idx, exp) -> str` / `render_education_entry(idx, edu) -> str` — collapsible snippet rows.
 - `render_links_card() -> str` — LinkedIn + GitHub copy snippets at the bottom of `/resume`.
-- `render_company_card(company, return_to='') -> str` — researched-company panel surfaced on `/job/<id>` for recruiter-call prep: industry, size, HQ, careers URL, sponsorship score+notes, remote_fit, glassdoor/blind sentiment, recent layoffs, and ethics flags. Reads `COMPONENTS["sponsorship"].native_max` + `COMPONENTS["remote"].native_max` for denominators (per the scoring SSOT). When the company record is still a stub, renders a warning banner with a "Research now" form that POSTs to `/today/company/research` and brings the user back to `return_to`.
-- `job_detail_page(job_id) -> str` — full per-job view with score breakdown, JD viewer, comp panel, and the company-research card (pinned high — right under the header for non-interview status, right under the comp card for interview-stage).
+- `render_company_card(company, return_to='') -> str` — researched-company panel surfaced on `/job/<id>` for recruiter-call prep: industry, size, HQ, careers URL, sponsorship score+notes, remote_fit, glassdoor/blind sentiment, recent layoffs, ethics flags, and (via `_render_gov_company_block`) the company-level gov/defense flag + evidence. Reads `COMPONENTS["sponsorship"].native_max` + `COMPONENTS["remote"].native_max` for denominators (per the scoring SSOT). When the company record is still a stub, renders a warning banner with a "Research now" form that POSTs to `/today/company/research` and brings the user back to `return_to`.
+- `_render_gov_company_block(company) -> str` / `_render_gov_job_block(job, company) -> str` — gov/defense screen surfacing. The first renders the company-level flag + evidence (empty for `none`); the second computes the per-role result via `config.gov_screen_result` and renders a card with flag, role exposure, result badge, the apply-rank effect (`flag` → −`GOV_SCREEN_FLAG_PENALTY_PCT`% penalty shown as `base → adj`; `fail` → "excluded"), and the interview questions when emitted (empty when there's nothing to surface). `_GOV_FLAG_LABEL` / `_GOV_RESULT_LABEL` are the shared badge label+color SSOT.
+- `job_detail_page(job_id) -> str` — full per-job view with score breakdown, JD viewer, comp panel, the company-research card, and the gov/defense screen card (`_render_gov_job_block`), pinned high (right under the header for non-interview status, right under the comp card for interview-stage).
 - `resume_page() -> str` — `/resume` view.
 - `render_section_body(sid, view='default') -> str` — dispatches to the per-section body renderer. A single `view` query param is shared across sections; only the open section interprets it (status_updates: `active`/`ghosted`; linkedin: `default`/`all`/`failing`).
 - `render_linkedin_body(view='default') -> str` — LinkedIn-ingest section body; `view` controls passing-only vs. all-rows filter.
 - `render_staged_row(row) -> str` — one staged-row card.
 - `render_crawl_body() -> str` — crawl-section body with the live status badge.
 - `render_status_updates_body(view='active') -> str` / `render_app_row(app) -> str` — status-updates section + per-app row with status-change buttons. Two sub-tabs: `active` (live applications, excludes ghosted) and `ghosted` (auto-flipped, awaiting the `ghosted_timeout` auto-rejection). `render_app_row` includes the `rejected_interview_failed` button.
-- `render_cover_letters_body() -> str` — top-N apply queue, ranked by full composite, filtered by `company_block_reason`.
+- `render_cover_letters_body() -> str` — top-N apply queue, ranked by `apply_rank_score` (full composite minus the gov-screen `flag` penalty), filtered by `company_block_reason` and `gov_screen_block_reason` (gov/defense `fail` roles hidden). Rows still display the pure composite via `job_score`.
 - `_fmt_currency(value, currency) -> str` — `"CAD 245,000"` formatting.
 - `render_comp_panel(comp_record, job_id) -> str` — comp-estimate accordion inside a cover-letter row.
-- `render_cl_row(job, co_by_id=None, comp_record=None, apps=None) -> str` — one cover-letter row in the apply queue. When `apps` is supplied, runs `config.find_duplicate_application`; on a hit it renders an "⚠ already applied" badge and gates Mark Applied behind a confirm dialog that posts `force=1`.
+- `render_cl_row(job, co_by_id=None, comp_record=None, apps=None) -> str` — one cover-letter row in the apply queue. When `apps` is supplied, runs `config.find_duplicate_application`; on a hit it renders an "⚠ already applied" badge and gates Mark Applied behind a confirm dialog that posts `force=1`. Also renders a `gov/defense: flag` badge showing the apply-rank penalty (`rank N/130`) when the gov-screen result is `flag`; `fail` roles are excluded upstream so they don't reach this renderer. The row still displays the pure composite via `job_score`, but the apply queue is ordered by `apply_rank_score`.
 - `daily_checklist_page(open_section=None, view='default') -> str` — the `/today` page assembly; `view` is the shared sub-tab param threaded to `render_section_body`.
 - `_aq_chip_html(slug, label) -> str` — one resume-entry chip on the answer-questions card.
 - `_aq_card_html(job_id, question) -> str` — full question card HTML, used both for initial page render and as the `card_html` payload returned by every `/answer-questions/*` mutating endpoint so the client can swap a single card's `outerHTML` without a full reload.

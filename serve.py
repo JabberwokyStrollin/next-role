@@ -58,11 +58,16 @@ from config import (  # noqa: E402
     MAX_ACTIVE_APPS_PER_COMPANY,
     GHOSTED_REJECTED_DAYS,
     REJECTION_REASONS,
+    GOV_SCREEN_INTERVIEW_QUESTIONS,
+    GOV_SCREEN_FLAG_PENALTY_PCT,
     company_block_reason,
     composite_score,
     composite_score_pre_research,
     auto_age_application,
     find_duplicate_application,
+    gov_screen_result,
+    apply_rank_score,
+    gov_screen_block_reason,
 )
 
 APPLICATION_TRACKER_PATH = DATA_DIR / "application_tracker.json"
@@ -2186,6 +2191,11 @@ def render_company_card(company: dict | None, return_to: str = "") -> str:
             '</div>'
         )
 
+    # Government/defense screen — company-level flag + evidence (Phase 1:
+    # surface-only). The per-role result (flag/role exposure combination) is
+    # rendered separately on the job-detail page where the role is known.
+    gov_block = _render_gov_company_block(company)
+
     return f"""
     <div class="card">
       <h2>Company <span style="color:#888;font-weight:400;font-size:12px">— {name}</span></h2>
@@ -2202,6 +2212,113 @@ def render_company_card(company: dict | None, return_to: str = "") -> str:
         {layoff_row}
       </table>
       {ethics_block}
+      {gov_block}
+    </div>
+    """
+
+
+# Government/defense screen labels (Phase 1: surface-only). SSOT for the badge
+# colors + human text used across the company card and job detail.
+_GOV_FLAG_LABEL = {
+    "tier_a": ("defense contractor (tier A)",          "#8a1c13", "#fde2e1"),
+    "tier_b": ("government/public-sector business (tier B)", "#7a4f00", "#fef3cd"),
+    "tier_c": ("in-region GTM presence (tier C)",      "#555",    "#f0f0ee"),
+}
+_GOV_RESULT_LABEL = {
+    "fail": ("exclude — defense entanglement", "#8a1c13", "#fde2e1"),
+    "flag": ("review — gov/defense exposure",  "#7a4f00", "#fef3cd"),
+}
+
+
+def _render_gov_company_block(company: dict) -> str:
+    """Company-level gov/defense flag + evidence list. Empty string for `none`."""
+    from html import escape as esc
+    flag = (company or {}).get("gov_defense_flag") or "none"
+    if flag == "none" or flag not in _GOV_FLAG_LABEL:
+        return ""
+    label, color, bg = _GOV_FLAG_LABEL[flag]
+    evidence = company.get("flag_evidence") or []
+    ev_html = ""
+    if evidence:
+        items = "".join(
+            f'<li style="padding:3px 0;font-size:11.5px;color:#555">{esc(str(e))}</li>'
+            for e in evidence
+        )
+        ev_html = f'<ul style="list-style:disc;margin:6px 0 0 18px;padding:0">{items}</ul>'
+    return (
+        '<div style="margin-top:14px">'
+        '<div class="section-label">Government / defense screen</div>'
+        f'<span class="app-status" style="background:{bg};color:{color}">{esc(label)}</span>'
+        f'{ev_html}'
+        '</div>'
+    )
+
+
+def _render_gov_job_block(job: dict, company: dict | None) -> str:
+    """Per-role gov/defense screen card for the job-detail page: combines the
+    company flag with this role's exposure (config.gov_screen_result) and shows
+    the result plus the interview question set when emitted. Returns '' when
+    there's nothing to surface (pass with no questions)."""
+    from html import escape as esc
+    flag     = (company or {}).get("gov_defense_flag") or "none"
+    exposure = job.get("role_exposure") or "insulated"
+    result, emit_q = gov_screen_result(flag, exposure)
+
+    if result == "pass" and not emit_q and flag == "none":
+        return ""
+
+    # Result badge
+    if result in _GOV_RESULT_LABEL:
+        rlabel, rcolor, rbg = _GOV_RESULT_LABEL[result]
+    else:
+        rlabel, rcolor, rbg = ("no concern", "#1a5c2e", "#d4edda")
+    result_badge = f'<span class="app-status" style="background:{rbg};color:{rcolor}">{esc(rlabel)}</span>'
+
+    flag_label = _GOV_FLAG_LABEL.get(flag, (flag.replace("_", " "), "#555", "#f0f0ee"))[0]
+
+    # Apply-rank effect row (Phase 2): flag penalizes, fail excludes.
+    effect_row = ""
+    if result == "flag":
+        base = composite_score(job, company)
+        adj  = apply_rank_score(job, company)
+        effect_row = (
+            f'<tr><td class="comp-label">Apply-rank</td>'
+            f'<td>{base} → {adj} / {COMPOSITE_MAX} '
+            f'(−{GOV_SCREEN_FLAG_PENALTY_PCT}% gov flag)</td></tr>'
+        )
+    elif result == "fail":
+        effect_row = (
+            '<tr><td class="comp-label">Apply-rank</td>'
+            '<td>excluded from apply queue &amp; cover-letter generation</td></tr>'
+        )
+
+    questions_html = ""
+    if emit_q:
+        items = "".join(f'<li style="padding:4px 0;font-size:12.5px;color:#444">{esc(q)}</li>'
+                        for q in GOV_SCREEN_INTERVIEW_QUESTIONS)
+        questions_html = (
+            '<div style="margin-top:10px">'
+            '<div class="section-label">Role-clarity questions to ask</div>'
+            f'<ol style="margin:6px 0 0 18px;padding:0">{items}</ol>'
+            '</div>'
+        )
+
+    return f"""
+    <div class="card">
+      <h2>Government / defense screen</h2>
+      <table class="comp-table">
+        <tr><td class="comp-label">Company flag</td><td>{esc(flag_label)}</td></tr>
+        <tr><td class="comp-label">Role exposure</td><td>{esc(exposure)}</td></tr>
+        <tr><td class="comp-label">Result</td><td>{result_badge}</td></tr>
+        {effect_row}
+      </table>
+      <p style="color:#888;font-size:11px;margin-top:8px">
+        The composite score itself is unchanged — the gov screen only adjusts
+        <em>apply-time ranking</em>: a <code>flag</code> applies a
+        −{GOV_SCREEN_FLAG_PENALTY_PCT}% penalty to the apply-rank, and a
+        <code>fail</code> hides the role from the apply queue.
+      </p>
+      {questions_html}
     </div>
     """
 
@@ -2415,14 +2532,17 @@ def job_detail_page(job_id: str) -> str:
     # ── Company card (recruiter-prep payload) ──────────────────────────────
     company_card = render_company_card(company, return_to=f"/job/{job_id}")
 
+    # ── Government/defense screen (per-role result) ────────────────────────
+    gov_card = _render_gov_job_block(job, company)
+
     # ── Assemble (comp + company cards pinned high for interview-stage) ────
     nav = '<p style="margin-bottom:14px"><a href="/pipeline">← Pipeline</a> · <a href="/today">Today</a></p>'
     flash = _flash_notice_html(pop_research_flash())
 
     if is_interview_stage:
-        body = nav + flash + header_card + comp_card + company_card + timeline_card + jd_card + cl_card + score_card
+        body = nav + flash + header_card + comp_card + company_card + gov_card + timeline_card + jd_card + cl_card + score_card
     else:
-        body = nav + flash + header_card + company_card + timeline_card + cl_card + comp_card + jd_card + score_card
+        body = nav + flash + header_card + company_card + gov_card + timeline_card + cl_card + comp_card + jd_card + score_card
 
     # Reuse the cover-letters JS so Copy buttons + form debounce work on this page.
     body += """
@@ -2958,8 +3078,15 @@ def render_cover_letters_body() -> str:
         if company_block_reason(j.get("company_id"), apps):
             suppressed += 1
             continue
+        # Gov-screen fail (tier_a / defense entanglement) is hidden too, same
+        # apply-time handling as the company throttle. SSOT: config.
+        if gov_screen_block_reason(j, co_by_id.get(j.get("company_id"))):
+            suppressed += 1
+            continue
         eligible.append(j)
-    eligible.sort(key=lambda j: job_score(j, co_by_id), reverse=True)
+    # Rank by the gov-screen-adjusted score (flag roles take the penalty); the
+    # row still DISPLAYS the pure composite via job_score. SSOT: apply_rank_score.
+    eligible.sort(key=lambda j: apply_rank_score(j, co_by_id.get(j.get("company_id"))), reverse=True)
 
     if not eligible:
         parts.append(
@@ -3260,6 +3387,24 @@ def render_cl_row(job: dict, co_by_id: dict | None = None,
             f"company ({d_title}, {d_status}, {d_date}). Log this one anyway?');"
         )
 
+    # Government/defense screen badge. A `flag` reduces the apply-rank (shown);
+    # `fail` roles are excluded upstream so they don't reach here.
+    gov_flag = (company_rec or {}).get("gov_defense_flag") or "none"
+    gov_result, _gov_q = gov_screen_result(gov_flag, job.get("role_exposure") or "insulated")
+    gov_badge = ""
+    if gov_result in _GOV_RESULT_LABEL:
+        glabel, gcolor, gbg = _GOV_RESULT_LABEL[gov_result]
+        adj = apply_rank_score(job, company_rec)
+        rank_note = f" · rank {adj}/{COMPOSITE_MAX}" if (gov_result == "flag" and adj != score) else ""
+        explain = ("reduces apply-rank by the gov penalty" if gov_result == "flag"
+                   else "exclude recommended")
+        gov_badge = (
+            f'<span class="pf-badge" style="background:{gbg};color:{gcolor}" '
+            f'title="Company flag: {esc(gov_flag)}; role exposure: '
+            f'{esc(job.get("role_exposure") or "insulated")}. {explain}. See Details.">'
+            f'gov/defense: {esc(gov_result)}{rank_note}</span>'
+        )
+
     cl_done    = bool(job.get("cover_letter_generated"))
     cl_version = job.get("cover_letter_version", 0)
     cl_relpath = job.get("cover_letter_path", "") or ""
@@ -3393,6 +3538,7 @@ def render_cl_row(job: dict, co_by_id: dict | None = None,
         <span class="cl-location">{location}</span>
         {state_pill}
         {dupe_badge}
+        {gov_badge}
       </div>
       {breakdown_line}
       {notes_block}

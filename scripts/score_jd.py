@@ -82,6 +82,13 @@ def score_jd(jd_text: str, title: str | None = None) -> dict:
     if missing:
         raise ValueError(f"Claude response missing keys: {missing}\nGot: {result}")
 
+    # role_exposure is the gov-screen JD-level judgment. Intentionally NOT
+    # required: a model miss must not break ingest. ingest.py resolves the
+    # final value via config.classify_role_exposure (which applies the
+    # deterministic title rules on top of this raw judgment).
+    exp = result.get("role_exposure")
+    result["role_exposure"] = exp if exp in ("insulated", "ambiguous", "exposed") else None
+
     # Clamp scores to valid ranges
     result["seniority_score"]  = max(0, min(25, int(result["seniority_score"])))
     result["domain_fit_score"] = max(0, min(20, int(result["domain_fit_score"])))

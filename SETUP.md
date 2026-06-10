@@ -65,7 +65,7 @@ Edit these four files in `profile/`:
 |---|---|
 | `resume.md` | Your resume — injected into the cover-letter prompt and the comp-estimate prompt. |
 | `cover_letter_rules.md` | Tone, section structure, projects to reference, work-authorization paragraphs. |
-| `scoring_rubric.md` | Claude system prompt for JD scoring — your seniority and domain criteria. |
+| `scoring_rubric.md` | Claude system prompt for JD scoring — your seniority and domain criteria, plus the gov-screen role-exposure classification. |
 | `stack_keywords.yaml` | Keyword weights for mechanical stack scoring **and** the crawl pre-filter. |
 
 > **profile/ is gitignored.** Your resume and personal scoring criteria

@@ -27,7 +27,9 @@ from config import (
     CLAUDE_MODEL,
     CLAUDE_MODEL_FAST,
     COMPANY_REGISTRY_PATH,
+    GOV_SCREEN_FLAGGED_REGIONS,
     company_auto_exclude_reason,
+    reconcile_gov_defense_flag,
     load_json,
     save_json,
     now_utc,
@@ -62,6 +64,34 @@ union_busting, environmental, surveillance, predatory_practices, other
 ## Ethics flag status values
 confirmed, alleged, historical, clean
 
+## Government / defense entanglement flag (gov_defense_flag)
+Classify the company's government/military business posture as exactly one of
+`tier_a`, `tier_b`, `tier_c`, or `none`. The question is assignment risk for an
+engineer, not whether the company's product *could* be used by a government.
+
+- tier_a: primary or substantial business is defense contracting or weapons
+  systems (the defense primes, weapons makers, military systems integrators).
+- tier_b: a dedicated government/public-sector product line, business unit, or
+  compliance posture indicating active pursuit of government/military
+  customers. Sufficient signals (any one): a /government, /public-sector, or
+  /federal product page; marketing FedRAMP / DoD Impact Levels (IL2-IL6) /
+  NIST 800-53 / ATO / FIPS as a feature; GovCloud or sovereign-government cloud
+  regions; a public-sector/federal sales team; In-Q-Tel investment, GSA
+  schedule, or SAM.gov vendor registration; named government/military customers
+  in case studies. ALSO tier_b if there are government/military customers in
+  any user-flagged region listed in the request.
+- tier_c: go-to-market presence (sales/SA roles, in-region data centers, or
+  in-region commercial customers) in a user-flagged region, but NO detected
+  government business there. Informational only.
+- none: no signals.
+
+Do NOT flag on these non-signals: employing remote contractors anywhere;
+open-source product usage by arbitrary parties including governments; running
+on AWS/Azure/GCP (hyperscaler government contracts are out of scope).
+
+Put the specific signals you matched into `flag_evidence` (one short string
+each); empty list for `none`.
+
 ## Required JSON output format
 {
   "name": "<canonical company name>",
@@ -85,6 +115,8 @@ confirmed, alleged, historical, clean
       "source_date": "<YYYY-MM-DD or empty string>"
     }
   ],
+  "gov_defense_flag": "<tier_a|tier_b|tier_c|none>",
+  "flag_evidence": ["<signal matched, one short string each>"],
   "ethics_notes": "<one sentence summary or empty string>",
   "scrape_tier": "<1_direct|2_alert|3_manual|4_rss>"
 }
@@ -168,7 +200,9 @@ def research_company(name: str, model: str = CLAUDE_MODEL_FAST) -> dict:
             "role": "user",
             "content": (
                 f"Research this company for a Staff Software Engineer targeting "
-                f"remote roles in Canada or Ireland:\n\nCompany: {name}"
+                f"remote roles in Canada or Ireland:\n\nCompany: {name}\n\n"
+                f"User-flagged regions for ethics screening (ISO codes): "
+                f"{', '.join(GOV_SCREEN_FLAGGED_REGIONS) or '(none)'}"
             )
         }],
     )
@@ -216,6 +250,15 @@ def research_company(name: str, model: str = CLAUDE_MODEL_FAST) -> dict:
             result["ethics_hard_exclude"] = True
             print(f"  Auto-exclude: {auto_reason}", flush=True)
 
+    # Government/defense screen (Phase 1: surface-only). Reconcile the LLM's
+    # gov_defense_flag with the deterministic tier_a floor (defense industry).
+    # SSOT: config.reconcile_gov_defense_flag.
+    result["gov_defense_flag"] = reconcile_gov_defense_flag(result)
+    ev = result.get("flag_evidence")
+    result["flag_evidence"] = [str(x) for x in ev] if isinstance(ev, list) else []
+    if result["gov_defense_flag"] != "none":
+        print(f"  Gov/defense flag: {result['gov_defense_flag']}", flush=True)
+
     # Clamp scores
     result["sponsorship_score"] = max(0, min(15, int(result.get("sponsorship_score", 7))))
     result["remote_fit"]        = max(0, min(5,  int(result.get("remote_fit", 3))))
@@ -245,6 +288,8 @@ def build_registry_record(research: dict, existing_id: str | None = None) -> dic
         "ethics_hard_exclude": research.get("ethics_hard_exclude", False),
         "ethics_flags":        research.get("ethics_flags", []),
         "ethics_notes":        research.get("ethics_notes", ""),
+        "gov_defense_flag":    research.get("gov_defense_flag", "none"),
+        "flag_evidence":       research.get("flag_evidence", []),
         "confirmed_clean":     False,
         "record_created":      now,
         "record_updated":      now,
@@ -306,6 +351,8 @@ def main():
     print(f"  Blind:          {research.get('blind_sentiment')}")
     print(f"  Recent layoffs: {research.get('recent_layoffs')} — {research.get('layoff_notes')}")
     print(f"  Ethics exclude: {research.get('ethics_hard_exclude')}")
+    print(f"  Gov/defense:    {research.get('gov_defense_flag')}"
+          + (f" — {'; '.join(research.get('flag_evidence') or [])}" if research.get('flag_evidence') else ""))
     if research.get("ethics_flags"):
         for flag in research["ethics_flags"]:
             print(f"    [{flag['status']}] {flag['category']}: {flag['description']}")

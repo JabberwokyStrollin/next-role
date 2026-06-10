@@ -55,6 +55,8 @@ from config import (  # noqa: E402
     company_block_reason,
     composite_score,
     composite_score_pre_research,
+    apply_rank_score,
+    gov_screen_block_reason,
     load_json,
     save_json,
 )
@@ -313,12 +315,19 @@ def generate_cover_letters(top_n: int = 5, auto: bool = False) -> None:
     # MAX_ACTIVE_APPS_PER_COMPANY or more in-flight applications.
     scored     = []
     suppressed = 0
+    gov_excluded = 0
     for job in raw_eligible:
+        company = co_by_id.get(job.get("company_id"))
         if company_block_reason(job.get("company_id"), apps):
             suppressed += 1
             continue
-        company = co_by_id.get(job.get("company_id"))
-        score   = composite_score(job, company)
+        # Gov-screen fail (tier_a / defense entanglement) is hidden from apply
+        # surfaces, same handling as company_block_reason. SSOT: config.
+        if gov_screen_block_reason(job, company):
+            gov_excluded += 1
+            continue
+        # Rank by the gov-screen-adjusted score (flag → -GOV_SCREEN_FLAG_PENALTY_PCT%).
+        score   = apply_rank_score(job, company)
         scored.append((score, job))
     scored.sort(key=lambda x: x[0], reverse=True)
 
@@ -330,6 +339,8 @@ def generate_cover_letters(top_n: int = 5, auto: bool = False) -> None:
     print(f"\n── Cover letter candidates (top {top_n}, ≤{MAX_ACTIVE_APPS_PER_COMPANY} active apps/co) ──────────")
     if suppressed:
         print(f"  ({suppressed} suppressed: company already at {MAX_ACTIVE_APPS_PER_COMPANY} active applications)")
+    if gov_excluded:
+        print(f"  ({gov_excluded} excluded: gov/defense entanglement)")
     for i, (score, job) in enumerate(candidates, 1):
         print(f"  {i}. [{score:>3}] {job['company_name']} — {job['title']}")
 

@@ -38,6 +38,7 @@ from config import (
     compute_stack_score,
     compute_velocity_score,
     compute_staleness,
+    classify_role_exposure,
 )
 from score_jd import score_jd
 from research_company import build_registry_record, upsert_company
@@ -313,6 +314,7 @@ def ingest_job(
         "domain_fit_score":     scores["domain_fit_score"],
         "hiring_velocity_score": velocity_score,
         "score_notes":          scores["score_notes"],
+        "role_exposure":        classify_role_exposure(title, scores.get("role_exposure")),
         "cover_letter_generated": False,
         "cover_letter_version":   0,
         "pipeline_status":      "active",

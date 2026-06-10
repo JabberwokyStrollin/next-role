@@ -93,7 +93,9 @@ page) does a case-insensitive substring match on company name and job
 title across non-archived pipeline jobs. Built for recruiter-call prep:
 type the company, click the role, land on `/job/<id>` with the JD,
 company-research card (industry, sponsorship, remote, layoffs, ethics
-flags), comp estimate, and application timeline. Jobs with a logged
+flags), a government/defense screen (per-role exposure × company flag — a
+`flag` penalizes apply-queue ranking, a `fail` hides the role), comp
+estimate, and application timeline. Jobs with a logged
 application appear first (most-recently applied first); the rest follow
 by composite score.
 
