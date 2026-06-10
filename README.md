@@ -58,7 +58,12 @@ Opens `http://localhost:5000/today` — the daily checklist with four
 sections you tick off as you work through them:
 
 1. **Status updates** — outcomes on already-submitted applications
-   (rejections, interview requests, position-filled letters).
+   (recruiter screens, interview requests, rejections, offers). Rejections
+   are categorized — generic, position filled, or **interview failed** — so
+   `/metrics` can break them down. Two sub-tabs: **Active** (live
+   applications) and **Ghosted** (no response past 21 days; these
+   auto-convert to a rejection once they pass 45 days since you applied, so
+   the list keeps itself clean).
 2. **Crawl** — kick off the two-lane crawler in the background and
    watch its tail update live.
 3. **LinkedIn ingest** — pull job-alert emails via IMAP, pre-filter
@@ -78,9 +83,10 @@ paste the text manually.
 
 `/metrics` shows cohort comparisons (in-flight vs rejected/ghosted vs
 offers) across every composite-score component, a composite-score
-distribution, and funnel-speed stats. Useful for asking "is the
-composite predicting outcomes?" and "how long does the median response
-take?". Data only — no Claude calls.
+distribution, a rejection-reason breakdown (generic / position filled /
+interview failed / auto-ghosted), and funnel-speed stats. Useful for asking
+"is the composite predicting outcomes?" and "how often do I lose at the
+interview vs the screen?". Data only — no Claude calls.
 
 `/search?q=...` (also reachable from the top-nav search box on every
 page) does a case-insensitive substring match on company name and job

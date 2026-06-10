@@ -101,7 +101,9 @@ file.
 | `VELOCITY_TIERS` | `list[(int, int)]` | `(max_days_since_posted, score)`; first match wins; default 0. |
 | `FRESHNESS_TIERS` | `list[(int, int)]` | `(max_age_days, bonus)`; bonus stacks on top of velocity. |
 | `STALENESS_TIERS` | `dict[str, (int, int)]` | Inclusive day-range per tier label (`fresh` / `soft_stale` / `hard_stale`). |
-| `GHOSTED_DAYS` | `int` | Applications with no response after N days auto-flip to `ghosted`. |
+| `GHOSTED_DAYS` | `int` | Applications with no response after N days (21) auto-flip to `ghosted` (see `auto_age_application`). |
+| `GHOSTED_REJECTED_DAYS` | `int` | A `ghosted` application still un-answered after N days (45) since applying auto-converts to `rejected` (reason `ghosted_timeout`). Must exceed `GHOSTED_DAYS`. |
+| `REJECTION_REASONS` | `dict[str, str]` | SSOT for rejection-reason key → human label: `generic`, `position_filled`, `interview_failed`, `ghosted_timeout`. Consumed by serve.py status buttons and `metrics.py`. |
 | `MAX_ACTIVE_APPS_PER_COMPANY` | `int` | Apply-time throttle — hide a company once N in-flight apps exist (3). |
 | `IN_FLIGHT_STATUSES` | `frozenset[str]` | What "in-flight" means for the throttle: `applied`, `recruiter_screen`, `interview`. `ghosted` is intentionally excluded so dead apps free the slot. |
 | `_SENIORITY_BUCKETS` | `list[(str, Pattern, int)]` | Ordered (bucket, regex, cap) — first match wins. Used by `title_seniority_cap`. |
@@ -329,6 +331,32 @@ can be shown.
   - `apps` — every record from `application_tracker.json`. The function does the company-id filter itself.
 - **Behavior:** counts applications at this company whose status is in `IN_FLIGHT_STATUSES` and which have no `response_date` set. If the count reaches `MAX_ACTIVE_APPS_PER_COMPANY`, returns `f"{n} active applications"`.
 - **Called by:** `serve.py:render_cover_letters_body` and `run.py:generate_cover_letters`. **Not** called by crawl, prefilter, or ingest — those layers are intentionally permissive.
+
+#### `auto_age_application(app: dict) -> bool`
+**SSOT for the two time-based status transitions.** Mutates one application
+record in place and returns `True` iff it changed. Applies, in order:
+`applied → ghosted` after `GHOSTED_DAYS`, then `ghosted → rejected` after
+`GHOSTED_REJECTED_DAYS` (setting `rejection_reason="ghosted_timeout"` and
+appending an explanatory note). Records with a `response_date`, or already
+past these states, are untouched; the auto-rejection leaves `response_date`
+`null` on purpose. **Called by** `serve.py:apply_ghosted_check` and
+`update_status.cmd_list` so the web and CLI never diverge. Distinct from the
+company throttle — this advances application *status*; it is not a cooldown.
+
+#### `normalize_role_title(title: str) -> str`
+Reduces a title to a comparable core: lowercases, drops any specialization
+after the first comma or `(`, strips punctuation, collapses whitespace.
+`"Staff II Software Engineer, Data Ingestion"` and `"Staff II Software
+Engineer"` both → `"staff ii software engineer"`. Used only by
+`find_duplicate_application`.
+
+#### `find_duplicate_application(company_id, title, apps, exclude_app_id=None) -> dict | None`
+Apply-time duplicate guard. Returns an existing application at the same
+`company_id` whose `normalize_role_title` matches `title` (regardless of that
+app's status), else `None`. **Called by** `update_status.cmd_log` (blocks the
+log unless `--force`) and `serve.py:render_cl_row` (warning badge + Mark-Applied
+confirm). Catches the same role reposted under a different listing URL, which
+`ingest.check_duplicate` (exact-URL, non-archived only) cannot see.
 
 ---
 
@@ -934,11 +962,11 @@ calling `linkedin_fetch._fetch_jd_text`.
 | Name | Purpose |
 |---|---|
 | `ROOT`, `SCRIPTS`, `DATA_DIR`, `OUTPUT_DIR` | Path constants. |
-| `APPLICATION_TRACKER_PATH`, `GHOSTED_DAYS` | Mirrors `config.py` to keep this file importable without the `ANTHROPIC_API_KEY` check. |
+| `APPLICATION_TRACKER_PATH` | Local copy of the tracker path (also imported from `config.py`). |
 | `MIN_JD_LENGTH` | 200 — JD body length threshold (mirrors ingest). |
 | `DAILY_CHECKLIST_PATH`, `EMAIL_STAGED_PATH` | Daily-checklist state + LinkedIn staged-rows file. |
 | `CHECKLIST_SECTIONS` | Ordered `(id, title, hint)` for the four `/today` sections. |
-| `STATUS_ACTION_MAP` | Button-value → `(status, note)` for status updates POSTed from `/today`. |
+| `STATUS_ACTION_MAP` | Button-value → `(status, rejection_reason \| None)` for status updates POSTed from `/today`. The reason key (SSOT `config.REJECTION_REASONS`) is passed to `update_status.py status --rejection-reason`; includes `rejected_interview_failed`. |
 | `CRAWL_TAIL_MAX`, `INGESTED_RE` | Background crawl: tail-line cap (50) + regex to capture `Ingested: N` from stdout. |
 | `crawl_state_lk`, `crawl_state` | Threading lock + state dict for the background crawl. |
 | `LINKEDIN_REQUIRED_ENV` | `("NEXTROLE_IMAP_HOST", "NEXTROLE_IMAP_USER", "NEXTROLE_IMAP_APP_PASSWORD")`. |
@@ -1011,9 +1039,11 @@ Writes the JD to a temp file, shells out to `ingest.py --paste`, returns
 Convenience: `composite_score(job, co_by_id.get(job['company_id']))`.
 
 #### `apply_ghosted_check() -> None`
-Side-effect mirror of `update_status.cmd_list` — auto-flips `applied` apps
-to `ghosted` once they pass `GHOSTED_DAYS`. Called on `/today` render so
-the web view stays in sync with the CLI.
+Runs the time-based application aging on every record by delegating to
+`config.auto_age_application` (the SSOT shared with `update_status.cmd_list`):
+`applied → ghosted` after `GHOSTED_DAYS`, then `ghosted → rejected` after
+`GHOSTED_REJECTED_DAYS`. Called on `/today` render so the web view stays in
+sync with the CLI.
 
 #### Background-crawl helpers
 - `_crawl_worker() -> None` — daemon thread; runs `scripts/crawl.py` and streams its output into `crawl_state["output_tail"]` while parsing `Ingested: N` from the last matching line. Updates state to `done`/`error` on exit.
@@ -1056,7 +1086,7 @@ the web view stays in sync with the CLI.
 - `pipeline_card() -> str` — short top-10 pipeline preview on the ingest landing page.
 - `pipeline_page() -> str` — the full `/pipeline` table.
 - `search_page(query) -> str` — the `/search` results view. Case-insensitive substring match on `company_name` and `title` across non-archived pipeline jobs; sort puts jobs that have an `application_tracker.json` entry first (by `date_applied` desc), then the rest by composite score. Empty query falls back to a browse list (capped at 40). Each row links to `/job/<id>`.
-- `metrics_page() -> str` — the `/metrics` analytics page; calls `scripts/metrics.py:build_metrics()` and renders five cards (overview, status breakdown, avg composite by cohort, component contribution averages, score-distribution histogram, funnel speed).
+- `metrics_page() -> str` — the `/metrics` analytics page; calls `scripts/metrics.py:build_metrics()` and renders cards: overview, status breakdown, rejection-reason breakdown (labels from `config.REJECTION_REASONS`; `unspecified` for pre-field rejections), avg composite by cohort, component contribution averages, score-distribution histogram, funnel speed.
 - `_fmt_num(v, suffix='') -> str` / `_hist_row(band, by_cohort, max_count) -> str` — helpers for the metrics page (number formatting + one stacked histogram row).
 - `_sanitize_snippet(value: str) -> str` — escape HTML-unsafe chars inside snippet textareas.
 - `_snippet_field(field_id, label, value, multiline=False) -> str` — one field + copy button.
@@ -1065,16 +1095,16 @@ the web view stays in sync with the CLI.
 - `render_company_card(company, return_to='') -> str` — researched-company panel surfaced on `/job/<id>` for recruiter-call prep: industry, size, HQ, careers URL, sponsorship score+notes, remote_fit, glassdoor/blind sentiment, recent layoffs, and ethics flags. Reads `COMPONENTS["sponsorship"].native_max` + `COMPONENTS["remote"].native_max` for denominators (per the scoring SSOT). When the company record is still a stub, renders a warning banner with a "Research now" form that POSTs to `/today/company/research` and brings the user back to `return_to`.
 - `job_detail_page(job_id) -> str` — full per-job view with score breakdown, JD viewer, comp panel, and the company-research card (pinned high — right under the header for non-interview status, right under the comp card for interview-stage).
 - `resume_page() -> str` — `/resume` view.
-- `render_section_body(sid, linkedin_view='default') -> str` — dispatches to the per-section body renderer.
+- `render_section_body(sid, view='default') -> str` — dispatches to the per-section body renderer. A single `view` query param is shared across sections; only the open section interprets it (status_updates: `active`/`ghosted`; linkedin: `default`/`all`/`failing`).
 - `render_linkedin_body(view='default') -> str` — LinkedIn-ingest section body; `view` controls passing-only vs. all-rows filter.
 - `render_staged_row(row) -> str` — one staged-row card.
 - `render_crawl_body() -> str` — crawl-section body with the live status badge.
-- `render_status_updates_body() -> str` / `render_app_row(app) -> str` — status-updates section + per-app row with status-change buttons.
+- `render_status_updates_body(view='active') -> str` / `render_app_row(app) -> str` — status-updates section + per-app row with status-change buttons. Two sub-tabs: `active` (live applications, excludes ghosted) and `ghosted` (auto-flipped, awaiting the `ghosted_timeout` auto-rejection). `render_app_row` includes the `rejected_interview_failed` button.
 - `render_cover_letters_body() -> str` — top-N apply queue, ranked by full composite, filtered by `company_block_reason`.
 - `_fmt_currency(value, currency) -> str` — `"CAD 245,000"` formatting.
 - `render_comp_panel(comp_record, job_id) -> str` — comp-estimate accordion inside a cover-letter row.
-- `render_cl_row(job, co_by_id=None, ...) -> str` — one cover-letter row in the apply queue.
-- `daily_checklist_page(open_section=None, linkedin_view='default') -> str` — the `/today` page assembly.
+- `render_cl_row(job, co_by_id=None, comp_record=None, apps=None) -> str` — one cover-letter row in the apply queue. When `apps` is supplied, runs `config.find_duplicate_application`; on a hit it renders an "⚠ already applied" badge and gates Mark Applied behind a confirm dialog that posts `force=1`.
+- `daily_checklist_page(open_section=None, view='default') -> str` — the `/today` page assembly; `view` is the shared sub-tab param threaded to `render_section_body`.
 - `_aq_chip_html(slug, label) -> str` — one resume-entry chip on the answer-questions card.
 - `_aq_card_html(job_id, question) -> str` — full question card HTML, used both for initial page render and as the `card_html` payload returned by every `/answer-questions/*` mutating endpoint so the client can swap a single card's `outerHTML` without a full reload.
 - `render_answer_questions_page(job_id) -> str` — the `/answer-questions` full-page view: header (back link + job header + composite score), motivation section, behavioral section, global resume-entry-notes panel, and the page-local JS (`_AQ_PAGE_JS`). Lazy-imports `answer_questions` so the module's API-key check doesn't fire on server startup.
@@ -1166,39 +1196,44 @@ Same shape as `ingest.append_log`. Appends a UUID + timestamped entry to
 `"IE"` / `"CA"` / `"OTHER"` based on substring matches in the location.
 Used to fill in `country` on a new application record.
 
-#### `check_ghosted(app: dict) -> bool`
-Returns `True` if the app has no `response_date`, isn't in a terminal
-status, has a `date_applied`, and that date is older than
-`GHOSTED_DAYS`. Used by `cmd_list` to auto-flip stale rows.
+Time-based aging lives in `config.auto_age_application` (the SSOT shared with
+`serve.py:apply_ghosted_check`), not here — `update_status` calls it from
+`cmd_list`.
 
 #### `cmd_log(args) -> None`
-Implements `update_status.py log --job-id UUID [--method M] [--plain-text] [--notes T]`.
+Implements `update_status.py log --job-id UUID [--method M] [--plain-text] [--notes T] [--force]`.
 
 - Loads the job from `job_pipeline.json`. Exits 1 if not found.
-- Refuses to double-log (warns and returns instead of creating a duplicate).
-- Builds an application record with `composite_score_at_apply` filled from
-  the SSOT `composite_score`.
+- Refuses to double-log the **same job** (warns and returns).
+- Refuses to log a **same company + core title** duplicate
+  (`config.find_duplicate_application`) unless `--force` — exits 2 with a
+  warning otherwise.
+- Builds an application record (including `rejection_reason=None`) with
+  `composite_score_at_apply` filled from the SSOT `composite_score`.
 - Flips the job's `pipeline_status` to `applied`.
 - Logs an `application_logged` event.
 
 #### `cmd_status(args) -> None`
-Implements `update_status.py status --app-id UUID --status NAME [--notes T]`.
+Implements `update_status.py status --app-id UUID --status NAME [--rejection-reason R] [--notes T]`.
 
 - Updates `status` + `status_updated`.
 - Sets `response_date` to today on the **first** transition out of
   `applied`/`ghosted` — this is what frees the throttle slot.
+- When `--rejection-reason` is given (key from `config.REJECTION_REASONS`),
+  stores it on `rejection_reason` and appends the human label to `notes`.
 - Appends free-text notes if provided.
 - Logs an `application_status_change` event.
 
 #### `cmd_list(args) -> None`
-Implements `update_status.py list`. Runs `check_ghosted` against every
-app; if any flipped, persists the change. Prints a single sorted table
+Implements `update_status.py list`. Runs `config.auto_age_application`
+against every app; if any changed, persists. Prints a single sorted table
 of all applications.
 
 #### `main() -> None`
 Argparse with three subcommands (`log`, `status`, `list`). Status choices
 are constrained: `applied`, `recruiter_screen`, `interview`, `offer`,
-`rejected`, `ghosted`, `withdrawn`.
+`rejected`, `ghosted`, `withdrawn`. `--rejection-reason` choices come from
+`config.REJECTION_REASONS`.
 
 ---
 
@@ -1262,6 +1297,11 @@ Returns `{count, min, max, median, mean}` or `{}` if no data.
 #### `_status_counts(apps) -> dict[str, int]`
 Flat `{status: count}` mapping for the status-breakdown table.
 
+#### `_rejection_reasons(apps) -> dict[str, int]`
+`{rejection_reason: count}` over `rejected` apps only. Rejections with no
+`rejection_reason` (logged before the field) fall into `unspecified`.
+Feeds the `/metrics` rejection-reason breakdown card.
+
 #### `build_metrics() -> dict`
 **Public entry point.** Returns a single dict with these keys:
 
@@ -1269,6 +1309,7 @@ Flat `{status: count}` mapping for the status-breakdown table.
 |---|---|---|
 | `total_apps` | int | Total application records. |
 | `status_counts` | `{status: count}` | All statuses, including `withdrawn`/`other`. |
+| `rejection_reasons` | `{reason: count}` | Rejected apps by `rejection_reason` (`unspecified` for pre-field rows). |
 | `cohort_sizes` | `{in_flight, dead, positive, other}` | Per-cohort counts. |
 | `avg_composite` | `{in_flight, dead, positive}` | Mean composite per cohort, or `None`. |
 | `avg_components` | `{cohort: {component: float\|None}}` | Mean weighted contribution per component per cohort. |

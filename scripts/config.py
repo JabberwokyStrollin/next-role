@@ -223,7 +223,26 @@ STALENESS_TIERS = {
     "hard_stale": (60, 9999),
 }
 
-GHOSTED_DAYS = 21   # applications with no response after this many days
+GHOSTED_DAYS = 21   # applications with no response after this many days auto-flip to 'ghosted'
+
+# Second-stage aging: a 'ghosted' application still without a response this
+# many days after it was submitted auto-converts to a rejection (with
+# rejection_reason "ghosted_timeout"). Clears the Ghosted tab of long-dead
+# applications while preserving them as rejections for metrics. Must be
+# greater than GHOSTED_DAYS. See auto_age_application() below.
+GHOSTED_REJECTED_DAYS = 45
+
+# Rejection-reason SSOT. The key is stored in
+# application_tracker.rejection_reason; the value is the human label shown in
+# the UI and appended to the application note. Surfaces (serve.py status
+# buttons, metrics.py breakdown) import this — never hardcode a reason key or
+# label elsewhere.
+REJECTION_REASONS: dict[str, str] = {
+    "generic":          "Generic rejection",
+    "position_filled":  "Position filled",
+    "interview_failed": "Interview failed",
+    "ghosted_timeout":  "Auto-rejected (ghosted)",
+}
 
 # ─── JSON helpers ─────────────────────────────────────────────────────────────
 
@@ -772,4 +791,107 @@ def company_block_reason(company_id: str | None, apps: list[dict]) -> str | None
     )
     if active >= MAX_ACTIVE_APPS_PER_COMPANY:
         return f"{active} active applications"
+    return None
+
+
+# ─── Application aging (time-based status transitions) ───────────────────────
+#
+# Single source of truth for the two date-driven status transitions. Both the
+# web view (serve.py:apply_ghosted_check) and the CLI (update_status.cmd_list)
+# call this so the two surfaces never diverge.
+#
+# These are NOT throttle cooldowns (the company filter has none — see the
+# COMPANY-FILTER SSOT banner above). They only advance an application that has
+# received no response at all:
+#   applied  → ghosted   after GHOSTED_DAYS          (ghosted_flag = True)
+#   ghosted  → rejected  after GHOSTED_REJECTED_DAYS (rejection_reason
+#                                                     "ghosted_timeout")
+#
+# An application with a response_date, or whose status is already past these
+# states (recruiter_screen / interview / offer / rejected / withdrawn), is left
+# untouched. The auto-rejection intentionally does NOT set response_date —
+# there was no real response, so it stays out of funnel-speed metrics.
+
+def auto_age_application(app: dict) -> bool:
+    """Apply the time-based status transitions to one application in place.
+    Returns True iff the record was mutated."""
+    if app.get("response_date"):
+        return False
+    applied = app.get("date_applied")
+    if not applied:
+        return False
+    try:
+        age = days_since(applied)
+    except ValueError:
+        return False
+
+    status  = app.get("status")
+    changed = False
+
+    if status == "applied" and age > GHOSTED_DAYS:
+        app["status"]       = "ghosted"
+        app["ghosted_flag"] = True
+        status              = "ghosted"
+        changed             = True
+
+    if status == "ghosted" and age > GHOSTED_REJECTED_DAYS:
+        app["status"]           = "rejected"
+        app["ghosted_flag"]     = False
+        app["rejection_reason"] = "ghosted_timeout"
+        note = f"Auto-rejected after {GHOSTED_REJECTED_DAYS} days with no response (ghosted)."
+        existing = app.get("notes") or ""
+        app["notes"] = (existing + ("\n" if existing else "") + note).strip()
+        changed = True
+
+    return changed
+
+
+# ─── Duplicate-application guard (apply-time) ────────────────────────────────
+#
+# The same role is frequently reposted under a different listing URL (or
+# re-ingested after its first copy was archived), becoming a second pipeline
+# job. ``ingest.check_duplicate`` only matches the exact apply_url of a
+# non-archived job, so it can't see these — and ``cmd_log`` dedups only by
+# job_id. This helper detects "same company + same core title" so apply
+# surfaces can warn before a second application to effectively the same role.
+#
+# It is a WARNING signal, not a hard pipeline gate: ingest stays permissive on
+# purpose, and the operator can override with --force / a confirm dialog.
+
+def normalize_role_title(title: str) -> str:
+    """Reduce a job title to a comparable core: lowercase, drop any
+    specialization after the first comma or '(', strip punctuation, collapse
+    whitespace. 'Staff II Software Engineer, Data Ingestion' and 'Staff II
+    Software Engineer' both normalize to 'staff ii software engineer'."""
+    t = (title or "").lower()
+    for sep in (",", "("):
+        i = t.find(sep)
+        if i > 0:
+            t = t[:i]
+    t = _re.sub(r"[^a-z0-9 ]+", " ", t)
+    return _re.sub(r"\s+", " ", t).strip()
+
+
+def find_duplicate_application(
+    company_id: str | None,
+    title: str,
+    apps: list[dict],
+    exclude_app_id: str | None = None,
+) -> dict | None:
+    """Return an existing application at the same company whose normalized
+    title matches ``title``, or None. Used to warn before logging or queuing a
+    second application to effectively the same role. Matches regardless of the
+    prior application's status — a prior rejection is still worth flagging."""
+    if not company_id:
+        return None
+    norm = normalize_role_title(title)
+    if not norm:
+        return None
+    for a in apps:
+        if exclude_app_id and a.get("application_id") == exclude_app_id:
+            continue
+        if a.get("company_id") != company_id:
+            continue
+        if normalize_role_title(a.get("title", "")) == norm:
+            return a
     return None

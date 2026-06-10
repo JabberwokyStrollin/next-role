@@ -156,15 +156,22 @@ the constants `MAX_ACTIVE_APPS_PER_COMPANY` and `IN_FLIGHT_STATUSES`.
    for application: `serve.py:render_cover_letters_body` and
    `run.py:generate_cover_letters`. Adding it elsewhere breaks the model.
 
-3. **No date-based cooldown.** A rejection / interview / withdraw / offer
-   flips status and/or sets `response_date` in `update_status.cmd_status`,
-   which immediately frees the slot. There is no time-based timer anywhere
-   in the throttle — application status is the only gate.
+3. **No date-based cooldown in the throttle.** A rejection / interview /
+   withdraw / offer flips status and/or sets `response_date` in
+   `update_status.cmd_status`, which immediately frees the slot. There is no
+   time-based timer anywhere in the throttle — `company_block_reason` reads
+   only application *status*. (This is distinct from
+   `config.auto_age_application`, which *does* advance an application's own
+   status on a timer — `applied`→`ghosted`→`rejected`. That's status aging,
+   not a throttle cooldown: the throttle never inspects dates, only the
+   resulting status.)
 
 4. **`ghosted` does NOT count as in-flight.** Once an application ages
    past `GHOSTED_DAYS` without a response and gets auto-flipped to
-   `ghosted`, the slot is freed — explicit choice so silently-dead apps
-   don't permanently block the company.
+   `ghosted` (by `config.auto_age_application`), the slot is freed —
+   explicit choice so silently-dead apps don't permanently block the
+   company. After `GHOSTED_REJECTED_DAYS` the same function converts it to
+   `rejected` (reason `ghosted_timeout`); still not in-flight, still freed.
 
 5. **Tuning the limit:** edit `MAX_ACTIVE_APPS_PER_COMPANY` only. UI
    labels read the constant.

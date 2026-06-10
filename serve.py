@@ -56,15 +56,16 @@ from config import (  # noqa: E402
     COMPOSITE_MAX,
     PRE_RESEARCH_MAX,
     MAX_ACTIVE_APPS_PER_COMPANY,
+    GHOSTED_REJECTED_DAYS,
+    REJECTION_REASONS,
     company_block_reason,
     composite_score,
     composite_score_pre_research,
+    auto_age_application,
+    find_duplicate_application,
 )
 
-# Mirrors scripts/config.py. Duplicated to keep serve.py importable without
-# the ANTHROPIC_API_KEY check that config.py runs at import time.
 APPLICATION_TRACKER_PATH = DATA_DIR / "application_tracker.json"
-GHOSTED_DAYS             = 21
 
 
 def load_applications() -> list:
@@ -272,25 +273,16 @@ def save_daily_state(date_iso: str, state: dict) -> None:
 
 
 def apply_ghosted_check() -> None:
-    """Auto-flip 'applied' apps to 'ghosted' once they pass GHOSTED_DAYS without a
-    response. Mirrors scripts/update_status.py cmd_list side effect so the web view
-    stays in sync with the CLI."""
+    """Run the time-based application aging (applied → ghosted → rejected) on
+    every record. Delegates to config.auto_age_application — the single source
+    of truth shared with scripts/update_status.py:cmd_list — so the web view
+    and the CLI never diverge. Called on every /today render."""
     apps = load_applications()
     if not apps:
         return
-    terminal = {"offer", "rejected", "withdrawn", "recruiter_screen", "interview"}
-    updated  = False
+    updated = False
     for app in apps:
-        if app.get("response_date") or app.get("status") in terminal:
-            continue
-        applied = app.get("date_applied")
-        if not applied:
-            continue
-        is_ghosted = days_since_iso(applied) > GHOSTED_DAYS
-        if is_ghosted != app.get("ghosted_flag", False):
-            app["ghosted_flag"] = is_ghosted
-            if is_ghosted and app.get("status") == "applied":
-                app["status"] = "ghosted"
+        if auto_age_application(app):
             updated = True
     if updated:
         save_applications(apps)
@@ -298,13 +290,17 @@ def apply_ghosted_check() -> None:
 
 # ── Status-update action map (button value → update_status.py args) ─────────-
 
+# Button value → (status, rejection_reason | None). The rejection_reason key
+# is the SSOT in config.REJECTION_REASONS; update_status derives the note label
+# from it, so labels are never duplicated here.
 STATUS_ACTION_MAP = {
-    "recruiter_screen":         ("recruiter_screen", ""),
-    "interview":                ("interview",        ""),
-    "offer":                    ("offer",            ""),
-    "rejected_generic":         ("rejected",         "Generic rejection"),
-    "rejected_position_filled": ("rejected",         "Position filled"),
-    "withdrawn":                ("withdrawn",        ""),
+    "recruiter_screen":          ("recruiter_screen", None),
+    "interview":                 ("interview",        None),
+    "offer":                     ("offer",            None),
+    "rejected_generic":          ("rejected",         "generic"),
+    "rejected_position_filled":  ("rejected",         "position_filled"),
+    "rejected_interview_failed": ("rejected",         "interview_failed"),
+    "withdrawn":                 ("withdrawn",        None),
 }
 
 
@@ -1687,6 +1683,7 @@ def metrics_page() -> str:
     total          = m["total_apps"]
     cohort_sizes   = m["cohort_sizes"]
     status_counts  = m["status_counts"]
+    rejection_reasons = m["rejection_reasons"]
     avg_composite  = m["avg_composite"]
     avg_components = m["avg_components"]
     component_max  = m["component_max"]
@@ -1741,6 +1738,32 @@ def metrics_page() -> str:
         </div>"""
     else:
         status_card = ""
+
+    # ── Rejection-reason breakdown ────────────────────────────────────────────
+    if rejection_reasons:
+        total_rej = sum(rejection_reasons.values())
+        rej_rows = "".join(
+            f'<tr><td class="label">{REJECTION_REASONS.get(r, r.replace("_", " "))}</td>'
+            f'<td class="num">{n}</td>'
+            f'<td class="num">{(n / total_rej * 100):.1f}%</td></tr>'
+            for r, n in sorted(rejection_reasons.items(), key=lambda x: -x[1])
+        )
+        rejection_card = f"""
+        <div class="card">
+          <h2>Rejection reasons</h2>
+          <p style="color:#666;font-size:12px;margin-bottom:8px">
+            Breakdown of the {total_rej} rejected application(s) by reason.
+            <code>interview_failed</code> means you reached an interview and
+            were turned down there — the highest-signal rejection.
+            <code>ghosted_timeout</code> is an auto-conversion after no response.
+          </p>
+          <table class="metrics-table">
+            <thead><tr><th>Reason</th><th class="num">Count</th><th class="num">Share</th></tr></thead>
+            <tbody>{rej_rows}</tbody>
+          </table>
+        </div>"""
+    else:
+        rejection_card = ""
 
     # ── Average composite by cohort ───────────────────────────────────────────
     composite_card = f"""
@@ -1857,7 +1880,7 @@ def metrics_page() -> str:
       </p>
     </div>"""
 
-    body = overview + status_card + composite_card + components_card + histogram_card + funnel_card
+    body = overview + status_card + rejection_card + composite_card + components_card + histogram_card + funnel_card
 
     if total == 0:
         body = (
@@ -2485,13 +2508,17 @@ def resume_page() -> str:
     return page("Resume snippets", "\n".join(parts))
 
 
-def render_section_body(sid: str, linkedin_view: str = "default") -> str:
+def render_section_body(sid: str, view: str = "default") -> str:
+    # A single ``view`` query param is shared across sections; only the open
+    # section interprets it (status_updates: active|ghosted; linkedin:
+    # default|all|failing). Each renderer treats unrecognized values as its
+    # own default, so cross-section bleed is harmless.
     if sid == "status_updates":
-        return render_status_updates_body()
+        return render_status_updates_body(view)
     if sid == "crawl":
         return render_crawl_body()
     if sid == "linkedin_ingest":
-        return render_linkedin_body(linkedin_view)
+        return render_linkedin_body(view)
     if sid == "cover_letters":
         return render_cover_letters_body()
     return '<p class="section-placeholder">Section content arrives in a later phase.</p>'
@@ -2795,17 +2822,57 @@ def render_crawl_body() -> str:
     )
 
 
-def render_status_updates_body() -> str:
+def render_status_updates_body(view: str = "active") -> str:
+    """Status-updates section with two sub-tabs:
+        active  — applications still awaiting a real response (excludes ghosted)
+        ghosted — applications auto-flipped to 'ghosted' (no response past
+                  GHOSTED_DAYS); these auto-convert to rejections after
+                  GHOSTED_REJECTED_DAYS. Surfaced separately so the main list
+                  stays focused on live applications.
+    Terminal outcomes (rejected / offer / withdrawn) never appear here.
+    """
     apps = load_applications()
-    in_flight = [
-        a for a in apps
-        if a.get("status") not in ("rejected", "offer", "withdrawn")
-    ]
-    if not in_flight:
-        return '<p style="color:#888;font-size:13px">No applications need check-in.</p>'
-    in_flight.sort(key=lambda a: a.get("date_applied", ""))
-    rows = "".join(render_app_row(a) for a in in_flight)
-    return f'<div class="app-list">{rows}</div>'
+
+    active  = [a for a in apps
+               if a.get("status") not in ("rejected", "offer", "withdrawn", "ghosted")]
+    ghosted = [a for a in apps if a.get("status") == "ghosted"]
+
+    is_ghosted_view = (view == "ghosted")
+    shown = ghosted if is_ghosted_view else active
+    shown.sort(key=lambda a: a.get("date_applied", ""))
+
+    # Sub-tab links (mirror the LinkedIn section's view links).
+    def _tab(label: str, vname: str, count: int) -> str:
+        active_tab = (vname == "ghosted") == is_ghosted_view
+        text = f"{label} ({count})"
+        if active_tab:
+            return f"<strong>{text}</strong>"
+        qs = "status_updates" + ("" if vname == "active" else f"&view={vname}")
+        return f'<a href="/today?open={qs}">{text}</a>'
+
+    tabs = (
+        '<div class="lk-views" style="margin-bottom:10px">'
+        + " · ".join([_tab("Active", "active", len(active)),
+                      _tab("Ghosted", "ghosted", len(ghosted))])
+        + '</div>'
+    )
+
+    if not shown:
+        empty = ("No ghosted applications." if is_ghosted_view
+                 else "No applications need check-in.")
+        return tabs + f'<p style="color:#888;font-size:13px">{empty}</p>'
+
+    note = ""
+    if is_ghosted_view:
+        note = (
+            '<p style="color:#888;font-size:12px;margin:0 0 8px">'
+            'No response past the ghost threshold. These auto-convert to a '
+            'rejection (reason: ghosted) once they pass '
+            f'{GHOSTED_REJECTED_DAYS} days since applied.</p>'
+        )
+
+    rows = "".join(render_app_row(a) for a in shown)
+    return tabs + note + f'<div class="app-list">{rows}</div>'
 
 
 def render_app_row(app: dict) -> str:
@@ -2832,6 +2899,7 @@ def render_app_row(app: dict) -> str:
         <button class="btn-status" type="submit" name="action" value="interview">Interview request</button>
         <button class="btn-status" type="submit" name="action" value="rejected_generic">Rejected (generic)</button>
         <button class="btn-status" type="submit" name="action" value="rejected_position_filled">Rejected (position filled)</button>
+        <button class="btn-status" type="submit" name="action" value="rejected_interview_failed">Rejected (interview failed)</button>
         <button class="btn-status" type="submit" name="action" value="offer">Offer</button>
         <button class="btn-status" type="submit" name="action" value="withdrawn">Withdrawn</button>
       </form>
@@ -2919,7 +2987,7 @@ def render_cover_letters_body() -> str:
 
     parts.append('<div class="cl-list">')
     for job in visible:
-        parts.append(render_cl_row(job, co_by_id, comp_by_job.get(job.get("job_id", ""))))
+        parts.append(render_cl_row(job, co_by_id, comp_by_job.get(job.get("job_id", "")), apps))
     parts.append('</div>')
 
     if overage > 0:
@@ -3148,7 +3216,8 @@ def render_comp_panel(comp_record: dict, job_id: str) -> str:
 
 
 def render_cl_row(job: dict, co_by_id: dict | None = None,
-                  comp_record: dict | None = None) -> str:
+                  comp_record: dict | None = None,
+                  apps: list | None = None) -> str:
     from html import escape as esc
 
     job_id    = esc(job.get("job_id", ""))
@@ -3164,6 +3233,29 @@ def render_cl_row(job: dict, co_by_id: dict | None = None,
     # so they can choose to research before applying.
     company_rec = (co_by_id or {}).get(job.get("company_id")) if co_by_id else None
     is_stub     = bool(company_rec and company_rec.get("stub"))
+
+    # Duplicate-application guard: have we already applied to effectively this
+    # same role (same company + core title) under another listing? Surface a
+    # warning badge and gate Mark Applied behind a confirm. SSOT:
+    # config.find_duplicate_application.
+    dupe = find_duplicate_application(
+        job.get("company_id"), job.get("title", ""), apps or []
+    ) if apps else None
+    dupe_badge = ""
+    dupe_confirm_js = ""
+    if dupe:
+        d_title  = esc((dupe.get("title") or "")[:50])
+        d_status = esc(dupe.get("status") or "")
+        d_date   = esc(dupe.get("date_applied") or "")
+        dupe_badge = (
+            '<span class="pf-badge" style="background:#fde2e1;color:#8a1c13" '
+            f'title="Already applied: {d_title} (status: {d_status}, {d_date}). '
+            'Likely the same role under a different listing.">⚠ already applied</span>'
+        )
+        dupe_confirm_js = (
+            f"return confirm('You already applied to a similar role at this "
+            f"company ({d_title}, {d_status}, {d_date}). Log this one anyway?');"
+        )
 
     cl_done    = bool(job.get("cover_letter_generated"))
     cl_version = job.get("cover_letter_version", 0)
@@ -3297,6 +3389,7 @@ def render_cl_row(job: dict, co_by_id: dict | None = None,
         <span class="title-cell">{title}</span>
         <span class="cl-location">{location}</span>
         {state_pill}
+        {dupe_badge}
       </div>
       {breakdown_line}
       {notes_block}
@@ -3316,8 +3409,10 @@ def render_cl_row(job: dict, co_by_id: dict | None = None,
         {open_copy}
         {apply_link}
         {detail_link}
-        <form method="POST" action="/today/apply/log" class="cl-form" style="display:inline;margin-left:auto">
+        <form method="POST" action="/today/apply/log" class="cl-form" style="display:inline;margin-left:auto"
+              {f'onsubmit="{dupe_confirm_js}"' if dupe else ''}>
           <input type="hidden" name="job_id" value="{job_id}">
+          {'<input type="hidden" name="force" value="1">' if dupe else ''}
           <button class="btn-mini" type="submit">Mark Applied</button>
         </form>
         <form method="POST" action="/today/cl/archive" class="cl-form" style="display:inline">
@@ -3884,7 +3979,7 @@ _AQ_PAGE_JS = """
 """
 
 
-def daily_checklist_page(open_section: str | None = None, linkedin_view: str = "default") -> str:
+def daily_checklist_page(open_section: str | None = None, view: str = "default") -> str:
     apply_ghosted_check()
     today_iso = date.today().isoformat()
     state     = load_daily_state(today_iso)
@@ -3925,7 +4020,7 @@ def daily_checklist_page(open_section: str | None = None, linkedin_view: str = "
           </summary>
           <div class="section-body">
             <p class="section-hint">{hint}</p>
-            {render_section_body(sid, linkedin_view=linkedin_view)}
+            {render_section_body(sid, view=view)}
             <form method="POST" action="/today/toggle" style="margin-top:14px">
               <input type="hidden" name="section" value="{sid}">
               <button class="btn btn-secondary" style="margin-top:0">{toggle_label}</button>
@@ -4411,6 +4506,7 @@ class Handler(BaseHTTPRequestHandler):
             raw    = self.rfile.read(length).decode("utf-8")
             params = parse_qs(raw)
             job_id = params.get("job_id", [""])[0].strip()
+            force  = params.get("force", [""])[0].strip() == "1"
 
             if not job_id:
                 set_cl_flash("warn", "Mark Applied failed — missing job_id.")
@@ -4419,6 +4515,8 @@ class Handler(BaseHTTPRequestHandler):
                     sys.executable, str(SCRIPTS / "update_status.py"), "log",
                     "--job-id", job_id, "--method", "direct",
                 ]
+                if force:
+                    cmd.append("--force")
                 try:
                     result = subprocess.run(
                         cmd, cwd=ROOT,
@@ -4461,15 +4559,15 @@ class Handler(BaseHTTPRequestHandler):
             action = params.get("action", [""])[0].strip()
 
             if app_id and action in STATUS_ACTION_MAP:
-                status, note = STATUS_ACTION_MAP[action]
+                status, reason = STATUS_ACTION_MAP[action]
                 cmd = [
                     sys.executable, str(SCRIPTS / "update_status.py"),
                     "status",
                     "--app-id", app_id,
                     "--status", status,
                 ]
-                if note:
-                    cmd += ["--notes", note]
+                if reason:
+                    cmd += ["--rejection-reason", reason]
                 subprocess.run(
                     cmd, cwd=ROOT,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,

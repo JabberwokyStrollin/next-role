@@ -23,13 +23,14 @@ from config import (
     JOB_PIPELINE_PATH,
     COMPANY_REGISTRY_PATH,
     PROCESS_LOG_PATH,
+    REJECTION_REASONS,
     composite_score,
     load_json,
     save_json,
     now_utc,
     today,
-    days_since,
-    GHOSTED_DAYS,
+    auto_age_application,
+    find_duplicate_application,
 )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -54,16 +55,6 @@ def derive_country(location: str) -> str:
     return "OTHER"
 
 
-def check_ghosted(app: dict) -> bool:
-    if app.get("response_date"):
-        return False
-    if app.get("status") in ["offer", "rejected", "withdrawn", "recruiter_screen", "interview"]:
-        return False
-    if not app.get("date_applied"):
-        return False
-    return days_since(app["date_applied"]) > GHOSTED_DAYS
-
-
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 def cmd_log(args):
@@ -76,12 +67,27 @@ def cmd_log(args):
 
     apps = load_json(APPLICATION_TRACKER_PATH)
 
-    # Check for existing application
+    # Check for existing application on this exact job
     existing = next((a for a in apps if a.get("job_id") == args.job_id), None)
     if existing:
         print(f"Application already logged for this job: {existing['application_id']}")
         print(f"Use 'status' command to update it.")
         return
+
+    # Guard against re-applying to effectively the same role under a different
+    # listing (the StackAdapt repost case): same company + same core title.
+    dupe = find_duplicate_application(job.get("company_id"), job.get("title", ""), apps)
+    if dupe and not args.force:
+        print(
+            f"⚠ Possible duplicate — you already applied to "
+            f"{dupe.get('company_name')} — {dupe.get('title')} "
+            f"(status: {dupe.get('status')}, applied {dupe.get('date_applied')})."
+        )
+        print(
+            "This looks like the same role under a different listing. "
+            "Re-run with --force to log anyway."
+        )
+        sys.exit(2)
 
     # Derive country
     country = derive_country(job.get("location", ""))
@@ -104,6 +110,7 @@ def cmd_log(args):
         "status_updated":        now_utc(),
         "response_date":         None,
         "ghosted_flag":          False,
+        "rejection_reason":      None,
         "notes":                 args.notes or "",
         "inaccuracies_noted":    "",
     }
@@ -161,8 +168,18 @@ def cmd_status(args):
     app["status_updated"] = now_utc()
     if first_response:
         app["response_date"] = today()
+
+    # Structured rejection reason (SSOT in config.REJECTION_REASONS). Only
+    # meaningful when status == rejected; the human label is also appended to
+    # notes so the free-text history still reads naturally.
+    if args.rejection_reason:
+        app["rejection_reason"] = args.rejection_reason
+        label = REJECTION_REASONS.get(args.rejection_reason, args.rejection_reason)
+        if label and label not in (app.get("notes") or ""):
+            app["notes"] = ((app.get("notes") or "") + ("\n" if app.get("notes") else "") + label).strip()
+
     if args.notes:
-        app["notes"] = (app.get("notes", "") + "\n" + args.notes).strip()
+        app["notes"] = (app.get("notes", "") + ("\n" if app.get("notes") else "") + args.notes).strip()
 
     updated = [app if a["application_id"] == args.app_id else a for a in apps]
     save_json(APPLICATION_TRACKER_PATH, updated)
@@ -187,14 +204,11 @@ def cmd_list(args):
         print("No applications logged yet.")
         return
 
-    # Run ghosted check
+    # Run time-based aging (applied → ghosted → rejected). Shares the SSOT in
+    # config.auto_age_application with serve.py:apply_ghosted_check.
     updated = False
     for app in apps:
-        ghosted = check_ghosted(app)
-        if ghosted != app.get("ghosted_flag"):
-            app["ghosted_flag"] = ghosted
-            if ghosted and app["status"] == "applied":
-                app["status"] = "ghosted"
+        if auto_age_application(app):
             updated = True
 
     if updated:
@@ -233,6 +247,9 @@ def main():
     log_p.add_argument("--plain-text", action="store_true",
                        help="Plain text version was submitted")
     log_p.add_argument("--notes",    metavar="TEXT", help="Optional notes")
+    log_p.add_argument("--force",    action="store_true",
+                       help="Log even if a duplicate application (same company "
+                            "+ core title) already exists")
 
     # status subcommand
     st_p = sub.add_parser("status", help="Update application status")
@@ -240,6 +257,9 @@ def main():
     st_p.add_argument("--status",  required=True,
                       choices=["applied","recruiter_screen","interview",
                                "offer","rejected","ghosted","withdrawn"])
+    st_p.add_argument("--rejection-reason", dest="rejection_reason",
+                      choices=list(REJECTION_REASONS),
+                      help="Structured rejection reason (only with --status rejected)")
     st_p.add_argument("--notes",   metavar="TEXT", help="Optional notes")
 
     # list subcommand

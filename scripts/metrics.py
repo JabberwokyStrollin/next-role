@@ -268,6 +268,20 @@ def _status_counts(apps: list[dict]) -> dict[str, int]:
     return counts
 
 
+def _rejection_reasons(apps: list[dict]) -> dict[str, int]:
+    """Count rejected applications by structured rejection_reason. Rejections
+    logged before the field existed (or via --status rejected with no reason)
+    fall into 'unspecified'. Keys are the SSOT keys from
+    config.REJECTION_REASONS plus 'unspecified'."""
+    counts: dict[str, int] = {}
+    for a in apps:
+        if a.get("status") != "rejected":
+            continue
+        reason = a.get("rejection_reason") or "unspecified"
+        counts[reason] = counts.get(reason, 0) + 1
+    return counts
+
+
 # ---------------------------------------------------------------------------
 # Public API — called by serve.py
 # ---------------------------------------------------------------------------
@@ -280,6 +294,7 @@ def build_metrics() -> dict:
     ----
     total_apps          : int
     status_counts       : {status: count}
+    rejection_reasons   : {reason: count}             — rejected apps by structured reason
     cohort_sizes        : {in_flight, dead, positive, other}
     avg_composite       : {in_flight, dead, positive}  — float or None
     avg_components      : {in_flight, dead, positive}  — {component: float|None}
@@ -321,6 +336,7 @@ def build_metrics() -> dict:
     return {
         "total_apps":      len(apps),
         "status_counts":   _status_counts(apps),
+        "rejection_reasons": _rejection_reasons(apps),
         "cohort_sizes": {
             "in_flight": len(in_flight),
             "dead":      len(dead),

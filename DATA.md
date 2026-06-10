@@ -275,8 +275,8 @@ applications panel, the `/today` status-updates section, and (via
 
 **Lifecycle.**
 
-- **Created** by `update_status.cmd_log` — flips the source job's `pipeline_status` to `"applied"` and snapshots the composite score.
-- **Mutated by** `update_status.cmd_status` (status transitions, `response_date` on first non-applied transition) and `serve.py:apply_ghosted_check` (auto-flips `applied` → `ghosted` after `GHOSTED_DAYS`).
+- **Created** by `update_status.cmd_log` — flips the source job's `pipeline_status` to `"applied"` and snapshots the composite score. Blocks a second application to the same company + core title (see `config.find_duplicate_application`) unless `--force` is passed.
+- **Mutated by** `update_status.cmd_status` (status transitions, `response_date` on first non-applied transition, `rejection_reason` when rejected) and the time-based aging in `config.auto_age_application` — called by both `serve.py:apply_ghosted_check` and `update_status.cmd_list`. Aging advances un-answered applications: `applied` → `ghosted` after `GHOSTED_DAYS` (21), then `ghosted` → `rejected` after `GHOSTED_REJECTED_DAYS` (45, `rejection_reason="ghosted_timeout"`).
 - **Never deleted.**
 
 ### Schema
@@ -298,9 +298,10 @@ applications panel, the `/today` status-updates section, and (via
 | `composite_score_at_apply` | int / `null` | Snapshot of `composite_score(job, company)` at log time. |
 | `status` | enum | `applied`, `recruiter_screen`, `interview`, `offer`, `rejected`, `ghosted`, `withdrawn`. |
 | `status_updated` | ISO datetime | Bumped on every status change. |
-| `response_date` | `YYYY-MM-DD` / `null` | Set on the **first** transition out of `applied`/`ghosted`. This is what frees the company-throttle slot. |
-| `ghosted_flag` | bool | Auto-set by `update_status.check_ghosted` and `serve.py:apply_ghosted_check` once `date_applied` ages past `GHOSTED_DAYS` (21). |
-| `notes` | string | Free-text; appended (not replaced) by `--notes`. |
+| `response_date` | `YYYY-MM-DD` / `null` | Set on the **first** transition out of `applied`/`ghosted`. This is what frees the company-throttle slot. The `ghosted` → `rejected` auto-conversion deliberately leaves this `null` (no real response occurred), so ghosted-timeout rejections stay out of funnel-speed metrics. |
+| `ghosted_flag` | bool | Set `True` by `config.auto_age_application` once `date_applied` ages past `GHOSTED_DAYS` (21); reset to `False` if the record later auto-converts to `rejected`. |
+| `rejection_reason` | enum / `null` | Only meaningful when `status="rejected"`. One of `config.REJECTION_REASONS`: `generic`, `position_filled`, `interview_failed`, `ghosted_timeout`. `null` for non-rejected apps and for rejections logged before this field existed (shown as `unspecified` in `/metrics`). |
+| `notes` | string | Free-text; appended (not replaced) by `--notes` and by the rejection-reason label. |
 | `inaccuracies_noted` | string | Reserved — never written by the current pipeline. |
 
 ### Throttle semantics
@@ -337,6 +338,7 @@ immediately — there's no time-based cooldown.
   "status_updated": "2026-05-13T20:27:20.453956+00:00",
   "response_date": null,
   "ghosted_flag": false,
+  "rejection_reason": null,
   "notes": "",
   "inaccuracies_noted": ""
 }
