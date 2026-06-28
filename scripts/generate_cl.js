@@ -120,6 +120,8 @@ async function callClaude(system, userMessage) {
 
 // Map subsection heading text to country codes. Add entries as needed when
 // new countries are added to the rules file.
+// US is intentionally absent: the operator is a US citizen, so US roles get no
+// work-authorization paragraph (a US-derived job resolves to no country here).
 const COUNTRY_NAME_TO_CODE = {
   canada:          "CA",
   ireland:         "IE",
@@ -325,6 +327,9 @@ async function main() {
   }
 
   // ── Derive country from location ─────────────────────────────────────────
+  // Only countries with a work-authorization paragraph are derived here. US is
+  // deliberately omitted (US citizen → no paragraph), so a US-derived job
+  // resolves to null and the visa section is cleanly omitted.
   let country = countryArg || null;
   if (!country) {
     const loc = (job.location || "").toLowerCase();

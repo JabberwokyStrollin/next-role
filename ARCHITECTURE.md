@@ -98,6 +98,9 @@ file.
 | `COMPOSITE_MAX` | `int` | Sum of all `COMPONENTS[k].weight` — the full composite ceiling (130). |
 | `PRE_RESEARCH_MAX` | `int` | Sum of all `COMPONENTS[k].pre_research_weight` — the pre-research composite ceiling (100). |
 | `RESEARCH_QUEUE_MIN_SCORE` | `int` | Pre-research-score gate (45) for the research queue — jobs below this don't get research budget. |
+| `TARGET_COUNTRIES` | `frozenset[str]` | **SSOT** for active target geographies (default `{"CA","IE"}`). Add `"US"` to enable US (remote-only) roles. Read by `composite_score` (US sponsorship floor) and `location_passes` (US gate). |
+| `US_SPONSORSHIP_SCORE` | `int` | Sponsorship floor (native 0-15, default 3) substituted for the company score on US-derived roles in `composite_score`. Thumb-on-scale so CA/IE generally outrank US; set to 0 for "zero added". Only consulted when `"US" in TARGET_COUNTRIES`. |
+| `_IE_LOCATION_TOKENS` / `_CA_LOCATION_TOKENS` / `_US_LOCATION_TOKENS` | `tuple[str, ...]` | Space-padded location substrings for `derive_country`. IE/CA tested before US; no bare `"us"` token. |
 | `VELOCITY_TIERS` | `list[(int, int)]` | `(max_days_since_posted, score)`; first match wins; default 0. |
 | `FRESHNESS_TIERS` | `list[(int, int)]` | `(max_age_days, bonus)`; bonus stacks on top of velocity. |
 | `STALENESS_TIERS` | `dict[str, (int, int)]` | Inclusive day-range per tier label (`fresh` / `soft_stale` / `hard_stale`). |
@@ -265,7 +268,28 @@ Scans JD text for explicit no-sponsorship language. Returns a 20-char-padded
 snippet around the first match (for logging), or `None` if no refusal is
 found. Patterns deliberately err on false negatives — each requires an
 explicit negation token near the word "sponsor". Caller (`ingest.py`) owns
-the discard decision.
+the discard decision. **Callers skip this for US-derived roles** (the operator
+is a US citizen) — see `ingest.ingest_job` and `scan_no_sponsorship.py`.
+
+#### `derive_country(location: str) -> str`
+SSOT mapping a free-text location to `"CA" | "IE" | "US" | "OTHER"`. Matches
+against the lowercased location padded with a space on each side, using
+`_IE_LOCATION_TOKENS` / `_CA_LOCATION_TOKENS` / `_US_LOCATION_TOKENS`. IE/CA
+are tested before US so a combined "Remote, Canada/US" posting resolves to the
+sponsorship-bearing country; no bare `"us"` substring (it would match
+"houston"). Imported by `ingest.py`, `update_status.py`, `scan_no_sponsorship.py`,
+and used inside `composite_score`. (`generate_cl.js` keeps a parallel JS
+derivation — it can't import Python.)
+
+#### `location_passes(location, enabled_countries=TARGET_COUNTRIES) -> bool`
+Pure-string, pre-filter-safe geography gate (no Claude, no composite — safe to
+call from `crawl.pre_filter` / `prefilter_staged.pre_filter_relaxed`). Returns
+`False` for a US-derived location when US isn't in `enabled_countries` OR when
+the role isn't remote (US is remote-only); `True` for CA/IE/OTHER. A
+**subtractive** gate layered after the YAML `location_allow` allowlist — it
+only removes US rows the allowlist would admit via bare `remote`/`americas`,
+never adds one it rejected. Also called by `ingest.ingest_job` so manual pastes
+are gated.
 
 #### `is_employee_surveillance_flag(flag: dict) -> bool`
 True iff an ethics flag (as produced by `research_company`) is a confirmed
@@ -306,6 +330,15 @@ function powers the retroactive sweep over the existing registry.
 score off the job + company dicts, applies `COMPONENTS[k].multiplier` to
 each, and returns the integer total. Used for apply-time ranking and
 cover-letter selection.
+
+US sponsorship floor: when `"US" in TARGET_COUNTRIES` **and**
+`derive_country(job["location"]) == "US"`, the `sponsorship` input is replaced
+by `US_SPONSORSHIP_SCORE` (a low floor) instead of the company
+`sponsorship_score` — a thumb-on-scale so CA/IE generally outrank US without a
+hard tier. This is a country-conditional on the existing input, **not** a new
+component or parallel composite; when US is off the branch never fires and
+CA/IE composites are byte-identical. `composite_score_pre_research` is
+unaffected (it already zero-weights sponsorship).
 
 - **Parameters**
   - `job` — a record from `job_pipeline.json`.
@@ -631,16 +664,21 @@ Full per-job pipeline:
 1. Sanitize text fields (strip surrogates + whitespace).
 2. Deduplicate against pipeline by apply URL.
 3. Validate; on failure, log `job_discarded` and return `None`.
-4. Look up or stub the company; if ethics-excluded, log + return `None`.
-5. Lazy-import `crawl.detect_ats` + `crawl.auto_add_board` to record the
+4. Geography gate: `config.location_passes(location)`; on fail (US off / not
+   remote) log `job_discarded` and return `None`. Mirrors the pre-filters so a
+   manual `--paste` is gated too.
+5. Look up or stub the company; if ethics-excluded, log + return `None`.
+6. Lazy-import `crawl.detect_ats` + `crawl.auto_add_board` to record the
    ATS board the URL points at (circular-import dance).
-6. Run `detect_no_sponsorship` on the JD; if matched, log + return `None`
-   (before any Claude call).
-7. Compute mechanical scores (`compute_stack_score`,
+7. Run `detect_no_sponsorship` on the JD; if matched, log + return `None`
+   (before any Claude call). **Skipped for US-derived roles**
+   (`derive_country(location) == "US"`) — the operator is a US citizen, so US
+   "no sponsorship" boilerplate isn't disqualifying.
+8. Compute mechanical scores (`compute_stack_score`,
    `compute_velocity_score`, `compute_staleness`).
-8. Call `score_jd.score_jd(jd_text)` for seniority + domain (+ raw
+9. Call `score_jd.score_jd(jd_text)` for seniority + domain (+ raw
    `role_exposure` judgment).
-9. Assemble the record (UUIDs, ISO timestamps, default flags), resolving
+10. Assemble the record (UUIDs, ISO timestamps, default flags), resolving
    `role_exposure` via `config.classify_role_exposure(title, …)`, append to
    `job_pipeline.json`, save, log `validation_summary`, return the record.
 
@@ -709,7 +747,9 @@ Returns `(passes, reason_string)`. Cheap mechanical gate run on every raw
 listing. Reasons start with stable prefixes (`title seniority`, `title
 excluded`, `location`, `stack score`) so `_categorize_reason` can bucket
 them in the funnel log without parsing free text. `title_exclude` uses
-`title_excluded` for word-aware matching.
+`title_excluded` for word-aware matching. After the YAML `location_allow`
+check it applies the `config.location_passes` subtractive US gate (reason
+prefix `location US-gated …`, so it buckets under `location` in the funnel).
 
 #### `detect_ats(url: str) -> tuple[str, str] | None`
 Pattern-matches an apply URL against five ATS shapes (Greenhouse hosted
@@ -813,7 +853,8 @@ Same pre-LLM constraint as `crawl.pre_filter` — see the SSOT banner in
 Like `crawl.pre_filter` but skips the stack-score check when `jd_text` is
 shorter than `MIN_JD_LENGTH`. Lazy-imports `compute_stack_score` so the
 no-JD path stays fast. Uses `crawl.title_excluded` for word-aware
-`title_exclude` matching. Returns `(passes, reason)`.
+`title_exclude` matching, and applies the same `config.location_passes`
+US gate (reason prefix `location US-gated …`). Returns `(passes, reason)`.
 
 #### `main() -> None`
 Loads `email_staged.json`, runs every row through `pre_filter_relaxed`,
@@ -969,8 +1010,11 @@ gov-screen `flag` penalty), takes the top N, prints them with their score, and:
 - If `auto=True`, generates a `.docx` for each.
 - Otherwise prompts `y/n/<comma-list>` and generates for the chosen rows.
 
-Country selection (`CA`/`IE`) is derived from the job's location string
-(falls back to `CA`).
+Country selection for the cover letter uses `config.derive_country`
+(`CA`/`IE`/`US`/`OTHER`). `US` roles are passed **without** `--country` so
+`generate_cl.js` omits the work-auth paragraph (US citizen — none expected);
+ambiguous-location (`OTHER`) roles fall back to `CA` (the operator's default
+market). Otherwise the resolved code is passed to `generate_cl.js --country`.
 
 #### `main() -> None`
 Argparse entry point. Flags:
@@ -1253,9 +1297,10 @@ stops suppressing the company.
 Same shape as `ingest.append_log`. Appends a UUID + timestamped entry to
 `data/process_log.json`.
 
-#### `derive_country(location: str) -> str`
-`"IE"` / `"CA"` / `"OTHER"` based on substring matches in the location.
-Used to fill in `country` on a new application record.
+#### `derive_country` (imported from `config`)
+`update_status` no longer defines its own — it imports the canonical
+`config.derive_country` (`"CA"` / `"IE"` / `"US"` / `"OTHER"`) and uses it to
+fill in `country` on a new application record.
 
 Time-based aging lives in `config.auto_age_application` (the SSOT shared with
 `serve.py:apply_ghosted_check`), not here — `update_status` calls it from
@@ -1332,6 +1377,9 @@ Returns the per-component **weighted contribution** for one job (same
 math as `composite_score` — `raw * COMPONENTS[k].multiplier`). For
 components whose underlying raw value is missing, the entry is `None`
 rather than 0 so averages don't get pulled toward zero artificially.
+Mirrors `composite_score`'s US substitution (uses `US_SPONSORSHIP_SCORE` for
+the sponsorship component on US roles when US is enabled) so the bars keep
+summing to the composite.
 
 #### `_build_cohorts(jobs_by_id, companies_by_id, apps) -> dict[str, list[dict]]`
 Walks every application, enriches it with `_composite`, `_components`,
@@ -1698,7 +1746,7 @@ alternatives the user evaluated.
 | `API_KEY` | Read from `process.env.ANTHROPIC_API_KEY`; exits 1 if unset. |
 | `CL_MODEL` | `"claude-sonnet-4-6"`. |
 | `MAX_TOKENS` | 4000. |
-| `COUNTRY_NAME_TO_CODE` | `{"canada": "CA", "ireland": "IE", "united kingdom": "UK", "uk": "UK"}` — used by `parseVisaParagraphs` to match `### <country>` headings. |
+| `COUNTRY_NAME_TO_CODE` | `{"canada": "CA", "ireland": "IE", "united kingdom": "UK", "uk": "UK"}` — used by `parseVisaParagraphs` to match `### <country>` headings. **US is intentionally absent** (US citizen → no work-auth paragraph), so US jobs produce no visa section. |
 | `WORD_CAP` | 380 — hard cap; over-cap drafts get one trim retry. |
 
 ### Functions
@@ -1720,8 +1768,8 @@ Locates the `## Locked Visa / Work Authorization Paragraphs` section in
 `profile/cover_letter_rules.md` and extracts per-country paragraphs.
 Each `### <Country>` subsection becomes one entry; the country heading
 is mapped to an ISO code via `COUNTRY_NAME_TO_CODE` (`Canada` → `CA`,
-`Ireland` → `IE`, `United Kingdom` / `UK` → `UK`). Returns
-`{CA: "…", IE: "…"}` (etc.).
+`Ireland` → `IE`, `United Kingdom` / `UK` → `UK`). Returns `{CA: "…", IE: "…"}`
+(etc.). There is no US entry — US roles intentionally get no visa paragraph.
 
 #### `buildSystem(resumeText, rulesText)`
 Constructs the Claude system prompt: resume, the full rules document, the
@@ -1745,7 +1793,7 @@ Writes the file via `Packer.toBuffer` + `fs.writeFileSync`.
 #### `main()` — async
 - Parses `--job-id UUID` and optional `--country CA|IE`.
 - Loads the job; exits 1 if not found.
-- Derives the country from `--country` or the job's location (Ireland / Canada heuristic).
+- Derives the country from `--country` or the job's location (Ireland / Canada heuristic only — US is deliberately not derived, so US jobs get no visa paragraph).
 - Loads + reads resume.md, cover_letter_rules.md; exits 1 if either is missing.
 - Resolves the country-specific visa paragraph (replaces `[Company Name]` placeholders); logs whether one was applied.
 - Calls Claude with the build prompts.
@@ -1826,8 +1874,9 @@ Pipeline:
 
 1. Load pipeline; exit 0 if empty.
 2. Filter to `{active, cover_letter_ready}` (plus `applied` if requested).
-3. For each, call `detect_no_sponsorship(job.jd_text)`; collect matches
-   with their snippets.
+3. For each, skip US-derived rows (`config.derive_country(location) == "US"`
+   — the operator is a US citizen, mirroring the ingest-time skip), then call
+   `detect_no_sponsorship(job.jd_text)`; collect matches with their snippets.
 4. Print the matched list. On `--apply=False`, return 0.
 5. Back up `job_pipeline.json` to `.bak`.
 6. For each match: flip `pipeline_status="archived"`, set `archived_at` +

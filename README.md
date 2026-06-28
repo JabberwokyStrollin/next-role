@@ -233,6 +233,24 @@ get weighted into the composite total. All weights live in
 **No other file may duplicate them** — see `CLAUDE.md` for the SSOT
 convention.
 
+### Target geographies (US is optional)
+
+next-role targets **Canada** and **Ireland** (where the operator needs visa
+sponsorship) plus, as an **optional remote-only stop-gap**, the **US**. Active
+geographies live in `scripts/config.py:TARGET_COUNTRIES` (currently
+`{"CA","IE","US"}` — remove `"US"` to disable). When US is enabled:
+
+- Only **remote** US roles enter the pipeline (onsite/hybrid US is gated out).
+- US JDs that say "no sponsorship" are **kept** (the operator is a US citizen),
+  whereas that language still discards CA/IE roles.
+- US roles get a deliberately **low sponsorship score**
+  (`US_SPONSORSHIP_SCORE`, default 3/15) so CA/IE roles generally outrank them —
+  but a strong-stack US role can still beat a weak CA/IE one (thumb-on-scale,
+  not a hard tier).
+
+Turn US back off (remove `"US"` from `TARGET_COUNTRIES`) and behavior reverts
+exactly — CA/IE composites are unchanged.
+
 ### Two-stage workflow
 
 1. **Ingest** creates a stub company record with neutral defaults so

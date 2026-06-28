@@ -33,8 +33,11 @@ from config import (
     COMPONENTS,
     COMPOSITE_MAX,
     IN_FLIGHT_STATUSES,
+    TARGET_COUNTRIES,
+    US_SPONSORSHIP_SCORE,
     composite_score,
     compute_freshness_bonus,
+    derive_country,
 )
 
 # ---------------------------------------------------------------------------
@@ -102,9 +105,15 @@ def _component_scores(job: dict, company: dict | None) -> dict[str, float | None
         "remote":      ("remote_fit",              co),
     }
 
+    # Mirror composite_score's US sponsorship substitution so the per-component
+    # bars still sum to the composite for US roles (preserves the invariant).
+    us_role = "US" in TARGET_COUNTRIES and derive_country(job.get("location", "")) == "US"
+
     for key, comp in COMPONENTS.items():
         if key == "freshness":
             raw = compute_freshness_bonus(job)
+        elif key == "sponsorship" and us_role:
+            raw = US_SPONSORSHIP_SCORE
         else:
             src_field, src_dict = field_map.get(key, (None, None))
             if src_field is None or src_dict is None:

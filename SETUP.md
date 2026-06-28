@@ -76,7 +76,9 @@ Edit these four files in `profile/`:
 
 - The user's active resume in `profile/resume.md` is country-specific
   (Canada vs Ireland variant). Keep the inactive variant separately and
-  swap it in when you change target market.
+  swap it in when you change target market. (If you enable US roles — see
+  §6 — you can keep a US variant the same way; there's no automatic
+  per-country resume switching.)
 - `serve.py /resume` parses Experience and Education sections out of
   `resume.md` for the copy-paste snippet builder — keep the section
   headings (`## Experience`, `## Education`) and the date-range format
@@ -213,7 +215,7 @@ pre-filter (run before any Claude call) and the aggregator queries:
 |---|---|
 | `seniority_titles` | List of terms; the job title must contain at least one. |
 | `title_exclude` | List of terms; reject the title if any appears as a whole word (filters pre-sales / customer-success roles that slip past `architect` / `lead`). Whole-word match is letter-boundary-aware, so `intern` blocks `"Software Intern"` but not `"... International"`; multi-word terms like `solutions architect` work too. Variants that share a prefix need separate entries — e.g. list both `intern` and `internship`. |
-| `location_allow` | List of regions; the location must contain at least one (or `remote`). |
+| `location_allow` | List of regions; the location must contain at least one (or `remote`). This is the *positive* allowlist. A separate code-level gate (`config.location_passes`, driven by `TARGET_COUNTRIES`) subtracts US rows when US is disabled or non-remote — see "Targeting the US" below. |
 | `aggregator_tags` | List of tag groups for the RemoteOK API. Each top-level item is one API call; tags within an inner list are AND-filtered (e.g. `- [kafka, java]`). For one-or-the-other alternates (technologies that don't co-occur), write them as separate items. |
 | `aggregator_keywords` | List of Remotive full-text search queries. Each item is one query string (e.g. `- kafka flink java`). |
 | `min_pre_filter_score` | Minimum stack-keyword score required before full ingest. |
@@ -222,6 +224,37 @@ The `keywords:` and `max_score:` sections of the same file drive the
 mechanical stack score (`stack_match_score`) for every JD — used by both
 ingest and the pre-filter. See `ARCHITECTURE.md` for the SSOT rules
 around stack scoring.
+
+### Targeting the US (optional, remote-only)
+
+The pipeline targets **Canada** and **Ireland**, plus the **US** as an
+optional, **remote-only stop-gap**. Active geographies are one constant in
+`scripts/config.py` (US is **currently enabled**):
+
+```python
+TARGET_COUNTRIES: frozenset[str] = frozenset({"CA", "IE", "US"})  # remove "US" to disable
+```
+
+What US being enabled turns on (all keyed off `config.derive_country(location)`):
+
+- **Remote-only intake.** Only remote US roles ingest; onsite/hybrid US is
+  discarded by `config.location_passes` (applied in both pre-filters and at
+  ingest). With US off, US roles are excluded entirely.
+- **No-sponsorship JDs kept.** The ingest-time `detect_no_sponsorship` discard
+  is skipped for US roles (you're a US citizen), so "we do not sponsor"
+  boilerplate no longer throws the posting away. CA/IE still honor it.
+- **Low US sponsorship score.** `composite_score` substitutes
+  `US_SPONSORSHIP_SCORE` (default `3`/15) for the company sponsorship score on
+  US roles, so CA/IE generally outrank US — tune it in `config.py` (set to `0`
+  for "zero added from sponsorship"). A strong-stack US role can still beat a
+  weak CA/IE one.
+- **Cover-letter work authorization.** US cover letters get **no**
+  work-authorization paragraph — a US citizen applying to a US role needs none.
+  `run.py` omits `--country` for US jobs and `generate_cl.js` doesn't derive US,
+  so the visa section is cleanly skipped. (CA/IE still get their locked
+  paragraphs from `profile/cover_letter_rules.md`.)
+
+Removing `"US"` reverts everything; CA/IE scoring is unchanged either way.
 
 ---
 

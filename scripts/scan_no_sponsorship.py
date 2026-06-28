@@ -26,6 +26,7 @@ from config import (
     JOB_PIPELINE_PATH,
     PROCESS_LOG_PATH,
     detect_no_sponsorship,
+    derive_country,
     load_json,
     save_json,
     now_utc,
@@ -53,6 +54,11 @@ def main() -> int:
     matches: list[tuple[dict, str]] = []
     for job in jobs:
         if job.get("pipeline_status") not in statuses:
+            continue
+        # US roles are exempt — the operator is a US citizen, so a US JD's
+        # "no sponsorship" boilerplate is not disqualifying (mirrors the
+        # ingest-time skip in ingest.ingest_job).
+        if derive_country(job.get("location") or "") == "US":
             continue
         snippet = detect_no_sponsorship(job.get("jd_text") or "")
         if snippet:

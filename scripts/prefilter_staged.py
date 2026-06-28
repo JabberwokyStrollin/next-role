@@ -59,6 +59,12 @@ def pre_filter_relaxed(title: str, location: str, jd_text: str, cfg: dict) -> tu
     if not any(kw in l for kw in cfg["location_allow"]):
         return False, f"location miss ({location[:40]})"
 
+    # Subtractive US geography gate (config SSOT). Same logic as crawl.pre_filter:
+    # US is remote-only and only when "US" is an enabled target. CA/IE/OTHER pass.
+    from config import location_passes  # defer — keep import surface minimal
+    if not location_passes(location):
+        return False, f"location US-gated (off / not remote) ({location[:40]})"
+
     if len(jd_text) >= MIN_JD_LENGTH:
         from config import compute_stack_score  # heavy import — defer
         score = compute_stack_score(f"{title} {jd_text[:800]}")

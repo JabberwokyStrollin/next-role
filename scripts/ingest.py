@@ -31,6 +31,8 @@ from config import (
     JOB_PIPELINE_PATH,
     PROCESS_LOG_PATH,
     detect_no_sponsorship,
+    derive_country,
+    location_passes,
     load_json,
     save_json,
     now_utc,
@@ -236,6 +238,22 @@ def ingest_job(
         })
         return None
 
+    # ── Geography gate ────────────────────────────────────────────────────────
+    # Mirror of the crawl/staged pre-filters, repeated here so a manually pasted
+    # role is also gated (the manual path bypasses those pre-filters). US roles
+    # are remote-only and only enter when "US" is in TARGET_COUNTRIES; CA / IE /
+    # OTHER are unaffected. See config.location_passes (pure-string, no Claude).
+    if not location_passes(location):
+        print(f"  Geography gate: '{location[:40]}' not an enabled target — discarding.")
+        append_log({
+            "event_type":  "job_discarded",
+            "entity_type": "job",
+            "entity_name": f"{company_name} — {title}",
+            "source_url":  apply_url,
+            "detail":      f"Job discarded: location '{location[:60]}' not an enabled target (US is remote-only / off).",
+        })
+        return None
+
     # ── Company lookup ────────────────────────────────────────────────────────
     company = get_or_stub_company(company_name)
     if company is None:
@@ -263,7 +281,13 @@ def ingest_job(
     # Runs before scoring so we don't spend a Claude call on something we're
     # going to discard. Independent of the company-level sponsorship signal,
     # which scores the org's historical record across all postings.
-    no_sponsor_snippet = detect_no_sponsorship(jd_text)
+    #
+    # SKIPPED for US roles: the operator is a US citizen, so a US JD saying "we
+    # do not sponsor / must be authorized to work in the US" is fine (most US
+    # postings carry that boilerplate). Keeping the filter on US would discard
+    # nearly every US listing. CA / IE / OTHER still run the filter.
+    no_sponsor_snippet = (None if derive_country(location) == "US"
+                          else detect_no_sponsorship(jd_text))
     if no_sponsor_snippet:
         print(f"  JD refuses sponsorship: \"...{no_sponsor_snippet}...\" — discarding.")
         append_log({

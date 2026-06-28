@@ -56,6 +56,7 @@ from config import (  # noqa: E402
     composite_score,
     composite_score_pre_research,
     apply_rank_score,
+    derive_country,
     gov_screen_block_reason,
     load_json,
     save_json,
@@ -364,9 +365,18 @@ def generate_cover_letters(top_n: int = 5, auto: bool = False) -> None:
                 return
 
     for score, job in selected:
-        country = "IE" if "ireland" in job.get("location", "").lower() else "CA"
+        # Canonical country derivation (CA/IE/US/OTHER).
+        country = derive_country(job.get("location", ""))
         print(f"\nGenerating: {job['company_name']} — {job['title']}")
-        run_node("generate_cl.js", "--job-id", job["job_id"], "--country", country)
+        if country == "US":
+            # US citizen — no work-authorization paragraph expected; omit --country.
+            run_node("generate_cl.js", "--job-id", job["job_id"])
+        else:
+            # Ambiguous-location remote roles (OTHER) fall back to CA, the
+            # operator's default market.
+            if country == "OTHER":
+                country = "CA"
+            run_node("generate_cl.js", "--job-id", job["job_id"], "--country", country)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

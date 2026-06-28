@@ -70,6 +70,9 @@ from one of these.
 | Stack keyword scores + stack max + pre-filter title/location lists | `profile/stack_keywords.yaml` | loaded once by `_load_stack_keywords()` and `load_crawl_config()` |
 | Claude's native output ranges (seniority 0-25, domain 0-20) | `profile/scoring_rubric.md` | mirrored in `COMPONENTS[k].native_max`; update both together |
 | Research-queue minimum score | `scripts/config.py:RESEARCH_QUEUE_MIN_SCORE` | `from config import RESEARCH_QUEUE_MIN_SCORE` |
+| Active target geographies (the US toggle) | `scripts/config.py:TARGET_COUNTRIES` | `from config import TARGET_COUNTRIES` |
+| US-role sponsorship floor | `scripts/config.py:US_SPONSORSHIP_SCORE` | `from config import US_SPONSORSHIP_SCORE` |
+| Free-text location → country code | `scripts/config.py:derive_country()` | `from config import derive_country` |
 
 ### Rules
 
@@ -129,6 +132,39 @@ from one of these.
    in lockstep. The rubric tells Claude the range; `native_max` tells the
    composite math how to multiply it (for both profiles).
 
+### Geography / US target toggle
+
+The operator needs visa sponsorship for **CA / IE** but is a **US citizen**, so
+US roles need none — they're a reluctant **remote-only stop-gap**. The whole
+feature hangs off `TARGET_COUNTRIES` (currently `frozenset({"CA","IE","US"})`;
+remove `"US"` to disable — when absent the US branches never fire and CA/IE
+behavior is byte-identical). Country is **derived on the fly** from `location`
+via `config.derive_country` (→ `CA`/`IE`/`US`/`OTHER`) —
+no stored field. `derive_country` matches IE/CA before US so a combined
+"Remote, Canada/US" posting resolves to the sponsorship-bearing country, and
+never uses a bare `"us"` substring (would match "houston").
+
+1. **The US sponsorship floor lives ONLY in `composite_score`.** For a
+   US-derived role (and only when `"US" in TARGET_COUNTRIES`), the canonical
+   `composite_score` substitutes `US_SPONSORSHIP_SCORE` (native 0-15, default 3)
+   for the company `sponsorship_score`. This is a **thumb on the scale**, not a
+   hard tier: CA/IE roles with normal sponsorship outrank comparable US roles,
+   but a strong-stack US role can still beat a weak CA/IE one. It is **not** a
+   new component and **not** a parallel composite — it's a country-conditional
+   on the existing `sponsorship` input, inside the one canonical function. Tune
+   via `US_SPONSORSHIP_SCORE` only (set to 0 for "zero added from sponsorship").
+   `composite_score_pre_research` is untouched (already zero-weights
+   sponsorship), so research-queue ranking stays country-agnostic. When US is
+   off, the branch never fires and CA/IE composites are byte-identical to before.
+
+2. **US is remote-only, enforced by `config.location_passes`** — a pure-string,
+   pre-filter-safe (no-Claude) **subtractive** gate layered AFTER the YAML
+   `location_allow` allowlist. It removes US rows the allowlist admits via bare
+   `remote`/`americas` unless US is enabled AND the role is remote; CA/IE/OTHER
+   pass through. Called by `crawl.pre_filter`, `prefilter_staged.pre_filter_relaxed`,
+   and `ingest.ingest_job` (so a manual paste is gated too). The YAML allowlist
+   stays the pre-filter SSOT; `location_passes` only ever subtracts.
+
 ## Company-filter SSOT — single source of truth
 
 There is exactly **one** rule for "should this company be hidden from apply
@@ -185,7 +221,8 @@ the pipeline. Neither is a throttle — both are absolute.
 | Rule | Scope | Canonical location |
 |---|---|---|
 | `ethics_hard_exclude` on the company record | per-company | checked in `scripts/ingest.py:get_or_stub_company` |
-| JD text explicitly refuses sponsorship | per-JD | `scripts/config.py:detect_no_sponsorship` (+ `_NO_SPONSORSHIP_PATTERNS`); called in `scripts/ingest.py:ingest_job` before scoring |
+| JD text explicitly refuses sponsorship | per-JD | `scripts/config.py:detect_no_sponsorship` (+ `_NO_SPONSORSHIP_PATTERNS`); called in `scripts/ingest.py:ingest_job` before scoring. **Skipped for US-derived roles** (`derive_country(location) == "US"`) — the operator is a US citizen, so a US JD's "no sponsorship" boilerplate isn't disqualifying. CA/IE/OTHER still run it. The same skip guards `scan_no_sponsorship.py`. |
+| Location not an enabled target geography | per-JD | `scripts/config.py:location_passes`; called in `scripts/ingest.py:ingest_job` after validation (also in both pre-filters). Discards US roles when US is off / not remote. Not a throttle — a geography gate. |
 
 `ethics_hard_exclude` is set by company research. The Haiku model returns
 its own judgment on the field; on top of that, deterministic rules can
@@ -203,7 +240,9 @@ funnel through one SSOT entry point:
 
 1. **One detector for "JD refuses sponsorship".** The regex set lives only in
    `_NO_SPONSORSHIP_PATTERNS` and is consumed through `detect_no_sponsorship`.
-   Don't reach around it with ad-hoc string checks elsewhere.
+   Don't reach around it with ad-hoc string checks elsewhere. (Gating the
+   *call* by country — the US skip via `derive_country` at the two call sites —
+   is fine; that doesn't duplicate or bypass the detector itself.)
 
 2. **Per-JD ≠ company-level sponsorship.** The composite's `sponsorship`
    weight (35) is a per-company historical score from Haiku research. A

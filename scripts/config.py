@@ -199,6 +199,16 @@ PRE_RESEARCH_MAX:  int = sum(c.pre_research_weight for c in COMPONENTS.values())
 # 1 web search ($0.03-0.05) on a clearly-mediocre stub doesn't pay off.
 RESEARCH_QUEUE_MIN_SCORE: int = 45
 
+# US-role sponsorship floor (native 0-15 scale, the ``sponsorship`` component's
+# native_max). For US-derived roles ``composite_score`` substitutes THIS value
+# for the company's sponsorship_score: the operator is a US citizen (no
+# sponsorship needed), but US is a reluctant stop-gap, so the value is kept
+# deliberately low — a thumb on the scale, NOT a hard tier. CA/IE roles with
+# normal sponsorship outrank comparable US roles, yet a strong-stack US role can
+# still beat a weak CA/IE one. Tune here only (set to 0 for "zero added from
+# sponsorship"). Only consulted when "US" is in TARGET_COUNTRIES.
+US_SPONSORSHIP_SCORE: int = 3
+
 
 VELOCITY_TIERS = [
     (7,  5),
@@ -349,6 +359,83 @@ def days_since(iso_date: str) -> int:
     """Return number of days between iso_date and today."""
     d = date.fromisoformat(iso_date)
     return (date.today() - d).days
+
+
+# ─── Geography / target-country derivation (SSOT) ────────────────────────────
+#
+# ``TARGET_COUNTRIES`` is the single switch for which geographies the pipeline
+# actively targets. The operator needs visa sponsorship for CA / IE but is a
+# US citizen, so US roles need NO sponsorship — they're a reluctant remote-only
+# stop-gap and ship OFF by default. Add "US" to enable; that one change flips
+# three behaviors, each reading this set or ``derive_country``:
+#   - pre-filter remote-only US gate          → ``location_passes`` (below)
+#   - US sponsorship floor instead of company → ``composite_score``
+#   - skip the no-sponsorship discard for US  → ``ingest.ingest_job``
+#
+# ``derive_country`` is the ONE place free-text locations map to a country code
+# (imported by ingest.py, update_status.py, and the pre-filters). The JS cover-
+# letter generator keeps its own parallel derivation only because it can't
+# import Python — that duplication is documented in ARCHITECTURE.md.
+
+TARGET_COUNTRIES: frozenset[str] = frozenset({"CA", "IE", "US"})
+
+# Detection tokens, matched against the lowercased location padded with a space
+# on each side so word-tokens like " us " / " ca " don't false-positive inside
+# "houston" / "vancouver". IE and CA are tested before US so a combined
+# "Remote, Canada/US" posting resolves to the sponsorship-bearing country.
+# Bare "us" is intentionally never a substring token.
+_IE_LOCATION_TOKENS: tuple[str, ...] = (
+    "ireland", " ie,", " ie ", "(ie)", "dublin", "cork", "galway", "limerick",
+)
+_CA_LOCATION_TOKENS: tuple[str, ...] = (
+    "canada", " ca,", " ca ", "(ca)", "toronto", "vancouver", "montreal",
+    "ottawa", "calgary", "edmonton", "waterloo", "kitchener",
+)
+_US_LOCATION_TOKENS: tuple[str, ...] = (
+    "united states", " usa", " us,", " us ", "(us)", "u.s.",
+    "remote, us", "remote (us)", "us remote", "us-remote",
+)
+
+
+def derive_country(location: str) -> str:
+    """Map a free-text job/application location to ``"CA" | "IE" | "US" |
+    "OTHER"``. SSOT — IE/CA are matched before US so a combined posting
+    resolves to the sponsorship-bearing country; bare "us" is never a substring
+    token (it would match "houston"/"austin")."""
+    loc = f" {(location or '').lower()} "
+    if any(t in loc for t in _IE_LOCATION_TOKENS):
+        return "IE"
+    if any(t in loc for t in _CA_LOCATION_TOKENS):
+        return "CA"
+    if any(t in loc for t in _US_LOCATION_TOKENS):
+        return "US"
+    return "OTHER"
+
+
+def location_passes(location: str,
+                    enabled_countries: frozenset[str] | None = None) -> bool:
+    """Pre-filter-safe geography gate (pure string logic — never calls a
+    composite, so it's safe to import from ``crawl.pre_filter`` /
+    ``prefilter_staged.pre_filter_relaxed``). Returns ``False`` for a
+    US-derived location when US is disabled OR when the role isn't remote
+    (US is remote-only by policy); returns ``True`` for CA / IE / OTHER.
+
+    ``enabled_countries`` defaults to the live ``TARGET_COUNTRIES`` module
+    global — read at call time (NOT captured as a default-arg value), so it
+    tracks the configured set exactly like ``composite_score`` does. Pass an
+    explicit set only to override (e.g. tests).
+
+    This is a SUBTRACTIVE gate layered AFTER the YAML ``location_allow``
+    allowlist — it only removes US rows the allowlist would otherwise admit via
+    bare ``remote`` / ``americas``; it never admits a row the allowlist
+    rejected. The positive allowlist in profile/stack_keywords.yaml remains the
+    pre-filter SSOT."""
+    countries = enabled_countries if enabled_countries is not None else TARGET_COUNTRIES
+    if derive_country(location) == "US":
+        if "US" not in countries:
+            return False
+        return "remote" in (location or "").lower()
+    return True
 
 
 # ─── Title-based seniority cap (mechanical, applied after Claude scoring) ───-
@@ -851,13 +938,20 @@ def composite_score(job: dict, company: dict | None) -> int:
     companies for the research queue — that variant zeros out the
     company-derived signals so stub defaults don't dominate the order.
     """
+    # US roles (operator is a US citizen — no sponsorship needed) substitute a
+    # deliberately low US_SPONSORSHIP_SCORE for the company sponsorship_score, so
+    # CA/IE roles generally outrank them without hard-flooring US below
+    # everything. Only fires when "US" is enabled in TARGET_COUNTRIES; otherwise
+    # the company score is used as before (CA/IE composites stay byte-identical).
+    us_role = "US" in TARGET_COUNTRIES and derive_country(job.get("location", "")) == "US"
     raw: dict[str, int] = {
         "stack":       (job.get("stack_match_score")     or 0),
         "domain":      (job.get("domain_fit_score")      or 0),
         "seniority":   (job.get("seniority_score")       or 0),
         "velocity":    (job.get("hiring_velocity_score") or 0),
         "freshness":   compute_freshness_bonus(job),
-        "sponsorship": ((company or {}).get("sponsorship_score") or 0),
+        "sponsorship": (US_SPONSORSHIP_SCORE if us_role
+                        else ((company or {}).get("sponsorship_score") or 0)),
         "remote":      ((company or {}).get("remote_fit")        or 0),
     }
     return sum(int(raw[k] * c.multiplier) for k, c in COMPONENTS.items())

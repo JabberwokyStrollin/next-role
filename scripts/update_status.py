@@ -25,6 +25,7 @@ from config import (
     PROCESS_LOG_PATH,
     REJECTION_REASONS,
     composite_score,
+    derive_country,
     load_json,
     save_json,
     now_utc,
@@ -46,13 +47,8 @@ def append_log(entry: dict) -> None:
     save_json(PROCESS_LOG_PATH, log)
 
 
-def derive_country(location: str) -> str:
-    loc = location.lower()
-    if "ireland" in loc or " ie" in loc:
-        return "IE"
-    if "canada" in loc or " ca" in loc:
-        return "CA"
-    return "OTHER"
+# `derive_country` (CA/IE/US/OTHER) is the canonical config SSOT — imported
+# above. The application `country` field is derived at log time via that helper.
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────

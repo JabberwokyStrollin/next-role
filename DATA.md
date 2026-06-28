@@ -87,7 +87,7 @@ status transitions, and the `/today` apply queue all read from this file.
 | `company_name` | string | ✅ | Denormalized for human-readable surfaces. |
 | `title` | string | ✅ | Free-text job title as posted. |
 | `apply_url` | URL string | ✅ | Used for dedup; uniqueness enforced by `ingest.check_duplicate`. |
-| `location` | string | ✅ | Free text. `"remote canada"`, `"Vancouver, Canada"`, etc. — used by `derive_country` and stack-of-location pre-filter heuristics. |
+| `location` | string | ✅ | Free text. `"remote canada"`, `"Vancouver, Canada"`, `"Remote, US"`, etc. — used by `config.derive_country` (→ `CA`/`IE`/`US`/`OTHER`) and the location pre-filter heuristics. US roles are remote-only and only ingest when `"US" in config.TARGET_COUNTRIES` (see `config.location_passes`). |
 | `job_type` | `"remote"` / `"unknown"` | ✅ | Derived from `"remote" in location.lower()` at ingest. |
 | `jd_text` | string | ✅ | Full JD body, ≥ `MIN_JD_LENGTH` (200) chars. May contain HTML for ATS-API ingests where the upstream returned HTML. |
 | `date_posted` | `YYYY-MM-DD` / `null` | optional | Source-supplied posting date when available. |
@@ -297,7 +297,7 @@ applications panel, the `/today` status-updates section, and (via
 | `title` | string | Denormalized. |
 | `apply_url` | URL string | Denormalized. |
 | `location` | string | Denormalized. |
-| `country` | `"CA"` / `"IE"` / `"OTHER"` | From `update_status.derive_country(location)`. |
+| `country` | `"CA"` / `"IE"` / `"US"` / `"OTHER"` | From `config.derive_country(location)` (imported by `update_status`). `"US"` only appears for roles ingested while `"US"` was in `TARGET_COUNTRIES` (remote-only US stop-gap). |
 | `date_applied` | `YYYY-MM-DD` | Today's date at log time. |
 | `application_method` | enum | `greenhouse`, `lever`, `workday`, `builtin`, `linkedin`, `direct`, `other`. |
 | `cover_letter_version` | int | Copied from the job at log time. |
@@ -604,7 +604,7 @@ forensics.
 |---|---|---|
 | `company_created` | `ingest.get_or_stub_company` | `"Stub record created for <name> — research pending on rank."` |
 | `validation_summary` | `ingest.ingest_job` (success path) | `"Job ingested. Stack: X/35, Velocity: Y/5, Seniority: Z/25, Domain: W/20. Staleness: …"` |
-| `job_discarded` | `ingest.ingest_job` (various gates) | `"Job discarded: <reason>"` — reasons include missing fields, JD too short, ethics-excluded company, JD refuses sponsorship. |
+| `job_discarded` | `ingest.ingest_job` (various gates) | `"Job discarded: <reason>"` — reasons include missing fields, JD too short, ethics-excluded company, JD refuses sponsorship (skipped for US roles), location not an enabled target geography (US off / not remote). |
 | `job_archived` | `scan_no_sponsorship.py` | `"Retroactive archive: JD says no sponsorship (\"...<snippet>...\")."` |
 | `application_logged` | `update_status.cmd_log` | `"Application logged. Method: <m>. Country: <c>. CL v<n>. Score at apply: <s>."` |
 | `application_status_change` | `update_status.cmd_status` | `"Status: <old> → <new>."` |
@@ -778,7 +778,7 @@ either ingests them (which removes them) or discards them.
 | `fetched_at` | ISO datetime | client clock | When this row was staged. |
 | `jd_text` | string | optional | Populated by per-row Fetch JD; `""` or missing otherwise. |
 | `_prefilter_pass` | bool | optional | Set by `prefilter_staged.py`. |
-| `_prefilter_reason` | string | optional | Set by `prefilter_staged.py`. Stable prefixes (`title seniority miss`, `title excluded by …`, `location miss`, `stack score N < M`, `title+location ok (no JD yet)`, `stack N`). |
+| `_prefilter_reason` | string | optional | Set by `prefilter_staged.py`. Stable prefixes (`title seniority miss`, `title excluded by …`, `location miss`, `location US-gated …`, `stack score N < M`, `title+location ok (no JD yet)`, `stack N`). |
 
 ### Example
 

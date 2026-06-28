@@ -38,6 +38,7 @@ from config import (
     save_json,
     today,
     compute_stack_score,
+    location_passes,
 )
 from ingest import ingest_job
 
@@ -143,6 +144,12 @@ def pre_filter(title: str, location: str, text: str, cfg: dict) -> tuple[bool, s
 
     if not any(kw in l for kw in cfg["location_allow"]):
         return False, f"location miss ({location[:40]})"
+
+    # Subtractive geography gate (config SSOT, not the YAML allowlist): drops
+    # US rows the allowlist admits via bare "remote"/"americas" unless "US" is
+    # an enabled target AND the role is remote. CA/IE/OTHER pass through.
+    if not location_passes(location):
+        return False, f"location US-gated (off / not remote) ({location[:40]})"
 
     score = compute_stack_score(f"{title} {text[:800]}")
     if score < cfg["min_pre_filter_score"]:
