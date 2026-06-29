@@ -46,12 +46,12 @@ JSONL logs have no foreign keys to the rest — they're parallel.
 
 | File | Format | Role | Writers | Readers |
 |---|---|---|---|---|
-| `job_pipeline.json` | JSON array | Every ingested job — JD text, scores, lifecycle status | `ingest.py`, `update_status.py`, `generate_cl.js`, `rescore_all.py`, `scan_no_sponsorship.py` | every surface |
+| `job_pipeline.json` | JSON array | Every ingested job — JD text, scores, lifecycle status | `ingest.py`, `update_status.py`, `generate_cl.js`, `rescore_all.py`, `scan_no_sponsorship.py`, `scan_foreign_locations.py` | every surface |
 | `company_registry.json` | JSON array | Per-company research (sponsorship, remote, ethics) | `ingest.py` (stubs), `research_company.py` (full records), `run.py` (clear stub flag) | every surface |
 | `application_tracker.json` | JSON array | Submitted applications + lifecycle status | `update_status.py`, `serve.py` (ghosted auto-flip) | dashboard, `/today`, `company_block_reason` |
 | `target_boards.json` | JSON array | ATS boards the crawler polls directly | `ingest.py`, `crawl.py`, `backfill_target_boards.py`, `discover_boards_from_careers.py` | `crawl.py` |
 | `comp_estimates.json` | JSON array | Opus-generated comp estimates keyed by `job_id` | `comp_estimate.py` | `/today` cover-letters surface, `/job/<id>` |
-| `process_log.json` | JSON array | Pipeline event log (lifecycle audit trail) | `ingest.py`, `update_status.py`, `comp_estimate.py`, `generate_cl.js`, `scan_no_sponsorship.py` | manual inspection |
+| `process_log.json` | JSON array | Pipeline event log (lifecycle audit trail) | `ingest.py`, `update_status.py`, `comp_estimate.py`, `generate_cl.js`, `scan_no_sponsorship.py`, `scan_foreign_locations.py` | manual inspection |
 | `daily_checklist.json` | JSON object | `/today` UI section-done flags keyed by date | `serve.py` | `serve.py` |
 | `email_config.json` | JSON object | LinkedIn IMAP sender allowlist | `linkedin_fetch.py` (auto-creates) | `linkedin_fetch.py` |
 | `email_state.json` | JSON object | Cross-run `seen_message_ids` for IMAP dedup | `linkedin_fetch.py` | `linkedin_fetch.py` |
@@ -75,7 +75,7 @@ status transitions, and the `/today` apply queue all read from this file.
 **Lifecycle.**
 
 - **Created** by `ingest.ingest_job` after validation + scoring.
-- **Mutated by** `update_status.cmd_log` (`pipeline_status: "active" → "applied"`), `generate_cl.js` (`cover_letter_generated`, `cover_letter_version`, `cover_letter_path`, `pipeline_status: "active" → "cover_letter_ready"`), `rescore_all.py` (re-writes `stack_match_score`, `seniority_score`, `domain_fit_score`, `score_notes`, `scored_at`), `scan_no_sponsorship.py` (`pipeline_status: → "archived"` with `archived_at` + `archived_reason`), `serve.py` `/today/cl/archive` (operator archives a dead posting).
+- **Mutated by** `update_status.cmd_log` (`pipeline_status: "active" → "applied"`), `generate_cl.js` (`cover_letter_generated`, `cover_letter_version`, `cover_letter_path`, `pipeline_status: "active" → "cover_letter_ready"`), `rescore_all.py` (re-writes `stack_match_score`, `seniority_score`, `domain_fit_score`, `score_notes`, `scored_at`), `scan_no_sponsorship.py` / `scan_foreign_locations.py` (`pipeline_status: → "archived"` with `archived_at` + `archived_reason`; the latter also runs from `crawl.crawl`'s end-of-run sweep), `serve.py` `/today/cl/archive` (operator archives a dead posting).
 - **Deletion** never happens — old jobs are archived in place.
 
 ### Schema
@@ -114,8 +114,8 @@ status transitions, and the `/today` apply queue all read from this file.
 | `tags` | list[string] | ✅ | Always `[]` in current builds. Reserved. |
 | `notes` | string | ✅ | Always `""` at ingest. Surfaces don't write to it yet. |
 | `scored_at` | ISO datetime | optional | Set by `score_jd.update_job_record` and `rescore_all.py`. Absent on rows ingested before that field was added. |
-| `archived_at` | ISO datetime | optional | Set by `scan_no_sponsorship.py` and `/today/cl/archive`. |
-| `archived_reason` | string | optional | Set alongside `archived_at`. E.g. `"JD says no sponsorship"`. |
+| `archived_at` | ISO datetime | optional | Set by `scan_no_sponsorship.py`, `scan_foreign_locations.py`, and `/today/cl/archive`. |
+| `archived_reason` | string | optional | Set alongside `archived_at`. E.g. `"JD says no sponsorship"`, `"foreign-pinned remote (not an eligible geography)"`. |
 
 ### Cross-references
 
@@ -581,7 +581,7 @@ forensics.
 
 **Lifecycle.**
 
-- **Appended** by `ingest.append_log`, `update_status.append_log`, `comp_estimate.append_log`, `generate_cl.js:appendLog`, `scan_no_sponsorship.py`.
+- **Appended** by `ingest.append_log`, `update_status.append_log`, `comp_estimate.append_log`, `generate_cl.js:appendLog`, `scan_no_sponsorship.py`, `scan_foreign_locations.py`.
 - **Never compacted** — grows monotonically. Not a problem at the user's volume.
 
 ### Schema (common fields)
@@ -605,7 +605,7 @@ forensics.
 | `company_created` | `ingest.get_or_stub_company` | `"Stub record created for <name> — research pending on rank."` |
 | `validation_summary` | `ingest.ingest_job` (success path) | `"Job ingested. Stack: X/35, Velocity: Y/5, Seniority: Z/25, Domain: W/20. Staleness: …"` |
 | `job_discarded` | `ingest.ingest_job` (various gates) | `"Job discarded: <reason>"` — reasons include missing fields, JD too short, ethics-excluded company, JD refuses sponsorship (skipped for US roles), location not an enabled target geography (US off / not remote, or remote pinned to a foreign region like "Remote - India"). |
-| `job_archived` | `scan_no_sponsorship.py` | `"Retroactive archive: JD says no sponsorship (\"...<snippet>...\")."` |
+| `job_archived` | `scan_no_sponsorship.py`, `scan_foreign_locations.py` (also via `crawl.crawl`'s end-of-run sweep) | `"Retroactive archive: JD says no sponsorship (\"...<snippet>...\")."` or `"Retroactive archive: foreign-pinned remote location '...'."` |
 | `application_logged` | `update_status.cmd_log` | `"Application logged. Method: <m>. Country: <c>. CL v<n>. Score at apply: <s>."` |
 | `application_status_change` | `update_status.cmd_status` | `"Status: <old> → <new>."` |
 | `cover_letter_generated` | `generate_cl.js` | `"Cover letter v<n> generated → <filename>"` |
@@ -996,6 +996,6 @@ Files under `data/` that aren't part of the runtime schema:
 
 | File | What it is |
 |---|---|
-| `*.bak` (and tagged variants like `*.precap.bak`) | Backups — auto-written by `rescore_all.py` and `scan_no_sponsorship.py` before destructive changes, or saved by hand before manual migrations. Restore with `cp <name>.bak <name>`. Safe to delete once the corresponding migration is verified. |
+| `*.bak` (and tagged variants like `*.precap.bak`) | Backups — auto-written by `rescore_all.py`, `scan_no_sponsorship.py`, and `scan_foreign_locations.py` before destructive changes, or saved by hand before manual migrations. Restore with `cp <name>.bak <name>`. Safe to delete once the corresponding migration is verified. |
 | `_sample_linkedin_alert.eml` | Local sample for `linkedin_fetch.py --sample`. Not loaded at runtime. |
 | `rescore_targets.txt`, `rescore_bucket_a_zeros.txt` | One-off plain-text lists of `job_id`s used as input to `rescore_all.py --job-ids-file`. Disposable. |

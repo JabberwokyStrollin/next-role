@@ -326,6 +326,7 @@ scripts/
   generate_cl.js        — cover-letter generator → .docx (Node)
   rescore_all.py        — bulk re-score under a new rubric
   scan_no_sponsorship.py — retroactive no-sponsorship sweep
+  scan_foreign_locations.py — retroactive foreign-pinned-location sweep
   cleanup_staged_jd.py  — clear similar-jobs noise from staged rows
   backfill_target_boards.py — seed target_boards.json from existing jobs
   discover_boards_from_careers.py — find ATS boards from careers pages

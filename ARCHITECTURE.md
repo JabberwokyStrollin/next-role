@@ -48,6 +48,7 @@ Two cross-cutting rules govern most of the code and are referenced throughout:
 
 - [`scripts/rescore_all.py`](#scriptsrescore_allpy) — bulk re-score under a new rubric
 - [`scripts/scan_no_sponsorship.py`](#scriptsscan_no_sponsorshippy) — retroactive no-sponsorship sweep
+- [`scripts/scan_foreign_locations.py`](#scriptsscan_foreign_locationspy) — retroactive foreign-pinned-location sweep
 - [`scripts/cleanup_staged_jd.py`](#scriptscleanup_staged_jdpy) — clear similar-jobs noise from staged rows
 - [`scripts/backfill_target_boards.py`](#scriptsbackfill_target_boardspy) — discover ATS boards from existing pipeline
 - [`scripts/discover_boards_from_careers.py`](#scriptsdiscover_boards_from_careerspy) — discover ATS boards from careers pages
@@ -861,7 +862,7 @@ Main entry. Returns the number of jobs ingested.
   - `verbose` — print pre-filter decision (pass/fail + reason) for every listing.
   - `source` — restrict to one of `remoteok`/`remotive`/`greenhouse`/`lever`/`ashby`. Default is all.
   - `limit` — cap ingest count after pre-filter.
-- **Side effects:** appends to `crawl_log.jsonl`, may grow `target_boards.json` via `auto_add_board`, calls `ingest_job` for each passing candidate.
+- **Side effects:** appends to `crawl_log.jsonl`, may grow `target_boards.json` via `auto_add_board`, calls `ingest_job` for each passing candidate, and (non-dry-run only) runs `scan_foreign_locations.archive_foreign_pinned(apply=True)` as a best-effort self-cleaning sweep — a no-op unless the foreign denylist expanded or a stray foreign row slipped in.
 
 #### `main() -> None`
 CLI shim around `crawl()`. Flags: `--dry-run`, `--verbose`, `--source NAME`, `--limit N`.
@@ -1943,6 +1944,47 @@ Pipeline:
 6. For each match: flip `pipeline_status="archived"`, set `archived_at` +
    `archived_reason="JD says no sponsorship"`, append a `job_archived`
    event to `data/process_log.json`.
+
+---
+
+## `scripts/scan_foreign_locations.py`
+
+**Role.** Retroactive sweep for jobs pinned to a foreign (non-target) region —
+"Remote - India", "European Union (Remote)", "Berlin, Germany", etc. New
+ingests are already blocked at the gate (`config.location_passes` in
+`ingest.ingest_job`), so this exists for two cases: re-sweeping after the
+operator **expands** `config._FOREIGN_LOCATION_TOKENS`, and the odd
+manually-pasted row. Default is dry-run; `--apply` archives. It also runs
+automatically (apply mode) at the end of every real crawl via
+`crawl.crawl` → `archive_foreign_pinned`.
+
+### Module-level constants
+
+| Name | Purpose |
+|---|---|
+| `ARCHIVE_REASON` | `"foreign-pinned remote (not an eligible geography)"` — written to `archived_reason` + the log detail. |
+| `_DEFAULT_STATUSES` | `{active, cover_letter_ready}` — the statuses swept unless `--include-applied`. |
+
+### Functions
+
+#### `is_foreign_pinned(location: str) -> bool`
+SSOT predicate: `derive_country(location) == "OTHER"` AND
+`names_foreign_location(location)` — exactly the rows `location_passes` rejects
+on its OTHER branch.
+
+#### `find_foreign(jobs, statuses) -> list[dict]`
+The in-scope jobs (status in `statuses`) whose location is foreign-pinned.
+
+#### `archive_foreign_pinned(apply=True, include_applied=False, verbose=False) -> int`
+Archives active foreign-pinned jobs in place; returns the count archived (or
+that *would* be, when `apply=False`). Writes a `.bak` backup + `job_archived`
+log entries **only when there's something to archive**, so a no-op call (the
+common case) touches nothing. Shared by the CLI and the crawl's end-of-run
+auto-sweep.
+
+#### `main() -> int`
+Argparse `--apply` / `--include-applied`. Previews via
+`archive_foreign_pinned(apply=False, verbose=True)`, then archives on `--apply`.
 
 ---
 

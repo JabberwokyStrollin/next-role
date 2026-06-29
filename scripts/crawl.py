@@ -590,6 +590,18 @@ def crawl(
         print(f"\n── Crawl complete ──────────────────────────────────────────────")
         print(f"  Ingested: {ingested}   Failed/skipped: {failed}")
 
+        # Self-cleaning sweep: archive any active rows now pinned to a foreign
+        # region. The ingest gate already blocks new foreign rows, so this is a
+        # no-op on a normal run; it only acts after the operator expands
+        # config._FOREIGN_LOCATION_TOKENS or a stray row slipped in. Best-effort.
+        try:
+            from scan_foreign_locations import archive_foreign_pinned  # noqa: WPS433
+            swept = archive_foreign_pinned(apply=True)
+            if swept:
+                print(f"  Foreign-pinned sweep: archived {swept} stale row(s).")
+        except Exception as e:
+            print(f"  [warn] foreign-pinned sweep skipped: {e}")
+
     _log_crawl_run({
         "duration_s":        int(time.time() - started_at),
         "dry_run":           dry_run,

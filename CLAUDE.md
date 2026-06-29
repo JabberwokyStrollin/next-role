@@ -173,7 +173,11 @@ code** ("London, ON" → CA), so the bare `"CA"` code resolves to **California
    pinned to a non-target region ("Remote - India", "European Union (Remote)")
    wants a candidate based there, so it's dropped; "Worldwide"/"Americas"/bare
    "Remote" pass (`_FLEXIBLE_LOCATION_TOKENS` win before `_FOREIGN_LOCATION_TOKENS`,
-   which is operator-editable). Called by `crawl.pre_filter`,
+   which is operator-editable). Expanding `_FOREIGN_LOCATION_TOKENS` needs a
+   retroactive sweep of already-ingested rows: `scan_foreign_locations.py`
+   (dry-run default, `--apply`), which also runs automatically at the end of
+   every real crawl via `archive_foreign_pinned` — parallel to
+   `scan_no_sponsorship.py`. Called by `crawl.pre_filter`,
    `prefilter_staged.pre_filter_relaxed`, and `ingest.ingest_job` (so a manual
    paste is gated too). `location_passes` only ever subtracts.
 
