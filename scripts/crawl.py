@@ -109,7 +109,7 @@ def html_to_text(html: str) -> str:
 # research — calling it here would defeat the cost model entirely. Do NOT
 # import composite_score in this file. The signals checked below
 # (title allowlist/blocklist, location_allow, mechanical stack score on
-# title + JD prefix) come from profile/stack_keywords.yaml, which is the
+# title + full JD) come from profile/stack_keywords.yaml, which is the
 # canonical SSOT for pre-filter configuration.
 
 def title_excluded(title_lower: str, terms: list[str]) -> str | None:
@@ -154,7 +154,11 @@ def pre_filter(title: str, location: str, text: str, cfg: dict,
     if not location_passes(location, source=source):
         return False, f"location US-gated (off / not remote) ({location[:40]})"
 
-    score = compute_stack_score(f"{title} {text[:800]}")
+    # Score the FULL JD (compute_stack_score already strips trailing boilerplate
+    # and caps at STACK_SCORE_MAX), not just a prefix — a prefix window silently
+    # dropped remote Staff roles whose stack keywords appear later in the post,
+    # and was stricter than ingest's own full-JD scoring.
+    score = compute_stack_score(f"{title} {text}")
     if score < cfg["min_pre_filter_score"]:
         return False, f"stack score {score} < {cfg['min_pre_filter_score']}"
 

@@ -245,9 +245,10 @@ every Databricks JD, even pure-frontend roles). Then sums points for every
 keyword in `STACK_KEYWORDS` whose **word-boundary regex** matches the
 lowercased body — `\bjava\b` no longer matches `javascript`. Caps at
 `STACK_SCORE_MAX`. No Claude call — runs both in the pipeline (post-fetch)
-and in the pre-filter (pre-Claude). Pre-filter slices to the first 800
-chars before calling, so the boilerplate strip is a no-op there but the
-word-boundary fix still applies.
+and in the pre-filter (pre-Claude) on the **full JD** (the pre-filter no longer
+truncates to a prefix — a prefix window dropped roles whose stack keywords
+appeared later and was stricter than ingest's own scoring; the boilerplate
+strip + word-boundary matching apply identically in both paths).
 
 #### `compute_velocity_score(date_posted: str | None) -> int`
 Walks `VELOCITY_TIERS` and returns the score for the first tier whose

@@ -67,7 +67,9 @@ def pre_filter_relaxed(title: str, location: str, jd_text: str, cfg: dict) -> tu
 
     if len(jd_text) >= MIN_JD_LENGTH:
         from config import compute_stack_score  # heavy import — defer
-        score = compute_stack_score(f"{title} {jd_text[:800]}")
+        # Full JD (compute_stack_score strips boilerplate + caps), not a prefix —
+        # matches crawl.pre_filter and ingest, which score the whole JD.
+        score = compute_stack_score(f"{title} {jd_text}")
         if score < cfg["min_pre_filter_score"]:
             return False, f"stack score {score} < {cfg['min_pre_filter_score']}"
         return True, f"stack {score}"
