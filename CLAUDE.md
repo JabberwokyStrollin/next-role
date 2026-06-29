@@ -175,12 +175,16 @@ code** ("London, ON" → CA), so the bare `"CA"` code resolves to **California
    "Remote" pass (`_FLEXIBLE_LOCATION_TOKENS` win before `_FOREIGN_LOCATION_TOKENS`,
    which is operator-editable). Called by `crawl.pre_filter`,
    `prefilter_staged.pre_filter_relaxed`, and `ingest.ingest_job` (so a manual
-   paste is gated too). The YAML allowlist stays the pre-filter SSOT;
-   `location_passes` only ever subtracts. **Both gates matter:** to surface US
-   roles, `location_allow` must admit the location string (it now includes US /
-   region tokens — `united states`, `usa`, `north america`, `worldwide`,
-   `anywhere`) *and* `location_passes` must accept it as remote-US. `is_remote_role`
-   is also the SSOT for the stored `job_type`.
+   paste is gated too). `location_passes` only ever subtracts.
+
+   **Positive gate composes two SSOTs.** A row clears the pre-filter's positive
+   location check if the YAML `location_allow` matches (remote / flexible /
+   region terms) **OR** `derive_country(location)` is in `TARGET_COUNTRIES` — so
+   target cities the YAML doesn't enumerate ("Galway", "Montreal", province
+   codes) aren't dropped, without duplicating `derive_country`'s knowledge in the
+   YAML. `derive_country` is pure-string (no Claude), so it's pre-filter-safe.
+   Then `location_passes` subtracts (US remote-only, foreign-pinned reject).
+   `is_remote_role` is also the SSOT for the stored `job_type`.
 
 ## Company-filter SSOT — single source of truth
 

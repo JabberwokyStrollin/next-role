@@ -786,11 +786,14 @@ Returns `(passes, reason_string)`. Cheap mechanical gate run on every raw
 listing. Reasons start with stable prefixes (`title seniority`, `title
 excluded`, `location`, `stack score`) so `_categorize_reason` can bucket
 them in the funnel log without parsing free text. `title_exclude` uses
-`title_excluded` for word-aware matching. After the YAML `location_allow`
-check it applies the `config.location_passes` subtractive US gate (reason
-prefix `location US-gated …`, so it buckets under `location` in the funnel);
-`source` is forwarded so the gate's remote check is source-aware (remote-only
-boards count region-only US locations as remote).
+`title_excluded` for word-aware matching. The positive location check passes
+if the YAML `location_allow` matches **or** `config.derive_country(location)`
+is in `TARGET_COUNTRIES` (so target cities the allowlist doesn't enumerate —
+"Galway", "Montreal", province codes — aren't dropped). It then applies the
+`config.location_passes` subtractive gate (US remote-only + foreign-pinned
+reject; reason prefix `location US-gated …`, so it buckets under `location` in
+the funnel); `source` is forwarded so the remote check is source-aware
+(remote-only boards count region-only US locations as remote).
 
 #### `detect_ats(url: str) -> tuple[str, str] | None`
 Pattern-matches an apply URL against five ATS shapes (Greenhouse hosted
@@ -905,8 +908,10 @@ boards do **not** count as covered until a fetcher exists (i.e. once they're in
 Like `crawl.pre_filter` but skips the stack-score check when `jd_text` is
 shorter than `MIN_JD_LENGTH`. Lazy-imports `compute_stack_score` so the
 no-JD path stays fast. Uses `crawl.title_excluded` for word-aware
-`title_exclude` matching, and applies the same `config.location_passes`
-US gate (reason prefix `location US-gated …`). Returns `(passes, reason)`.
+`title_exclude` matching, the same positive location gate (YAML `location_allow`
+**or** `derive_country` in `TARGET_COUNTRIES`), and the same
+`config.location_passes` subtractive gate (reason prefix `location US-gated …`).
+Returns `(passes, reason)`.
 
 #### `main() -> None`
 Loads `email_staged.json`. For each row it first checks

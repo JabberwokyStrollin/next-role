@@ -34,10 +34,12 @@ from config import (
     JOB_PIPELINE_PATH,
     STACK_KEYWORDS_PATH,
     TARGET_BOARDS_PATH,
+    TARGET_COUNTRIES,
     load_json,
     save_json,
     today,
     compute_stack_score,
+    derive_country,
     location_passes,
 )
 from ingest import ingest_job
@@ -145,7 +147,13 @@ def pre_filter(title: str, location: str, text: str, cfg: dict,
     if bad:
         return False, f"title excluded by '{bad}' ({title[:50]})"
 
-    if not any(kw in l for kw in cfg["location_allow"]):
+    # Positive location gate: pass if the YAML allowlist matches (remote /
+    # flexible / region terms) OR derive_country already resolves it to a target
+    # country — so target cities the allowlist doesn't enumerate ("Galway",
+    # "Montreal", province codes) aren't dropped here. location_passes below
+    # still does the subtractive refinement (US remote-only, foreign reject).
+    if not (any(kw in l for kw in cfg["location_allow"])
+            or derive_country(location) in TARGET_COUNTRIES):
         return False, f"location miss ({location[:40]})"
 
     # Subtractive geography gate (config SSOT, not the YAML allowlist): drops

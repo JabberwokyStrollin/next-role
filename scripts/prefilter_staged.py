@@ -78,12 +78,16 @@ def pre_filter_relaxed(title: str, location: str, jd_text: str, cfg: dict) -> tu
     if bad:
         return False, f"title excluded by '{bad}'"
 
-    if not any(kw in l for kw in cfg["location_allow"]):
+    # Positive location gate: YAML allowlist OR derive_country resolves to a
+    # target country (so "Galway"/"Montreal"/province codes the allowlist doesn't
+    # list aren't dropped). Same as crawl.pre_filter.
+    from config import derive_country, TARGET_COUNTRIES, location_passes  # defer
+    if not (any(kw in l for kw in cfg["location_allow"])
+            or derive_country(location) in TARGET_COUNTRIES):
         return False, f"location miss ({location[:40]})"
 
-    # Subtractive US geography gate (config SSOT). Same logic as crawl.pre_filter:
-    # US is remote-only and only when "US" is an enabled target. CA/IE/OTHER pass.
-    from config import location_passes  # defer — keep import surface minimal
+    # Subtractive geography gate (config SSOT): US remote-only, foreign-pinned
+    # remote rejected. CA/IE always pass.
     if not location_passes(location):
         return False, f"location US-gated (off / not remote) ({location[:40]})"
 
