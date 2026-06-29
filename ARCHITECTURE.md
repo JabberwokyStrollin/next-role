@@ -874,6 +874,17 @@ Same pre-LLM constraint as `crawl.pre_filter` — see the SSOT banner in
 
 ### Functions
 
+#### `_normalize_company(name: str) -> str`
+Lowercase + whitespace-collapse a company name for matching.
+
+#### `crawl_covered_companies() -> set[str]`
+Normalized names of companies that already have a **crawlable** ATS board
+(`ats in crawl.SUPPORTED_ATSES`) in `target_boards.json`. Used to suppress
+LinkedIn staged rows for companies the ATS crawl already covers comprehensively
+(duplicate review work). Conservative exact-name match. Workday/SmartRecruiters
+boards do **not** count as covered until a fetcher exists (i.e. once they're in
+`SUPPORTED_ATSES`), so the suppression automatically tracks crawl capability.
+
 #### `pre_filter_relaxed(title: str, location: str, jd_text: str, cfg: dict) -> tuple[bool, str]`
 Like `crawl.pre_filter` but skips the stack-score check when `jd_text` is
 shorter than `MIN_JD_LENGTH`. Lazy-imports `compute_stack_score` so the
@@ -882,10 +893,14 @@ no-JD path stays fast. Uses `crawl.title_excluded` for word-aware
 US gate (reason prefix `location US-gated …`). Returns `(passes, reason)`.
 
 #### `main() -> None`
-Loads `email_staged.json`, runs every row through `pre_filter_relaxed`,
-writes the mutated list back, and prints two summary lines including a
-machine-readable last line `PREFILTER: passed=<n> failed=<n>` that
-`serve.py:run_linkedin_prefilter` parses to populate its flash message.
+Loads `email_staged.json`. For each row it first checks
+`crawl_covered_companies()` — if the row's company already has a crawlable
+board, it's marked `_prefilter_pass=False` with reason `company crawl-covered
+(…)` (so it drops into the bulk-discard bucket and stops cluttering review);
+otherwise the row runs through `pre_filter_relaxed`. Writes the mutated list
+back and prints a machine-readable last line `PREFILTER: passed=<n> failed=<n>`
+(failed includes crawl-covered suppressions) that
+`serve.py:run_linkedin_prefilter` parses for its flash message.
 
 ---
 

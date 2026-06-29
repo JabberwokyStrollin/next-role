@@ -28,10 +28,32 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
 
-from crawl import load_crawl_config, title_excluded  # noqa: E402
+from crawl import load_crawl_config, title_excluded, SUPPORTED_ATSES  # noqa: E402
 
 STAGED_PATH   = ROOT / "data" / "email_staged.json"
 MIN_JD_LENGTH = 200
+
+
+def _normalize_company(name: str) -> str:
+    """Lowercase + whitespace-collapse a company name for matching."""
+    return " ".join((name or "").lower().split())
+
+
+def crawl_covered_companies() -> set[str]:
+    """Normalized names of companies that already have a *crawlable* ATS board
+    (ats in SUPPORTED_ATSES) in target_boards.json. LinkedIn staged rows for
+    these companies are suppressed — the ATS crawl already covers them
+    comprehensively (full-JD scored), so re-reviewing them here is duplicate
+    work. Conservative exact-name match (misses fuzzy variants rather than
+    over-suppressing). Workday/SmartRecruiters boards don't count as covered
+    until they're in SUPPORTED_ATSES (i.e. once a fetcher exists)."""
+    from config import TARGET_BOARDS_PATH, load_json  # defer — keep import light
+    boards = load_json(TARGET_BOARDS_PATH)
+    return {
+        _normalize_company(b.get("company", ""))
+        for b in boards
+        if b.get("company") and b.get("ats", "").lower() in SUPPORTED_ATSES
+    }
 
 
 def pre_filter_relaxed(title: str, location: str, jd_text: str, cfg: dict) -> tuple[bool, str]:
@@ -89,10 +111,23 @@ def main() -> None:
         print("PREFILTER: passed=0 failed=0")
         return
 
-    cfg    = load_crawl_config()
-    passed = 0
-    failed = 0
+    cfg     = load_crawl_config()
+    covered = crawl_covered_companies()
+    passed  = 0
+    failed  = 0
+    covered_n = 0
     for row in rows:
+        company  = row.get("company", "")
+        # Coverage check first: if the ATS crawl already pulls this company's
+        # board, suppress the LinkedIn row (pass=False) so it drops out of the
+        # review/bulk-discard queue. The crawl handles it comprehensively.
+        if _normalize_company(company) in covered:
+            row["_prefilter_pass"]   = False
+            row["_prefilter_reason"] = f"company crawl-covered ({company[:30]})"
+            failed    += 1
+            covered_n += 1
+            continue
+
         title    = row.get("title",    "")
         location = row.get("location", "")
         jd_text  = row.get("jd_text",  "") or ""
@@ -108,7 +143,8 @@ def main() -> None:
         json.dumps(rows, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    print(f"Pre-filter applied to {len(rows)} rows: passed={passed} failed={failed}")
+    print(f"Pre-filter applied to {len(rows)} rows: passed={passed} failed={failed} "
+          f"(of failed, {covered_n} suppressed as crawl-covered)")
     print(f"PREFILTER: passed={passed} failed={failed}")
 
 
