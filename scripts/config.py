@@ -397,16 +397,19 @@ _CA_LOCATION_TOKENS: tuple[str, ...] = (
     "ottawa", "calgary", "edmonton", "waterloo", "kitchener",
 )
 _US_LOCATION_TOKENS: tuple[str, ...] = (
-    "united states", " usa", " us,", " us ", "(us)", "u.s.",
+    "united states", " usa", " us,", " us ", " us:", "(us)", "u.s.",
     "remote, us", "remote (us)", "us remote", "us-remote", "california",
 )
 
-# US state two-letter codes, matched only in an anchored "City, ST" / "(ST)"
-# form (see _has_us_state) so they don't false-positive on English words or
-# full country names. ``in`` (India), ``de`` (Germany) and ``co`` (Colombia) are
-# omitted because those country codes appear in remote listings far more often
-# than the matching US states (Indiana / Delaware / Colorado), and the wrong
-# answer there (US) is worse than the right one (OTHER).
+# Two-letter region codes, matched only in an anchored "City, XX" / "(XX)" form
+# (see _has_region_code) so they don't false-positive on English words or full
+# country names. CA provinces are checked as part of Canada detection (before
+# US), so e.g. "London, ON" → CA, not OTHER. US states omit ``in``/``de``/``co``
+# (India/Germany/Colombia country-code collisions appear in remote listings far
+# more often than Indiana/Delaware/Colorado).
+_CA_PROVINCE_CODES: frozenset[str] = frozenset({
+    "on", "bc", "ab", "mb", "sk", "qc", "ns", "nb", "nl", "pe", "yt", "nt", "nu",
+})
 _US_STATE_CODES: frozenset[str] = frozenset({
     "al", "ak", "az", "ar", "ca", "ct", "fl", "ga", "hi", "id", "il", "ia",
     "ks", "ky", "la", "me", "md", "ma", "mi", "mn", "ms", "mo", "mt", "ne",
@@ -415,12 +418,12 @@ _US_STATE_CODES: frozenset[str] = frozenset({
 })
 
 
-def _has_us_state(padded_loc: str) -> bool:
-    """True if ``padded_loc`` (already lowercased + space-padded) contains a US
-    state code in an anchored "City, ST" / "City, ST," / "City, ST)" / "(ST)"
+def _has_region_code(padded_loc: str, codes: frozenset[str]) -> bool:
+    """True if ``padded_loc`` (already lowercased + space-padded) contains one of
+    ``codes`` in an anchored "City, XX" / "City, XX," / "City, XX)" / "(XX)"
     form. The leading comma/paren and trailing boundary keep full country names
     ("..., india") and embedded letters from matching."""
-    for code in _US_STATE_CODES:
+    for code in codes:
         if (f", {code} " in padded_loc
                 or f", {code}," in padded_loc
                 or f", {code})" in padded_loc
@@ -433,15 +436,15 @@ def derive_country(location: str) -> str:
     """Map a free-text job/application location to ``"CA" | "IE" | "US" |
     "OTHER"``. SSOT — IE/CA are matched before US so a combined posting
     resolves to the sponsorship-bearing country. Bare "us" is never a substring
-    token (it would match "houston"); US states are matched only in an anchored
-    "City, ST" form, and "CA" resolves to California (US) since Canada is
-    detected first by name/city."""
+    token (it would match "houston"); region codes are matched only in an
+    anchored "City, XX" form. "CA" resolves to California (US) — Canada is
+    detected first by name / Canadian city / province code (ON, BC, …)."""
     loc = f" {(location or '').lower()} "
     if any(t in loc for t in _IE_LOCATION_TOKENS):
         return "IE"
-    if any(t in loc for t in _CA_LOCATION_TOKENS):
+    if any(t in loc for t in _CA_LOCATION_TOKENS) or _has_region_code(loc, _CA_PROVINCE_CODES):
         return "CA"
-    if any(t in loc for t in _US_LOCATION_TOKENS) or _has_us_state(loc):
+    if any(t in loc for t in _US_LOCATION_TOKENS) or _has_region_code(loc, _US_STATE_CODES):
         return "US"
     return "OTHER"
 
@@ -468,35 +471,84 @@ def is_remote_role(location: str, source: str | None = None) -> bool:
     return any(t in loc for t in _REMOTE_LOCATION_TOKENS)
 
 
+# Location-flexible tokens: an OTHER-classified remote role carrying one of
+# these is open to the operator's region (or globally), so it passes. Checked
+# BEFORE the foreign denylist so a multi-region role ("Americas, Europe, Asia")
+# that includes the Americas isn't rejected for also naming Europe/Asia.
+_FLEXIBLE_LOCATION_TOKENS: tuple[str, ...] = (
+    "worldwide", "anywhere", "global", "americas", "north america", "namer",
+)
+
+# Non-target country / region tokens. An OTHER-classified remote role pinned to
+# one of these wants a candidate based there (e.g. "Remote - India" wants an
+# India-based hire), which the operator can't take — so it's rejected. CA / IE /
+# US are resolved earlier by derive_country and never reach this list.
+# Operator-editable: add/remove regions to taste.
+_FOREIGN_LOCATION_TOKENS: tuple[str, ...] = (
+    # Europe (operator targets IE via sponsorship, not EU-wide work authorization)
+    "united kingdom", " uk ", " uk,", "(uk)", "england", "scotland", "wales",
+    "european union", "european economic area", "europe", "emea", " eea ", "(eea)",
+    "germany", "france", "spain", "portugal", "italy", "netherlands", "belgium",
+    "switzerland", "austria", "poland", "romania", "bulgaria", "hungary",
+    "czech", "ukraine", "sweden", "norway", "denmark", "finland", "greece",
+    "turkey", "israel",
+    # Asia / APAC
+    "india", "pakistan", "bangladesh", "sri lanka", "china", "hong kong",
+    "japan", "korea", "taiwan", "singapore", "malaysia", "thailand",
+    "indonesia", "vietnam", "philippines", "apac", "asia pacific", "asia-pacific",
+    " asia ", "(asia)",
+    # Latin America
+    "mexico", "brazil", "argentina", "colombia", "chile", "peru", "latam",
+    "latin america", "south america", "central america",
+    # Africa / Middle East / Oceania
+    "nigeria", "kenya", "egypt", "south africa", "africa", "middle east",
+    "united arab emirates", " uae", "saudi arabia", "qatar",
+    "australia", "new zealand", "oceania",
+)
+
+
+def names_foreign_location(location: str) -> bool:
+    """True if ``location`` is pinned to a non-target country/region the operator
+    can't work in. Flexible/global tokens win first, so a multi-region role that
+    includes the Americas is kept. Only meaningful for OTHER-classified
+    locations (CA/IE/US are resolved by derive_country before this is reached)."""
+    loc = f" {(location or '').lower()} "
+    if any(t in loc for t in _FLEXIBLE_LOCATION_TOKENS):
+        return False
+    return any(t in loc for t in _FOREIGN_LOCATION_TOKENS)
+
+
 def location_passes(location: str,
                     enabled_countries: frozenset[str] | None = None,
                     source: str | None = None) -> bool:
     """Pre-filter-safe geography gate (pure string logic — never calls a
     composite, so it's safe to import from ``crawl.pre_filter`` /
-    ``prefilter_staged.pre_filter_relaxed``). Returns ``False`` for a
-    US-derived location when US is disabled OR when the role isn't remote
-    (US is remote-only by policy); returns ``True`` for CA / IE / OTHER.
+    ``prefilter_staged.pre_filter_relaxed``). Removes rows the operator can't
+    take:
+      - **US**: kept only if US is enabled AND the role is remote
+        (``is_remote_role``; source-aware — a region-only "USA" counts as remote
+        from a remote-only board, but an ATS US role needs an explicit marker).
+      - **CA / IE**: always kept (sponsorship-target markets, incl. Canadian
+        province codes like "London, ON").
+      - **OTHER**: kept only if NOT pinned to a foreign region
+        (``names_foreign_location``) — so "Worldwide" / "Americas" / bare
+        "Remote" pass, but "Remote - India" / "European Union (Remote)" don't.
 
-    ``enabled_countries`` defaults to the live ``TARGET_COUNTRIES`` module
-    global — read at call time (NOT captured as a default-arg value), so it
-    tracks the configured set exactly like ``composite_score`` does. Pass an
-    explicit set only to override (e.g. tests).
+    ``enabled_countries`` defaults to the live ``TARGET_COUNTRIES`` module global
+    — read at call time (NOT captured as a default-arg value), so it tracks the
+    configured set exactly like ``composite_score`` does.
 
-    The remote check is source-aware via ``is_remote_role``: a region-only US
-    location ("USA", "United States") counts as remote when it came from a
-    remote-only board, but an ATS-board US role still needs an explicit remote
-    marker — so onsite/hybrid US stays excluded.
-
-    This is a SUBTRACTIVE gate layered AFTER the YAML ``location_allow``
-    allowlist — it only removes US rows the allowlist would otherwise admit; it
-    never admits a row the allowlist rejected. The positive allowlist in
+    SUBTRACTIVE gate layered AFTER the YAML ``location_allow`` allowlist — it
+    only removes rows the allowlist would otherwise admit (via bare ``remote``);
+    it never admits a row the allowlist rejected. The positive allowlist in
     profile/stack_keywords.yaml remains the pre-filter SSOT."""
     countries = enabled_countries if enabled_countries is not None else TARGET_COUNTRIES
-    if derive_country(location) == "US":
-        if "US" not in countries:
-            return False
-        return is_remote_role(location, source)
-    return True
+    country = derive_country(location)
+    if country == "US":
+        return "US" in countries and is_remote_role(location, source)
+    if country in ("CA", "IE"):
+        return True
+    return not names_foreign_location(location)
 
 
 # ─── Title-based seniority cap (mechanical, applied after Claude scoring) ───-

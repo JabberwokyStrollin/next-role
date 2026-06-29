@@ -142,10 +142,12 @@ behavior is byte-identical). Country is **derived on the fly** from `location`
 via `config.derive_country` (→ `CA`/`IE`/`US`/`OTHER`) —
 no stored field. `derive_country` matches IE/CA before US so a combined
 "Remote, Canada/US" posting resolves to the sponsorship-bearing country, and
-never uses a bare `"us"` substring (would match "houston"). The `"CA"` code is
-treated as **California (US)**, not Canada (Canada is detected first by name /
-Canadian city), and US states are matched only in an anchored "City, ST" form
-(`_has_us_state`, omitting the `in`/`de`/`co` country-code collisions).
+never uses a bare `"us"` substring (would match "houston"). Region codes (CA
+provinces `ON`/`BC`/…, US states) are matched only in an anchored "City, XX" form
+(`_has_region_code`, US states omitting the `in`/`de`/`co` country-code
+collisions); Canada is detected first by name / Canadian city / **province
+code** ("London, ON" → CA), so the bare `"CA"` code resolves to **California
+(US)**, not Canada.
 
 1. **The US sponsorship floor lives ONLY in `composite_score`.** For a
    US-derived role (and only when `"US" in TARGET_COUNTRIES`), the canonical
@@ -160,14 +162,18 @@ Canadian city), and US states are matched only in an anchored "City, ST" form
    sponsorship), so research-queue ranking stays country-agnostic. When US is
    off, the branch never fires and CA/IE composites are byte-identical to before.
 
-2. **US is remote-only, enforced by `config.location_passes`** — a pure-string,
-   pre-filter-safe (no-Claude) **subtractive** gate layered AFTER the YAML
-   `location_allow` allowlist. It removes US rows unless US is enabled AND the
-   role is remote per `config.is_remote_role` (the SSOT remote check, which is
-   **source-aware**: a region-only US location like "USA"/"United States"
-   counts as remote when the listing came from a remote-only board in
-   `REMOTE_ONLY_SOURCES`, but an ATS-board US role needs an explicit remote
-   marker). CA/IE/OTHER pass through. Called by `crawl.pre_filter`,
+2. **`config.location_passes` removes rows the operator can't take** — a
+   pure-string, pre-filter-safe (no-Claude) **subtractive** gate layered AFTER
+   the YAML `location_allow` allowlist. Three cases: **US** rows are removed
+   unless US is enabled AND the role is remote per `config.is_remote_role` (the
+   SSOT remote check, **source-aware**: a region-only US location like "USA"
+   counts as remote from a remote-only board in `REMOTE_ONLY_SOURCES`, but an
+   ATS-board US role needs an explicit remote marker). **CA/IE** always pass.
+   **OTHER** rows are removed if `names_foreign_location` matches — a remote role
+   pinned to a non-target region ("Remote - India", "European Union (Remote)")
+   wants a candidate based there, so it's dropped; "Worldwide"/"Americas"/bare
+   "Remote" pass (`_FLEXIBLE_LOCATION_TOKENS` win before `_FOREIGN_LOCATION_TOKENS`,
+   which is operator-editable). Called by `crawl.pre_filter`,
    `prefilter_staged.pre_filter_relaxed`, and `ingest.ingest_job` (so a manual
    paste is gated too). The YAML allowlist stays the pre-filter SSOT;
    `location_passes` only ever subtracts. **Both gates matter:** to surface US

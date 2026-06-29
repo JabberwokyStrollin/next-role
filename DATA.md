@@ -604,7 +604,7 @@ forensics.
 |---|---|---|
 | `company_created` | `ingest.get_or_stub_company` | `"Stub record created for <name> — research pending on rank."` |
 | `validation_summary` | `ingest.ingest_job` (success path) | `"Job ingested. Stack: X/35, Velocity: Y/5, Seniority: Z/25, Domain: W/20. Staleness: …"` |
-| `job_discarded` | `ingest.ingest_job` (various gates) | `"Job discarded: <reason>"` — reasons include missing fields, JD too short, ethics-excluded company, JD refuses sponsorship (skipped for US roles), location not an enabled target geography (US off / not remote). |
+| `job_discarded` | `ingest.ingest_job` (various gates) | `"Job discarded: <reason>"` — reasons include missing fields, JD too short, ethics-excluded company, JD refuses sponsorship (skipped for US roles), location not an enabled target geography (US off / not remote, or remote pinned to a foreign region like "Remote - India"). |
 | `job_archived` | `scan_no_sponsorship.py` | `"Retroactive archive: JD says no sponsorship (\"...<snippet>...\")."` |
 | `application_logged` | `update_status.cmd_log` | `"Application logged. Method: <m>. Country: <c>. CL v<n>. Score at apply: <s>."` |
 | `application_status_change` | `update_status.cmd_status` | `"Status: <old> → <new>."` |
