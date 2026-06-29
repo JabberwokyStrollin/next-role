@@ -142,7 +142,10 @@ behavior is byte-identical). Country is **derived on the fly** from `location`
 via `config.derive_country` (→ `CA`/`IE`/`US`/`OTHER`) —
 no stored field. `derive_country` matches IE/CA before US so a combined
 "Remote, Canada/US" posting resolves to the sponsorship-bearing country, and
-never uses a bare `"us"` substring (would match "houston").
+never uses a bare `"us"` substring (would match "houston"). The `"CA"` code is
+treated as **California (US)**, not Canada (Canada is detected first by name /
+Canadian city), and US states are matched only in an anchored "City, ST" form
+(`_has_us_state`, omitting the `in`/`de`/`co` country-code collisions).
 
 1. **The US sponsorship floor lives ONLY in `composite_score`.** For a
    US-derived role (and only when `"US" in TARGET_COUNTRIES`), the canonical
@@ -159,11 +162,19 @@ never uses a bare `"us"` substring (would match "houston").
 
 2. **US is remote-only, enforced by `config.location_passes`** — a pure-string,
    pre-filter-safe (no-Claude) **subtractive** gate layered AFTER the YAML
-   `location_allow` allowlist. It removes US rows the allowlist admits via bare
-   `remote`/`americas` unless US is enabled AND the role is remote; CA/IE/OTHER
-   pass through. Called by `crawl.pre_filter`, `prefilter_staged.pre_filter_relaxed`,
-   and `ingest.ingest_job` (so a manual paste is gated too). The YAML allowlist
-   stays the pre-filter SSOT; `location_passes` only ever subtracts.
+   `location_allow` allowlist. It removes US rows unless US is enabled AND the
+   role is remote per `config.is_remote_role` (the SSOT remote check, which is
+   **source-aware**: a region-only US location like "USA"/"United States"
+   counts as remote when the listing came from a remote-only board in
+   `REMOTE_ONLY_SOURCES`, but an ATS-board US role needs an explicit remote
+   marker). CA/IE/OTHER pass through. Called by `crawl.pre_filter`,
+   `prefilter_staged.pre_filter_relaxed`, and `ingest.ingest_job` (so a manual
+   paste is gated too). The YAML allowlist stays the pre-filter SSOT;
+   `location_passes` only ever subtracts. **Both gates matter:** to surface US
+   roles, `location_allow` must admit the location string (it now includes US /
+   region tokens — `united states`, `usa`, `north america`, `worldwide`,
+   `anywhere`) *and* `location_passes` must accept it as remote-US. `is_remote_role`
+   is also the SSOT for the stored `job_type`.
 
 ## Company-filter SSOT — single source of truth
 

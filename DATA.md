@@ -88,7 +88,7 @@ status transitions, and the `/today` apply queue all read from this file.
 | `title` | string | ✅ | Free-text job title as posted. |
 | `apply_url` | URL string | ✅ | Used for dedup; uniqueness enforced by `ingest.check_duplicate`. |
 | `location` | string | ✅ | Free text. `"remote canada"`, `"Vancouver, Canada"`, `"Remote, US"`, etc. — used by `config.derive_country` (→ `CA`/`IE`/`US`/`OTHER`) and the location pre-filter heuristics. US roles are remote-only and only ingest when `"US" in config.TARGET_COUNTRIES` (see `config.location_passes`). |
-| `job_type` | `"remote"` / `"unknown"` | ✅ | Derived from `"remote" in location.lower()` at ingest. |
+| `job_type` | `"remote"` / `"unknown"` | ✅ | From `config.is_remote_role(location, source)` at ingest: `"remote"` when the location text says so **or** the listing came from a remote-only board (`REMOTE_ONLY_SOURCES`); else `"unknown"`. |
 | `jd_text` | string | ✅ | Full JD body, ≥ `MIN_JD_LENGTH` (200) chars. May contain HTML for ATS-API ingests where the upstream returned HTML. |
 | `date_posted` | `YYYY-MM-DD` / `null` | optional | Source-supplied posting date when available. |
 | `date_found` | ISO datetime | ✅ | When this row was ingested. |

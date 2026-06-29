@@ -130,8 +130,11 @@ def title_excluded(title_lower: str, terms: list[str]) -> str | None:
     return None
 
 
-def pre_filter(title: str, location: str, text: str, cfg: dict) -> tuple[bool, str]:
-    """Returns (passes, reason_string)."""
+def pre_filter(title: str, location: str, text: str, cfg: dict,
+               source: str | None = None) -> tuple[bool, str]:
+    """Returns (passes, reason_string). ``source`` lets the US remote-only gate
+    be source-aware (remote-only boards count region-only US locations as
+    remote — see config.is_remote_role)."""
     t = title.lower()
     l = location.lower()
 
@@ -148,7 +151,7 @@ def pre_filter(title: str, location: str, text: str, cfg: dict) -> tuple[bool, s
     # Subtractive geography gate (config SSOT, not the YAML allowlist): drops
     # US rows the allowlist admits via bare "remote"/"americas" unless "US" is
     # an enabled target AND the role is remote. CA/IE/OTHER pass through.
-    if not location_passes(location):
+    if not location_passes(location, source=source):
         return False, f"location US-gated (off / not remote) ({location[:40]})"
 
     score = compute_stack_score(f"{title} {text[:800]}")
@@ -510,6 +513,7 @@ def crawl(
             listing.get("location", ""),
             listing.get("jd_text", ""),
             cfg,
+            source=listing.get("source"),
         )
 
         if passes:

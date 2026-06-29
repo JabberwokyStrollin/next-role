@@ -32,6 +32,7 @@ from config import (
     PROCESS_LOG_PATH,
     detect_no_sponsorship,
     derive_country,
+    is_remote_role,
     location_passes,
     load_json,
     save_json,
@@ -243,7 +244,7 @@ def ingest_job(
     # role is also gated (the manual path bypasses those pre-filters). US roles
     # are remote-only and only enter when "US" is in TARGET_COUNTRIES; CA / IE /
     # OTHER are unaffected. See config.location_passes (pure-string, no Claude).
-    if not location_passes(location):
+    if not location_passes(location, source=source):
         print(f"  Geography gate: '{location[:40]}' not an enabled target — discarding.")
         append_log({
             "event_type":  "job_discarded",
@@ -325,7 +326,7 @@ def ingest_job(
         "title":                title,
         "apply_url":            apply_url,
         "location":             location,
-        "job_type":             "remote" if "remote" in location.lower() else "unknown",
+        "job_type":             "remote" if is_remote_role(location, source) else "unknown",
         "jd_text":              jd_text,
         "date_posted":          date_posted,
         "date_found":           now,

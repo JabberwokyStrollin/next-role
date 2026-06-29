@@ -215,7 +215,7 @@ pre-filter (run before any Claude call) and the aggregator queries:
 |---|---|
 | `seniority_titles` | List of terms; the job title must contain at least one. |
 | `title_exclude` | List of terms; reject the title if any appears as a whole word (filters pre-sales / customer-success roles that slip past `architect` / `lead`). Whole-word match is letter-boundary-aware, so `intern` blocks `"Software Intern"` but not `"... International"`; multi-word terms like `solutions architect` work too. Variants that share a prefix need separate entries — e.g. list both `intern` and `internship`. |
-| `location_allow` | List of regions; the location must contain at least one (or `remote`). This is the *positive* allowlist. A separate code-level gate (`config.location_passes`, driven by `TARGET_COUNTRIES`) subtracts US rows when US is disabled or non-remote — see "Targeting the US" below. |
+| `location_allow` | List of regions; the location must contain at least one (or `remote`). This is the *positive* allowlist (first gate) and now includes US/region tokens (`united states`, `usa`, `north america`, `worldwide`, `anywhere`) so US-eligible remote roles aren't dropped before the US gate. A separate code-level gate (`config.location_passes`, driven by `TARGET_COUNTRIES`) then subtracts US rows when US is disabled or not remote — see "Targeting the US" below. |
 | `aggregator_tags` | List of tag groups for the RemoteOK API. Each top-level item is one API call; tags within an inner list are AND-filtered (e.g. `- [kafka, java]`). For one-or-the-other alternates (technologies that don't co-occur), write them as separate items. |
 | `aggregator_keywords` | List of Remotive full-text search queries. Each item is one query string (e.g. `- kafka flink java`). |
 | `min_pre_filter_score` | Minimum stack-keyword score required before full ingest. |
@@ -235,11 +235,23 @@ optional, **remote-only stop-gap**. Active geographies are one constant in
 TARGET_COUNTRIES: frozenset[str] = frozenset({"CA", "IE", "US"})  # remove "US" to disable
 ```
 
+You also need US/region tokens in `location_allow` (in your gitignored
+`profile/stack_keywords.yaml`) so US-eligible remote roles survive the first
+gate — `united states`, `usa`, `north america`, `worldwide`, `anywhere`. Without
+them, region-only locations like `"USA"`/`"Worldwide"` are dropped at
+`location_allow` before the US gate ever runs. (These are already present in the
+maintained profile.)
+
 What US being enabled turns on (all keyed off `config.derive_country(location)`):
 
 - **Remote-only intake.** Only remote US roles ingest; onsite/hybrid US is
   discarded by `config.location_passes` (applied in both pre-filters and at
-  ingest). With US off, US roles are excluded entirely.
+  ingest). The remote check (`config.is_remote_role`) is **source-aware**: a
+  region-only US location ("USA", "United States") counts as remote when it
+  came from a remote-only board (RemoteOK / Remotive), but an ATS-board US role
+  needs an explicit remote marker. With US off, US roles are excluded entirely.
+  (Note: most crawl volume is the niche stack at Staff level, so geography is
+  rarely the binding filter — `title_seniority` and `stack` drop the bulk.)
 - **No-sponsorship JDs kept.** The ingest-time `detect_no_sponsorship` discard
   is skipped for US roles (you're a US citizen), so "we do not sponsor"
   boilerplate no longer throws the posting away. CA/IE still honor it.
