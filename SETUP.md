@@ -229,7 +229,7 @@ around stack scoring.
 
 The pipeline targets **Canada** and **Ireland**, plus the **US** as an
 optional, **remote-only stop-gap**. Active geographies are one constant in
-`scripts/config.py` (US is **currently enabled**):
+`scripts/geography.py` (the location-SSOT module; US is **currently enabled**):
 
 ```python
 TARGET_COUNTRIES: frozenset[str] = frozenset({"CA", "IE", "US"})  # remove "US" to disable

@@ -237,7 +237,7 @@ convention.
 
 next-role targets **Canada** and **Ireland** (where the operator needs visa
 sponsorship) plus, as an **optional remote-only stop-gap**, the **US**. Active
-geographies live in `scripts/config.py:TARGET_COUNTRIES` (currently
+geographies live in `scripts/geography.py:TARGET_COUNTRIES` (currently
 `{"CA","IE","US"}` — remove `"US"` to disable). When US is enabled:
 
 - Only **remote** US roles enter the pipeline (onsite/hybrid US is gated out).
@@ -312,6 +312,7 @@ run.py                  — CLI orchestrator
 serve.py                — local web UI (localhost:5000)
 scripts/
   config.py             — shared paths, constants, scoring + filter SSOTs
+  geography.py          — location → country SSOT + geography gate (dependency-free; callable by JS)
   ingest.py             — fetch + validate + score + write one job
   score_jd.py           — Claude seniority + domain scoring
   research_company.py   — two-tier company research (Haiku + 1 web search)

@@ -64,6 +64,7 @@ from config import (  # noqa: E402
     composite_score,
     composite_score_pre_research,
     auto_age_application,
+    derive_country,
     find_duplicate_application,
     gov_screen_result,
     apply_rank_score,
@@ -4512,6 +4513,17 @@ class Handler(BaseHTTPRequestHandler):
                 set_cl_flash("warn", "Generate CL failed — missing job_id.")
             else:
                 cmd = ["node", str(SCRIPTS / "generate_cl.js"), "--job-id", job_id]
+                # Pass --country from the Python SSOT (config.derive_country) so
+                # the locked visa paragraph is applied. Don't rely on
+                # generate_cl.js's own JS location derivation — it doesn't know
+                # Canadian cities/provinces ("Toronto, Ontario"). Mirrors
+                # run.generate_cover_letters: US gets no paragraph (citizen),
+                # OTHER falls back to CA (operator's default market).
+                _j = next((j for j in load_pipeline() if j.get("job_id") == job_id), None)
+                if _j:
+                    _ctry = derive_country(_j.get("location", ""))
+                    if _ctry != "US":
+                        cmd += ["--country", "CA" if _ctry == "OTHER" else _ctry]
                 try:
                     result = subprocess.run(
                         cmd, cwd=ROOT,

@@ -14,6 +14,7 @@
 
 const fs   = require("fs");
 const path = require("path");
+const { execFileSync } = require("child_process");
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
 
@@ -327,14 +328,24 @@ async function main() {
   }
 
   // ── Derive country from location ─────────────────────────────────────────
-  // Only countries with a work-authorization paragraph are derived here. US is
-  // deliberately omitted (US citizen → no paragraph), so a US-derived job
-  // resolves to null and the visa section is cleanly omitted.
+  // Single source of truth: the canonical path is the --country flag, passed by
+  // run.py and serve.py from config.derive_country. When it's absent (direct
+  // `node generate_cl.js` calls), delegate to the SAME Python derivation via
+  // scripts/geography.py rather than re-deriving in JS — that parallel copy is
+  // what kept drifting (California, Galway, Toronto...). geography.py is
+  // dependency-free (no API key). CA/IE get a visa paragraph; US/OTHER get none.
   let country = countryArg || null;
   if (!country) {
-    const loc = (job.location || "").toLowerCase();
-    if (loc.includes("ireland") || loc.includes(" ie")) country = "IE";
-    else if (loc.includes("canada") || loc.includes(" ca")) country = "CA";
+    try {
+      const out = execFileSync(
+        "python", [path.join(__dirname, "geography.py"), job.location || ""],
+        { encoding: "utf-8" }
+      ).trim();
+      country = (out === "CA" || out === "IE") ? out : null;
+    } catch (e) {
+      console.log(`  [warn] country derivation failed (${e.message}); no visa paragraph applied`);
+      country = null;
+    }
   }
 
   console.log(`\nGenerating cover letter for: ${job.company_name} — ${job.title}`);

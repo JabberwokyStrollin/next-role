@@ -70,9 +70,9 @@ from one of these.
 | Stack keyword scores + stack max + pre-filter title/location lists | `profile/stack_keywords.yaml` | loaded once by `_load_stack_keywords()` and `load_crawl_config()` |
 | Claude's native output ranges (seniority 0-25, domain 0-20) | `profile/scoring_rubric.md` | mirrored in `COMPONENTS[k].native_max`; update both together |
 | Research-queue minimum score | `scripts/config.py:RESEARCH_QUEUE_MIN_SCORE` | `from config import RESEARCH_QUEUE_MIN_SCORE` |
-| Active target geographies (the US toggle) | `scripts/config.py:TARGET_COUNTRIES` | `from config import TARGET_COUNTRIES` |
+| Active target geographies (the US toggle) | `scripts/geography.py:TARGET_COUNTRIES` (re-exported by config) | `from config import TARGET_COUNTRIES` |
 | US-role sponsorship floor | `scripts/config.py:US_SPONSORSHIP_SCORE` | `from config import US_SPONSORSHIP_SCORE` |
-| Free-text location → country code | `scripts/config.py:derive_country()` | `from config import derive_country` |
+| Free-text location → country code | `scripts/geography.py:derive_country()` (re-exported by config) | `from config import derive_country` |
 
 ### Rules
 
@@ -134,12 +134,23 @@ from one of these.
 
 ### Geography / US target toggle
 
+**Geography SSOT lives in `scripts/geography.py`** — a dependency-free module (no
+API key, no yaml) that holds `derive_country`, `location_passes`,
+`is_remote_role`, `names_foreign_location`, `TARGET_COUNTRIES`,
+`REMOTE_ONLY_SOURCES`, and all the location token lists. `config.py`
+**re-exports** them, so `from config import derive_country` etc. keeps working
+everywhere. The module is dependency-free for one reason: the Node cover-letter
+generator can't import Python, so it calls `python scripts/geography.py
+"<location>"` (prints `CA`/`IE`/`US`/`OTHER`) instead of carrying a parallel JS
+copy — that copy is what kept drifting (California, Galway, Toronto). **There is
+exactly one country derivation; never reintroduce a second.**
+
 The operator needs visa sponsorship for **CA / IE** but is a **US citizen**, so
 US roles need none — they're a reluctant **remote-only stop-gap**. The whole
-feature hangs off `TARGET_COUNTRIES` (currently `frozenset({"CA","IE","US"})`;
+feature hangs off `geography.TARGET_COUNTRIES` (currently `frozenset({"CA","IE","US"})`;
 remove `"US"` to disable — when absent the US branches never fire and CA/IE
 behavior is byte-identical). Country is **derived on the fly** from `location`
-via `config.derive_country` (→ `CA`/`IE`/`US`/`OTHER`) —
+via `derive_country` (→ `CA`/`IE`/`US`/`OTHER`) —
 no stored field. `derive_country` matches IE/CA before US so a combined
 "Remote, Canada/US" posting resolves to the sponsorship-bearing country, and
 never uses a bare `"us"` substring (would match "houston"). Region codes (CA

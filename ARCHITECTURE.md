@@ -21,6 +21,7 @@ Two cross-cutting rules govern most of the code and are referenced throughout:
 **Foundational**
 
 - [`scripts/config.py`](#scriptsconfigpy) — shared paths, constants, SSOTs, mechanical scoring
+- [`scripts/geography.py`](#scriptsgeographypy) — location → country SSOT + geography gate (dependency-free; re-exported by config, callable by JS)
 
 **Pipeline (ingest → score → research)**
 
@@ -99,14 +100,8 @@ file.
 | `COMPOSITE_MAX` | `int` | Sum of all `COMPONENTS[k].weight` — the full composite ceiling (130). |
 | `PRE_RESEARCH_MAX` | `int` | Sum of all `COMPONENTS[k].pre_research_weight` — the pre-research composite ceiling (100). |
 | `RESEARCH_QUEUE_MIN_SCORE` | `int` | Pre-research-score gate (45) for the research queue — jobs below this don't get research budget. |
-| `TARGET_COUNTRIES` | `frozenset[str]` | **SSOT** for active target geographies (currently `{"CA","IE","US"}`; remove `"US"` to disable US remote-only roles). Read by `composite_score` (US sponsorship floor) and `location_passes` (US gate). |
 | `US_SPONSORSHIP_SCORE` | `int` | Sponsorship floor (native 0-15, default 3) substituted for the company score on US-derived roles in `composite_score`. Thumb-on-scale so CA/IE generally outrank US; set to 0 for "zero added". Only consulted when `"US" in TARGET_COUNTRIES`. |
-| `_IE_LOCATION_TOKENS` / `_CA_LOCATION_TOKENS` / `_US_LOCATION_TOKENS` | `tuple[str, ...]` | Space-padded location substrings for `derive_country`. IE/CA tested before US; no bare `"us"` token. Canada is **not** detected by the bare `"CA"` code (collides with California) — it relies on `"canada"` + Canadian city names. |
-| `_CA_PROVINCE_CODES` / `_US_STATE_CODES` | `frozenset[str]` | Canadian province / US state two-letter codes, matched only in an anchored "City, XX" form by `_has_region_code`. CA provinces are checked (before US) as part of Canada detection so "London, ON" → CA. US states omit `in`/`de`/`co` (India/Germany/Colombia country-code collisions). |
-| `REMOTE_ONLY_SOURCES` | `frozenset[str]` | Boards where every listing is remote (`remoteok`, `remotive`) — a region-only location ("USA") from these still means remote. Read by `is_remote_role`. |
-| `_REMOTE_LOCATION_TOKENS` | `tuple[str, ...]` | Location substrings that denote remote (`remote`, `anywhere`, `worldwide`, `distributed`). Consumed by `is_remote_role`. |
-| `_FLEXIBLE_LOCATION_TOKENS` | `tuple[str, ...]` | Location-flexible tokens (`worldwide`, `anywhere`, `global`, `americas`, `north america`, `namer`) — an OTHER role carrying one is kept. Checked before the foreign denylist. Consumed by `names_foreign_location`. |
-| `_FOREIGN_LOCATION_TOKENS` | `tuple[str, ...]` | Non-target country/region tokens (UK, India, EU/EMEA, Germany, LATAM, APAC, …). An OTHER role pinned to one is rejected (candidate must be based there). Operator-editable. Consumed by `names_foreign_location`. |
+| Geography constants (`TARGET_COUNTRIES`, `REMOTE_ONLY_SOURCES`, the location token lists, region codes) | — | Defined in [`scripts/geography.py`](#scriptsgeographypy); re-exported here. |
 | `VELOCITY_TIERS` | `list[(int, int)]` | `(max_days_since_posted, score)`; first match wins; default 0. |
 | `FRESHNESS_TIERS` | `list[(int, int)]` | `(max_age_days, bonus)`; bonus stacks on top of velocity. |
 | `STALENESS_TIERS` | `dict[str, (int, int)]` | Inclusive day-range per tier label (`fresh` / `soft_stale` / `hard_stale`). |
@@ -278,58 +273,12 @@ explicit negation token near the word "sponsor". Caller (`ingest.py`) owns
 the discard decision. **Callers skip this for US-derived roles** (the operator
 is a US citizen) — see `ingest.ingest_job` and `scan_no_sponsorship.py`.
 
-#### `derive_country(location: str) -> str`
-SSOT mapping a free-text location to `"CA" | "IE" | "US" | "OTHER"`. Matches
-against the lowercased location padded with a space on each side, using
-`_IE_LOCATION_TOKENS` / `_CA_LOCATION_TOKENS` / `_US_LOCATION_TOKENS` plus the
-anchored region-code check `_has_region_code` (CA provinces, then US states).
-IE/CA are tested before US so a combined "Remote, Canada/US" posting resolves to
-the sponsorship-bearing country; no bare `"us"` substring (it would match
-"houston"). Canada is matched by name / Canadian city / **province code** ("London,
-ON" → CA), so the bare `"CA"` code resolves to **California (US)**, not Canada
-("San Francisco, CA" → US while "Toronto, CA" → CA). Imported by `ingest.py`,
-`update_status.py`, `scan_no_sponsorship.py`, and used inside `composite_score`.
-(`generate_cl.js` keeps a parallel JS derivation — it can't import Python; it
-doesn't do region-code detection, but US gets no visa paragraph anyway.)
-
-#### `_has_region_code(padded_loc: str, codes: frozenset[str]) -> bool`
-Helper for `derive_country`: `True` if the space-padded lowercased location
-contains one of `codes` in an anchored "City, XX" / "City, XX," / "City, XX)" /
-"(XX)" form. The leading comma/paren + trailing boundary stop full country names
-("…, india") and embedded letters from matching. Called with `_CA_PROVINCE_CODES`
-then `_US_STATE_CODES`.
-
-#### `is_remote_role(location, source=None) -> bool`
-SSOT remote check: `True` if the location text contains a remote token
-(`_REMOTE_LOCATION_TOKENS`) **or** the listing came from a remote-only board
-(`source in REMOTE_ONLY_SOURCES`), where a region-only location like "USA"
-still denotes a remote role. Used by `location_passes` (US gate) and
-`ingest.ingest_job` (the stored `job_type`).
-
-#### `names_foreign_location(location: str) -> bool`
-`True` if `location` is pinned to a non-target country/region the operator can't
-work in (`_FOREIGN_LOCATION_TOKENS`) — but `_FLEXIBLE_LOCATION_TOKENS`
-(worldwide / americas / …) win first, so a multi-region role that includes the
-Americas is kept. Only meaningful for OTHER-classified locations (CA/IE/US are
-resolved by `derive_country` first). Consumed by `location_passes`.
-
-#### `location_passes(location, enabled_countries=None, source=None) -> bool`
-Pure-string, pre-filter-safe geography gate (no Claude, no composite — safe to
-call from `crawl.pre_filter` / `prefilter_staged.pre_filter_relaxed`). Removes
-rows the operator can't take:
-- **US** — kept only if US is in `enabled_countries` (defaults to the live
-  `TARGET_COUNTRIES`) AND `is_remote_role(location, source)` (region-only US
-  counts as remote from a remote-only board; ATS US needs an explicit marker).
-- **CA / IE** — always kept (sponsorship-target markets, incl. province codes
-  like "London, ON").
-- **OTHER** — kept only if `not names_foreign_location(location)`, so
-  "Worldwide" / "Americas" / bare "Remote" pass but "Remote - India" /
-  "European Union (Remote)" are rejected.
-
-A **subtractive** gate layered after the YAML `location_allow` allowlist — it
-only removes rows the allowlist would admit (via bare `remote`), never adds one
-it rejected. Also called by `ingest.ingest_job` (with `source`) so manual pastes
-are gated.
+#### Geography functions (re-exported from `geography.py`)
+`derive_country`, `is_remote_role`, `names_foreign_location`, `location_passes`,
+plus `TARGET_COUNTRIES` / `REMOTE_ONLY_SOURCES`, are **defined in
+`scripts/geography.py`** (dependency-free) and re-exported here so
+`from config import derive_country` etc. work unchanged. See the
+[`scripts/geography.py`](#scriptsgeographypy) section for their docs.
 
 #### `is_employee_surveillance_flag(flag: dict) -> bool`
 True iff an ethics flag (as produced by `research_company`) is a confirmed
@@ -476,6 +425,65 @@ Apply-time exclusion predicate parallel to `company_block_reason`: returns a
 reason when the gov-screen result is `fail` (tier_a / defense entanglement),
 else `None`. Hides the role from the apply queue + cover-letter generation
 without touching ingest.
+
+---
+
+## `scripts/geography.py`
+
+**Role.** Single source of truth for location → country derivation and the
+geography pre-filter gate. **Dependency-free** (stdlib only — no API key, no
+yaml, does NOT import `config`) for two reasons: (1) `config.py` re-exports
+everything here so every Python consumer shares one implementation, and (2) the
+Node cover-letter generator can't import Python, so it calls this module as a
+subprocess instead of carrying a parallel JS copy (which kept drifting —
+California, Galway, Toronto). `TARGET_COUNTRIES` lives here (a geography
+concern); `US_SPONSORSHIP_SCORE` stays in `config.py` (a scoring concern).
+
+### Module-level constants
+
+| Name | Purpose |
+|---|---|
+| `TARGET_COUNTRIES` | **SSOT** for active target geographies (currently `{"CA","IE","US"}`; remove `"US"` to disable US remote-only roles). Read by `config.composite_score` and `location_passes`. |
+| `_IE_/_CA_/_US_LOCATION_TOKENS` | Space-padded location substrings for `derive_country`. IE/CA before US; no bare `"us"`. Canada isn't detected by bare `"CA"` (collides with California). |
+| `_CA_PROVINCE_CODES` / `_US_STATE_CODES` | Two-letter codes matched only in an anchored "City, XX" form by `_has_region_code`. US states omit `in`/`de`/`co` (country-code collisions). |
+| `REMOTE_ONLY_SOURCES` | Boards where every listing is remote (`remoteok`, `remotive`). |
+| `_REMOTE_LOCATION_TOKENS` | Substrings denoting remote (`remote`, `anywhere`, `worldwide`, `distributed`). |
+| `_FLEXIBLE_LOCATION_TOKENS` | `worldwide`/`anywhere`/`global`/`americas`/… — an OTHER role with one passes; checked before the denylist. |
+| `_FOREIGN_LOCATION_TOKENS` | Non-target regions (UK, India, EU/EMEA, LATAM, APAC, …); an OTHER role pinned to one is rejected. Operator-editable. |
+
+### Functions
+
+#### `derive_country(location: str) -> str`
+Maps a free-text location to `"CA" | "IE" | "US" | "OTHER"`. Padded-substring
+match; IE/CA before US so a combined "Remote, Canada/US" resolves to the
+sponsorship-bearing country. Canada is matched by name / Canadian city /
+**province code** ("London, ON" → CA), so bare `"CA"` resolves to **California
+(US)** ("San Francisco, CA" → US, "Toronto, CA" → CA).
+
+#### `_has_region_code(padded_loc, codes) -> bool`
+`True` if the padded lowercased location holds one of `codes` in an anchored
+"City, XX" / "(XX)" form (comma/paren + trailing boundary stop full country
+names and embedded letters).
+
+#### `is_remote_role(location, source=None) -> bool`
+`True` if the location text says remote (`_REMOTE_LOCATION_TOKENS`) **or** the
+listing came from a `REMOTE_ONLY_SOURCES` board. Used by `location_passes` and
+`ingest.ingest_job` (the stored `job_type`).
+
+#### `names_foreign_location(location) -> bool`
+`True` if pinned to a non-target region (`_FOREIGN_LOCATION_TOKENS`), with
+`_FLEXIBLE_LOCATION_TOKENS` winning first. Only meaningful for OTHER locations.
+
+#### `location_passes(location, enabled_countries=None, source=None) -> bool`
+Pre-filter-safe subtractive gate (no Claude/composite). **US** kept only if
+enabled AND remote; **CA/IE** always kept; **OTHER** kept unless
+`names_foreign_location`. Layered after the YAML `location_allow` allowlist;
+only ever subtracts. Called by `crawl.pre_filter`,
+`prefilter_staged.pre_filter_relaxed`, and `ingest.ingest_job`.
+
+#### CLI (`python scripts/geography.py "<location>"`)
+Prints `derive_country(argv[1])`. No API key required — used by
+`generate_cl.js` to get the country without re-implementing derivation in JS.
 
 ---
 
@@ -1855,7 +1863,7 @@ Writes the file via `Packer.toBuffer` + `fs.writeFileSync`.
 #### `main()` — async
 - Parses `--job-id UUID` and optional `--country CA|IE`.
 - Loads the job; exits 1 if not found.
-- Derives the country from `--country` or the job's location (Ireland / Canada heuristic only — US is deliberately not derived, so US jobs get no visa paragraph).
+- Derives the country from `--country` (passed by `run.py`/`serve.py` from the Python SSOT) or, when absent, by shelling out to `python scripts/geography.py "<location>"` — the same `config.derive_country` logic, so no parallel JS derivation. Maps `CA`/`IE` → the matching visa paragraph; `US`/`OTHER` → none.
 - Loads + reads resume.md, cover_letter_rules.md; exits 1 if either is missing.
 - Resolves the country-specific visa paragraph (replaces `[Company Name]` placeholders); logs whether one was applied.
 - Calls Claude with the build prompts.
