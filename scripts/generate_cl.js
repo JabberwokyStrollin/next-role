@@ -137,7 +137,14 @@ function parseVisaParagraphs(rulesText) {
     /##\s+Locked Visa\s*\/\s*Work Authorization Paragraphs\s*\n([\s\S]*?)(?=\n##\s|$)/i
   );
   if (!sectionMatch) return {};
-  const body = sectionMatch[1];
+  // Strip HTML comments and standalone Markdown horizontal rules before parsing.
+  // The LAST country subsection has no following "### " to bound its capture, so
+  // it otherwise runs to the end of the section and swallows any trailing
+  // "<!-- ... -->" note or "---" rule that separates it from the next "## "
+  // section. That leaked into Ireland letters (Ireland is the last subsection).
+  const body = sectionMatch[1]
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/^[ \t]*-{3,}[ \t]*$/gm, "");
   const entries = {};
 
   const subRegex = /###\s+([^\n]+)\n([\s\S]*?)(?=\n###\s|$)/g;
