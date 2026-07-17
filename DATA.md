@@ -778,7 +778,7 @@ either ingests them (which removes them) or discards them.
 | `fetched_at` | ISO datetime | client clock | When this row was staged. |
 | `jd_text` | string | optional | Populated by per-row Fetch JD; `""` or missing otherwise. |
 | `_prefilter_pass` | bool | optional | Set by `prefilter_staged.py`. |
-| `_prefilter_reason` | string | optional | Set by `prefilter_staged.py`. Stable prefixes (`company crawl-covered …`, `title seniority miss`, `title excluded by …`, `location miss`, `location US-gated …`, `stack score N < M`, `title+location ok (no JD yet)`, `stack N`). `company crawl-covered` means the company already has a crawlable ATS board (`prefilter_staged.crawl_covered_companies`), so the ATS crawl handles it and the LinkedIn row is suppressed. |
+| `_prefilter_reason` | string | optional | Set by `prefilter_staged.py`. Stable prefixes (`title seniority miss`, `title excluded by …`, `location miss`, `location US-gated …`, `stack score N < M`, `title+location ok (no JD yet)`, `stack N`). Note: rows for crawl-covered companies (`prefilter_staged.crawl_covered_companies`) are **deleted** by the pre-filter, not annotated — so `company crawl-covered` is no longer a stored reason value; those rows simply disappear from the file. |
 
 ### Example
 
