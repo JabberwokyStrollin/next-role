@@ -452,6 +452,17 @@ def remove_staged(staging_id: str) -> dict | None:
     return target
 
 
+STAGED_VIEWS = ("default", "all", "failing")
+
+
+def staged_view_param(params: dict) -> str:
+    """Extract + validate the staged-list view from parsed POST params.
+    Falls back to 'default' for missing/unknown values so it's always safe to
+    echo into a redirect query string."""
+    v = (params.get("view", ["default"])[0] or "default").strip()
+    return v if v in STAGED_VIEWS else "default"
+
+
 def set_linkedin_flash(kind: str, text: str) -> None:
     """kind: 'ok' | 'warn' | 'info'."""
     global _linkedin_flash
@@ -599,8 +610,10 @@ def run_linkedin_fetch() -> tuple[bool, int, str]:
     return result.returncode == 0, n, output
 
 
-def run_linkedin_prefilter() -> tuple[bool, int, int, str]:
-    """Run scripts/prefilter_staged.py. Returns (ok, n_passed, n_failed, output)."""
+def run_linkedin_prefilter() -> tuple[bool, int, int, int, str]:
+    """Run scripts/prefilter_staged.py. Returns (ok, n_passed, n_failed, n_deleted, output).
+
+    ``n_deleted`` counts crawl-covered rows the pre-filter removed outright."""
     cmd = [sys.executable, "-u", str(SCRIPTS / "prefilter_staged.py")]
     try:
         result = subprocess.run(
@@ -610,19 +623,23 @@ def run_linkedin_prefilter() -> tuple[bool, int, int, str]:
             timeout=60,
         )
     except subprocess.TimeoutExpired:
-        return False, 0, 0, "Pre-filter timed out after 60s."
+        return False, 0, 0, 0, "Pre-filter timed out after 60s."
     except Exception as e:
-        return False, 0, 0, f"Failed to launch pre-filter: {e}"
+        return False, 0, 0, 0, f"Failed to launch pre-filter: {e}"
 
     output = result.stdout or ""
-    passed, failed = 0, 0
+    passed, failed, deleted = 0, 0, 0
     for line in reversed(output.splitlines()):
-        m = re.match(r"PREFILTER:\s+passed=(\d+)\s+failed=(\d+)", line.strip())
+        m = re.match(
+            r"PREFILTER:\s+passed=(\d+)\s+failed=(\d+)(?:\s+deleted=(\d+))?",
+            line.strip(),
+        )
         if m:
-            passed = int(m.group(1))
-            failed = int(m.group(2))
+            passed  = int(m.group(1))
+            failed  = int(m.group(2))
+            deleted = int(m.group(3) or 0)
             break
-    return result.returncode == 0, passed, failed, output
+    return result.returncode == 0, passed, failed, deleted, output
 
 
 def discard_failing_staged() -> int:
@@ -2687,13 +2704,16 @@ def render_linkedin_body(view: str = "default") -> str:
         )
 
     fetch_disabled = ' disabled title="Set IMAP env vars first"' if missing else ""
+    view_field = f'<input type="hidden" name="view" value="{esc(view)}">'
     parts.append(
         '<div class="linkedin-actions">'
         '<form method="POST" action="/today/linkedin/fetch" style="display:inline">'
+        f'{view_field}'
         f'<button class="btn btn-primary" style="margin-top:0"{fetch_disabled}>'
         'Fetch LinkedIn alerts</button>'
         '</form>'
         '<form method="POST" action="/today/linkedin/prefilter" style="display:inline">'
+        f'{view_field}'
         '<button class="btn btn-secondary" style="margin-top:0">Run pre-filter</button>'
         '</form>'
         '</div>'
@@ -2742,6 +2762,7 @@ def render_linkedin_body(view: str = "default") -> str:
             '<form method="POST" action="/today/linkedin/discard_failing" '
             f'onsubmit="return confirm(\'Discard {n_fail} failing row(s)?\')" '
             'style="display:inline;margin-left:auto">'
+            f'<input type="hidden" name="view" value="{esc(view)}">'
             f'<button class="btn btn-secondary" style="margin-top:0;font-size:11px;padding:4px 10px">'
             f'Discard {n_fail} failing</button>'
             '</form>'
@@ -2774,7 +2795,7 @@ def render_linkedin_body(view: str = "default") -> str:
 
     parts.append('<div class="staged-list">')
     for row in capped:
-        parts.append(render_staged_row(row))
+        parts.append(render_staged_row(row, view))
     parts.append('</div>')
 
     if overage > 0:
@@ -2788,6 +2809,29 @@ def render_linkedin_body(view: str = "default") -> str:
     parts.append("""
 <script>
 (function () {
+  var SCROLL_KEY = 'li_scroll';
+
+  // Restore scroll position after a LinkedIn action reloads the page, so acting
+  // on a row (Ingest / Discard / Fetch JD / bulk discard) keeps you where you
+  // were instead of jumping to the top. Runs even when the acted-on row was
+  // removed (the browser clamps to the new document height). The redirect also
+  // preserves the active view (Passing/Failing/All) server-side, so the list
+  // content matches the saved position.
+  try {
+    var y = sessionStorage.getItem(SCROLL_KEY);
+    if (y !== null) {
+      sessionStorage.removeItem(SCROLL_KEY);
+      window.scrollTo(0, parseInt(y, 10) || 0);
+    }
+  } catch (e) {}
+
+  // Save scroll position on submit of any LinkedIn action form.
+  document.querySelectorAll('form[action^="/today/linkedin/"]').forEach(function (f) {
+    f.addEventListener('submit', function () {
+      try { sessionStorage.setItem(SCROLL_KEY, String(window.scrollY)); } catch (e) {}
+    });
+  });
+
   // 3s submit-debounce on staged-row forms — guards against double-clicks on
   // Fetch JD / Ingest / Discard while the server is still processing the first.
   document.querySelectorAll('.staged-form').forEach(function (f) {
@@ -2804,7 +2848,7 @@ def render_linkedin_body(view: str = "default") -> str:
     return "\n".join(parts)
 
 
-def render_staged_row(row: dict) -> str:
+def render_staged_row(row: dict, view: str = "default") -> str:
     from html import escape as esc
 
     sid       = esc(row.get("staging_id", ""))
@@ -2847,6 +2891,7 @@ def render_staged_row(row: dict) -> str:
     <div class="staged-row" id="row-{sid}">
       <form method="POST" action="/today/linkedin/ingest" class="staged-form">
         <input type="hidden" name="staging_id" value="{sid}">
+        <input type="hidden" name="view" value="{esc(view)}">
         <div class="staged-row-head">{pf_badge}</div>
         <div class="staged-grid">
           <div>
@@ -4237,10 +4282,16 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_html("<h1>Not found</h1>", 404)
 
-    def redirect_today(self, open_section: str | None = None, fragment: str | None = None):
+    def redirect_today(self, open_section: str | None = None, fragment: str | None = None,
+                       view: str | None = None):
         location = "/today"
+        params = []
         if open_section:
-            location += f"?open={open_section}"
+            params.append(f"open={open_section}")
+        if view and view != "default":
+            params.append(f"view={view}")
+        if params:
+            location += "?" + "&".join(params)
         if fragment:
             location += f"#{fragment}"
         self.send_response(303)
@@ -4397,8 +4448,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/today/linkedin/fetch":
             length = int(self.headers.get("Content-Length", 0))
-            if length:
-                self.rfile.read(length)
+            raw    = self.rfile.read(length).decode("utf-8") if length else ""
+            view   = staged_view_param(parse_qs(raw))
             ok, n, output = run_linkedin_fetch()
             if ok:
                 set_linkedin_flash("ok", f"Fetched {n} new job(s).")
@@ -4406,7 +4457,7 @@ class Handler(BaseHTTPRequestHandler):
                 tail_lines = [l for l in output.splitlines() if l.strip()][-3:]
                 tail = "; ".join(tail_lines) or "see server log"
                 set_linkedin_flash("warn", f"Fetch failed — {tail}")
-            self.redirect_today("linkedin_ingest")
+            self.redirect_today("linkedin_ingest", view=view)
             return
 
         if path == "/today/linkedin/ingest":
@@ -4414,6 +4465,7 @@ class Handler(BaseHTTPRequestHandler):
             raw        = self.rfile.read(length).decode("utf-8")
             params     = parse_qs(raw)
             def g(k):  return params.get(k, [""])[0].strip()
+            view       = staged_view_param(params)
             staging_id = g("staging_id")
             company    = g("company")
             title      = g("title")
@@ -4442,56 +4494,58 @@ class Handler(BaseHTTPRequestHandler):
                     tail = "; ".join(tail_lines) or "see server log"
                     set_linkedin_flash("warn", f"Ingest failed — {tail}")
 
-            self.redirect_today("linkedin_ingest")
+            self.redirect_today("linkedin_ingest", view=view)
             return
 
         if path == "/today/linkedin/prefilter":
             length = int(self.headers.get("Content-Length", 0))
-            if length:
-                self.rfile.read(length)
-            ok, n_pass, n_fail, output = run_linkedin_prefilter()
+            raw    = self.rfile.read(length).decode("utf-8") if length else ""
+            view   = staged_view_param(parse_qs(raw))
+            ok, n_pass, n_fail, n_deleted, output = run_linkedin_prefilter()
             if ok:
-                set_linkedin_flash(
-                    "ok",
-                    f"Pre-filter applied — {n_pass} passing, {n_fail} failing.",
-                )
+                msg = f"Pre-filter applied — {n_pass} passing, {n_fail} failing."
+                if n_deleted:
+                    msg += f" {n_deleted} crawl-covered row(s) deleted."
+                set_linkedin_flash("ok", msg)
             else:
                 tail_lines = [l for l in output.splitlines() if l.strip()][-3:]
                 tail = "; ".join(tail_lines) or "see server log"
                 set_linkedin_flash("warn", f"Pre-filter failed — {tail}")
-            self.redirect_today("linkedin_ingest")
+            self.redirect_today("linkedin_ingest", view=view)
             return
 
         if path == "/today/linkedin/discard_failing":
             length = int(self.headers.get("Content-Length", 0))
-            if length:
-                self.rfile.read(length)
+            raw    = self.rfile.read(length).decode("utf-8") if length else ""
+            view   = staged_view_param(parse_qs(raw))
             n = discard_failing_staged()
             set_linkedin_flash("info", f"Discarded {n} failing row(s).")
-            self.redirect_today("linkedin_ingest")
+            self.redirect_today("linkedin_ingest", view=view)
             return
 
         if path == "/today/linkedin/fetchjd":
             length     = int(self.headers.get("Content-Length", 0))
             raw        = self.rfile.read(length).decode("utf-8")
             params     = parse_qs(raw)
+            view       = staged_view_param(params)
             staging_id = params.get("staging_id", [""])[0].strip()
 
             if not staging_id:
                 set_linkedin_flash("warn", "Fetch JD failed — missing staging_id.")
-                self.redirect_today("linkedin_ingest")
+                self.redirect_today("linkedin_ingest", view=view)
                 return
 
             ok, msg = fetch_jd_for_staged(staging_id)
             kind    = "ok" if ok else "warn"
             set_linkedin_flash(kind, f"Fetch JD: {msg}")
-            self.redirect_today("linkedin_ingest", fragment=f"row-{staging_id}")
+            self.redirect_today("linkedin_ingest", fragment=f"row-{staging_id}", view=view)
             return
 
         if path == "/today/linkedin/discard":
             length     = int(self.headers.get("Content-Length", 0))
             raw        = self.rfile.read(length).decode("utf-8")
             params     = parse_qs(raw)
+            view       = staged_view_param(params)
             staging_id = params.get("staging_id", [""])[0].strip()
             if staging_id:
                 target = remove_staged(staging_id)
@@ -4500,7 +4554,7 @@ class Handler(BaseHTTPRequestHandler):
                         "info",
                         f"Discarded: {target.get('company','?')} — {target.get('title','?')}",
                     )
-            self.redirect_today("linkedin_ingest")
+            self.redirect_today("linkedin_ingest", view=view)
             return
 
         if path == "/today/cl/generate":

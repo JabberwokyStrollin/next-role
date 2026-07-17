@@ -8,6 +8,11 @@ crawl.py's pre_filter logic, mutating data/email_staged.json in place to add:
     _prefilter_pass:   bool
     _prefilter_reason: str
 
+Rows for crawl-covered companies (an ATS board already in target_boards.json)
+are DELETED from the staged file rather than marked failed — the ATS crawl
+covers them comprehensively, so keeping them here would only clutter the
+failing queue.
+
 The stack-score component is skipped for rows that don't have a JD body yet
 (typical for LinkedIn URLs, which auth-wall) — so the filter degrades to
 title + location matching, which still narrows hundreds of rows down quickly.
@@ -18,7 +23,7 @@ Usage:
     python scripts/prefilter_staged.py
 
 Output (last line of stdout, machine-readable):
-    PREFILTER: passed=<n_pass> failed=<n_fail>
+    PREFILTER: passed=<n_pass> failed=<n_fail> deleted=<n_crawl_covered>
 """
 
 import json
@@ -42,11 +47,12 @@ def _normalize_company(name: str) -> str:
 def crawl_covered_companies() -> set[str]:
     """Normalized names of companies that already have a *crawlable* ATS board
     (ats in SUPPORTED_ATSES) in target_boards.json. LinkedIn staged rows for
-    these companies are suppressed — the ATS crawl already covers them
-    comprehensively (full-JD scored), so re-reviewing them here is duplicate
-    work. Conservative exact-name match (misses fuzzy variants rather than
-    over-suppressing). Workday/SmartRecruiters boards don't count as covered
-    until they're in SUPPORTED_ATSES (i.e. once a fetcher exists)."""
+    these companies are DELETED (not just marked failed) by ``main`` — the ATS
+    crawl already covers them comprehensively (full-JD scored), so keeping them
+    here is duplicate work that clutters the failing queue. Conservative
+    exact-name match (misses fuzzy variants rather than over-suppressing).
+    Workday/SmartRecruiters boards don't count as covered until they're in
+    SUPPORTED_ATSES (i.e. once a fetcher exists)."""
     from config import TARGET_BOARDS_PATH, load_json  # defer — keep import light
     boards = load_json(TARGET_BOARDS_PATH)
     return {
@@ -119,17 +125,16 @@ def main() -> None:
     covered = crawl_covered_companies()
     passed  = 0
     failed  = 0
-    covered_n = 0
+    deleted = 0
+    kept    = []
     for row in rows:
         company  = row.get("company", "")
         # Coverage check first: if the ATS crawl already pulls this company's
-        # board, suppress the LinkedIn row (pass=False) so it drops out of the
-        # review/bulk-discard queue. The crawl handles it comprehensively.
+        # board, DELETE the LinkedIn row entirely (don't append to ``kept``) so
+        # it never enters the review/failing queue. The crawl handles it
+        # comprehensively; a duplicate row here is pure clutter.
         if _normalize_company(company) in covered:
-            row["_prefilter_pass"]   = False
-            row["_prefilter_reason"] = f"company crawl-covered ({company[:30]})"
-            failed    += 1
-            covered_n += 1
+            deleted += 1
             continue
 
         title    = row.get("title",    "")
@@ -142,14 +147,15 @@ def main() -> None:
             passed += 1
         else:
             failed += 1
+        kept.append(row)
 
     STAGED_PATH.write_text(
-        json.dumps(rows, indent=2, ensure_ascii=False),
+        json.dumps(kept, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
     print(f"Pre-filter applied to {len(rows)} rows: passed={passed} failed={failed} "
-          f"(of failed, {covered_n} suppressed as crawl-covered)")
-    print(f"PREFILTER: passed={passed} failed={failed}")
+          f"({deleted} crawl-covered row(s) deleted)")
+    print(f"PREFILTER: passed={passed} failed={failed} deleted={deleted}")
 
 
 if __name__ == "__main__":

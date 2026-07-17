@@ -496,9 +496,11 @@ back to the job record. Also runs standalone as a CLI for re-scoring a JD
 file, an existing pipeline row, or stdin — useful when the rubric changes.
 
 Calls Sonnet (`CLAUDE_MODEL`) with `profile/scoring_rubric.md` as the system
-prompt and the JD as the user message; expects a JSON response with three
-required keys; clamps the integers to the rubric ranges (0-25 seniority,
-0-20 domain); then applies the title-based seniority cap mechanically (see
+prompt and the JD as the user message; requires only the two numeric scores
+in the JSON response (`score_notes` defaults to `""` when omitted — it's
+display-only and must not break ingest); clamps the integers to the rubric
+ranges (0-25 seniority, 0-20 domain); then applies the title-based seniority
+cap mechanically (see
 `apply_title_cap` in `config.py`) because the model has been observed
 reclassifying Principal titles based on JD scope language.
 
@@ -524,7 +526,7 @@ title cap.
   - `jd_text` — raw JD text. Sanitized for surrogate chars before sending.
   - `title` — optional job title. When provided and the cap reduces the score, the function also records `seniority_raw` (the pre-cap value) and `seniority_cap_title` for audit. Pass `None` to skip the cap (e.g. scoring a JD outside the pipeline).
 - **Returns:** `dict` with `seniority_score: int (0..25)`, `domain_fit_score: int (0..20)`, `score_notes: str`. May also include `seniority_raw: int` and `seniority_cap_title: str` if the cap fired.
-- **Raises:** `ValueError` if Claude's response is not parseable JSON or is missing any of the three required keys. Markdown code fences are stripped before parsing.
+- **Raises:** `ValueError` if Claude's response is not parseable JSON or is missing either required numeric score (`seniority_score` / `domain_fit_score`). `score_notes` and `role_exposure` are optional — missing values default to `""` and `None` respectively. Markdown code fences are stripped before parsing.
 
 #### `update_job_record(job_id: str, scores: dict) -> None`
 Loads the pipeline, finds the row matching `job_id`, writes back
@@ -880,9 +882,11 @@ CLI shim around `crawl()`. Flags: `--dry-run`, `--verbose`, `--source NAME`, `--
 ## `scripts/prefilter_staged.py`
 
 **Role.** Apply a relaxed version of the crawl pre-filter to LinkedIn-staged
-rows in `data/email_staged.json`. Mutates each row in place to add
-`_prefilter_pass: bool` and `_prefilter_reason: str`. The `/today` UI reads
-these to badge rows green/red and to show a "discard all failing" action.
+rows in `data/email_staged.json`. Mutates each surviving row in place to add
+`_prefilter_pass: bool` and `_prefilter_reason: str`; rows for crawl-covered
+companies are **deleted** outright rather than annotated (see `main`). The
+`/today` UI reads these to badge rows green/red and to show a "discard all
+failing" action.
 
 "Relaxed" means: rows that don't have a JD body yet (typical for raw
 LinkedIn URLs that auth-wall) skip the stack-score check rather than
@@ -907,11 +911,11 @@ Lowercase + whitespace-collapse a company name for matching.
 
 #### `crawl_covered_companies() -> set[str]`
 Normalized names of companies that already have a **crawlable** ATS board
-(`ats in crawl.SUPPORTED_ATSES`) in `target_boards.json`. Used to suppress
+(`ats in crawl.SUPPORTED_ATSES`) in `target_boards.json`. Used to **delete**
 LinkedIn staged rows for companies the ATS crawl already covers comprehensively
 (duplicate review work). Conservative exact-name match. Workday/SmartRecruiters
 boards do **not** count as covered until a fetcher exists (i.e. once they're in
-`SUPPORTED_ATSES`), so the suppression automatically tracks crawl capability.
+`SUPPORTED_ATSES`), so the deletion automatically tracks crawl capability.
 
 #### `pre_filter_relaxed(title: str, location: str, jd_text: str, cfg: dict) -> tuple[bool, str]`
 Like `crawl.pre_filter` but skips the stack-score check when `jd_text` is
@@ -925,12 +929,13 @@ Returns `(passes, reason)`.
 #### `main() -> None`
 Loads `email_staged.json`. For each row it first checks
 `crawl_covered_companies()` — if the row's company already has a crawlable
-board, it's marked `_prefilter_pass=False` with reason `company crawl-covered
-(…)` (so it drops into the bulk-discard bucket and stops cluttering review);
-otherwise the row runs through `pre_filter_relaxed`. Writes the mutated list
-back and prints a machine-readable last line `PREFILTER: passed=<n> failed=<n>`
-(failed includes crawl-covered suppressions) that
-`serve.py:run_linkedin_prefilter` parses for its flash message.
+board, the row is **deleted** (dropped from the list written back, not just
+flagged) so it never clutters the failing queue; otherwise the row runs through
+`pre_filter_relaxed` and is kept with `_prefilter_pass` / `_prefilter_reason`
+set. Writes the surviving list back and prints a machine-readable last line
+`PREFILTER: passed=<n> failed=<n> deleted=<n>` (where `deleted` counts the
+crawl-covered rows removed) that `serve.py:run_linkedin_prefilter` parses for
+its flash message.
 
 ---
 
@@ -1228,9 +1233,10 @@ sync with the CLI.
 - `linkedin_env_missing() -> list[str]` — names of unset required env vars; empty list = good.
 - `load_staged_emails() -> list[dict]` / `save_staged_emails(rows)` — `data/email_staged.json` reader/writer.
 - `remove_staged(staging_id) -> dict | None` — drop one row by ID; returns the removed dict.
+- `staged_view_param(params) -> str` — extract + validate the staged-list view (`STAGED_VIEWS` = `default`/`all`/`failing`) from parsed POST params; unknown/missing → `default`. Used to echo the active view back into the post-action redirect so LinkedIn actions don't bounce you to the Passing view.
 - `set_linkedin_flash(kind, text)` / `pop_linkedin_flash() -> dict | None` — one-shot flash message for LinkedIn-section responses (`kind` ∈ `"ok"`/`"warn"`/`"info"`).
 - `run_linkedin_fetch() -> tuple[bool, int, str]` — subprocess `linkedin_fetch.py`; parses `FETCHED: N` from output.
-- `run_linkedin_prefilter() -> tuple[bool, int, int, str]` — subprocess `prefilter_staged.py`; parses `PREFILTER: passed=N failed=N` from output.
+- `run_linkedin_prefilter() -> tuple[bool, int, int, int, str]` — subprocess `prefilter_staged.py`; parses `PREFILTER: passed=N failed=N deleted=N` from output; returns `(ok, passed, failed, deleted, output)`.
 - `discard_failing_staged() -> int` — drop every staged row with `_prefilter_pass=False`; returns count.
 - `fetch_jd_for_staged(staging_id) -> tuple[bool, str]` — lazily imports `linkedin_fetch._fetch_jd_text`, attempts a single JD fetch for the staged row, persists if it succeeds, and returns a user-facing message keyed off the failure reason (`auth_wall`, `expired`, `short`, `http_error`, `exception`).
 
@@ -1271,8 +1277,8 @@ sync with the CLI.
 - `job_detail_page(job_id) -> str` — full per-job view with score breakdown, JD viewer, comp panel, the company-research card, and the gov/defense screen card (`_render_gov_job_block`), pinned high (right under the header for non-interview status, right under the comp card for interview-stage).
 - `resume_page() -> str` — `/resume` view.
 - `render_section_body(sid, view='default') -> str` — dispatches to the per-section body renderer. A single `view` query param is shared across sections; only the open section interprets it (status_updates: `active`/`ghosted`; linkedin: `default`/`all`/`failing`).
-- `render_linkedin_body(view='default') -> str` — LinkedIn-ingest section body; `view` controls passing-only vs. all-rows filter.
-- `render_staged_row(row) -> str` — one staged-row card.
+- `render_linkedin_body(view='default') -> str` — LinkedIn-ingest section body; `view` controls passing-only vs. all-rows filter. Every action form (fetch / pre-filter / bulk-discard / per-row) carries a hidden `view` field so the post-action redirect stays on the active view; the section's inline `<script>` also saves/restores `window.scrollY` via `sessionStorage` so acting on a row keeps the scroll position instead of jumping to the top.
+- `render_staged_row(row, view='default') -> str` — one staged-row card; embeds the hidden `view` field so Ingest/Fetch JD/Discard preserve the active view on redirect.
 - `render_crawl_body() -> str` — crawl-section body with the live status badge.
 - `render_status_updates_body(view='active') -> str` / `render_app_row(app) -> str` — status-updates section + per-app row with status-change buttons. Two sub-tabs: `active` (live applications, excludes ghosted) and `ghosted` (auto-flipped, awaiting the `ghosted_timeout` auto-rejection). `render_app_row` includes the `rejected_interview_failed` button.
 - `render_cover_letters_body() -> str` — top-N apply queue, ranked by `apply_rank_score` (full composite minus the gov-screen `flag` penalty), filtered by `company_block_reason` and `gov_screen_block_reason` (gov/defense `fail` roles hidden). Rows still display the pure composite via `job_score`.
@@ -1292,7 +1298,7 @@ Single HTTP handler class — one method per HTTP verb plus small helpers.
 - `send_html(self, html, status=200)` — set headers + write the body.
 - `send_json(self, payload, status=200)` — same for JSON.
 - `do_GET(self)` — dispatch on `urlparse(self.path).path`. Routes listed above.
-- `redirect_today(self, open_section=None, fragment=None)` — 303 to `/today?open=…#…`.
+- `redirect_today(self, open_section=None, fragment=None, view=None)` — 303 to `/today?open=…&view=…#…` (the `view` param is omitted when `default`/`None`).
 - `redirect_or_today(self, params, open_section=None, fragment=None)` — same-origin `return_to` redirect or fall back to `redirect_today`.
 - `do_POST(self)` — dispatch on path; each route consumes the body, runs the action, sets a flash, and redirects. The `/answer-questions/*` prefix is dispatched first and uses the JSON shell below instead of the redirect pattern.
 - `_read_json_body(self) -> dict` — parse a JSON-encoded request body. Returns `{}` on missing / invalid JSON (the dispatcher then returns `{"ok": false, "error": "..."}`).

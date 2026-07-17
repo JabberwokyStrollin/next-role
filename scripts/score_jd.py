@@ -42,7 +42,11 @@ def score_jd(jd_text: str, title: str | None = None) -> dict:
     """
     Call Claude with the JD text and return the scoring dict.
     Returns: {"seniority_score": int, "domain_fit_score": int, "score_notes": str}
-    Raises: ValueError if response cannot be parsed as valid JSON with required keys.
+    Only the two numeric scores are required; ``score_notes`` defaults to "" and
+    ``role_exposure`` to None when the model omits them (display/advisory fields
+    must not break ingest).
+    Raises: ValueError if the response isn't valid JSON or is missing either
+    required numeric score.
 
     If ``title`` is provided, ``seniority_score`` is mechanically capped by the
     title bucket (Senior/Principal → 15, Distinguished/VP/Junior → 0, Staff/
@@ -77,10 +81,17 @@ def score_jd(jd_text: str, title: str | None = None) -> dict:
     except json.JSONDecodeError as e:
         raise ValueError(f"Claude returned non-JSON response:\n{raw}") from e
 
-    required = {"seniority_score", "domain_fit_score", "score_notes"}
+    # Only the two numeric scores are structurally required — they drive the
+    # composite. A missing one means the model produced an unusable response.
+    required = {"seniority_score", "domain_fit_score"}
     missing = required - result.keys()
     if missing:
         raise ValueError(f"Claude response missing keys: {missing}\nGot: {result}")
+
+    # score_notes is display-only (dashboard / ingest print / stored field) and
+    # never feeds the composite. Intentionally NOT required: an occasional model
+    # miss must not break ingest. Default to "" so downstream reads stay valid.
+    result["score_notes"] = str(result.get("score_notes") or "").strip()
 
     # role_exposure is the gov-screen JD-level judgment. Intentionally NOT
     # required: a model miss must not break ingest. ingest.py resolves the
