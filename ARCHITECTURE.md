@@ -1846,6 +1846,11 @@ Each `### <Country>` subsection becomes one entry; the country heading
 is mapped to an ISO code via `COUNTRY_NAME_TO_CODE` (`Canada` → `CA`,
 `Ireland` → `IE`, `United Kingdom` / `UK` → `UK`). Returns `{CA: "…", IE: "…"}`
 (etc.). There is no US entry — US roles intentionally get no visa paragraph.
+Before parsing, HTML comments (`<!-- … -->`) and standalone Markdown horizontal
+rules (`---`) are stripped from the section: the last subsection has no
+following `### ` to bound its capture, so without this it would swallow any
+trailing comment/rule that separates the section from the next `## ` — which
+previously leaked into Ireland letters (Ireland being the last subsection).
 
 #### `buildSystem(resumeText, rulesText)`
 Constructs the Claude system prompt: resume, the full rules document, the
