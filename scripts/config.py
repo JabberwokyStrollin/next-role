@@ -242,6 +242,15 @@ GHOSTED_DAYS = 21   # applications with no response after this many days auto-fl
 # greater than GHOSTED_DAYS. See auto_age_application() below.
 GHOSTED_REJECTED_DAYS = 45
 
+# Pipeline expiry: an un-applied job (status active / cover_letter_ready) that
+# has sat in the pipeline this many days since it was ingested (date_found)
+# auto-archives with reason "stale_pipeline". This is age-of-ingest, distinct
+# from STALENESS_TIERS (which key off the employer's date_posted and only feed
+# scoring) and from auto_age_application (which ages *applications*, not jobs).
+# Applied rows are never swept here — they age via auto_age_application instead.
+# See scan_stale_jobs.archive_stale_jobs(), auto-run at the end of every crawl.
+PIPELINE_EXPIRY_DAYS = 45
+
 # Rejection-reason SSOT. The key is stored in
 # application_tracker.rejection_reason; the value is the human label shown in
 # the UI and appended to the application note. Surfaces (serve.py status

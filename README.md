@@ -55,7 +55,12 @@ python serve.py
 ```
 
 Opens `http://localhost:5000/today` — the daily checklist with four
-sections you tick off as you work through them:
+sections you tick off as you work through them. Opening this page also runs
+two self-cleaning sweeps (no cron needed): application aging (ghosted →
+rejected) and **pipeline expiry** — un-applied jobs older than
+`PIPELINE_EXPIRY_DAYS` (45) since they were ingested are auto-archived, so the
+apply queue never fills with months-old postings. (The same expiry sweep also
+runs at the end of every crawl.)
 
 1. **Status updates** — outcomes on already-submitted applications
    (recruiter screens, interview requests, rejections, offers). Rejections
@@ -328,6 +333,7 @@ scripts/
   rescore_all.py        — bulk re-score under a new rubric
   scan_no_sponsorship.py — retroactive no-sponsorship sweep
   scan_foreign_locations.py — retroactive foreign-pinned-location sweep
+  scan_stale_jobs.py    — expire jobs sitting un-applied past PIPELINE_EXPIRY_DAYS
   cleanup_staged_jd.py  — clear similar-jobs noise from staged rows
   backfill_target_boards.py — seed target_boards.json from existing jobs
   discover_boards_from_careers.py — find ATS boards from careers pages

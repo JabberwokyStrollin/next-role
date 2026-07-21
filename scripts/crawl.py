@@ -602,6 +602,17 @@ def crawl(
         except Exception as e:
             print(f"  [warn] foreign-pinned sweep skipped: {e}")
 
+        # Self-cleaning sweep: expire jobs that have sat un-applied in the
+        # pipeline past config.PIPELINE_EXPIRY_DAYS (age since ingest). Applied
+        # rows are left to auto_age_application. Best-effort, like the sweep above.
+        try:
+            from scan_stale_jobs import archive_stale_jobs  # noqa: WPS433
+            expired = archive_stale_jobs(apply=True)
+            if expired:
+                print(f"  Stale-pipeline sweep: archived {expired} expired row(s).")
+        except Exception as e:
+            print(f"  [warn] stale-pipeline sweep skipped: {e}")
+
     _log_crawl_run({
         "duration_s":        int(time.time() - started_at),
         "dry_run":           dry_run,
