@@ -112,13 +112,21 @@ See `DATA.md` for the full schema of every file under `data/`.
 
 ---
 
-## 5. (Optional) IMAP credentials for LinkedIn alert ingest
+## 5. (Optional) IMAP credentials for LinkedIn ingest + mailbox scan
 
-The `/today` checklist's **LinkedIn ingest** section pulls job postings
-out of LinkedIn job-alert emails so you don't have to copy URLs by hand.
-It connects to your inbox via IMAP (stdlib `imaplib` — no third-party
-email integration), filters to a sender allowlist, parses each email's
-HTML, and stages the postings for per-row review and ingest.
+Two `/today` features read your inbox over IMAP (stdlib `imaplib` — no
+third-party email integration) and share the same three env vars below:
+
+- **LinkedIn ingest** (Status → LinkedIn section) pulls job postings out of
+  LinkedIn job-alert emails so you don't have to copy URLs by hand — it filters
+  to a sender allowlist, parses each email's HTML, and stages the postings for
+  per-row review and ingest.
+- **Mailbox scan** (Status updates section → *Scan inbox for replies*, or
+  `python scripts/inbox_scan.py`) reads inbox mail from the last
+  `INBOX_SCAN_WINDOW_DAYS` days, matches it to your open applications, and
+  stages any detected rejection / interview-request replies for one-click
+  status updates. Unlike LinkedIn ingest, the scanner **never marks messages
+  read** and keeps its own dedup state.
 
 Skip this section if you're sticking to the crawl + manual ingest paths.
 
@@ -164,6 +172,13 @@ After each successful fetch, the script marks every harvested message
 Message-IDs in `data/email_state.json` as a second-line dedup safeguard.
 Run `python scripts/linkedin_fetch.py --reset` to clear both layers and
 re-fetch from scratch.
+
+The sender allowlist applies to **LinkedIn ingest only** — the mailbox scan
+(`inbox_scan.py`) ignores it and instead matches every recent inbox message
+against your open applications by company name / sender domain. The scan tracks
+its own processed-Message-ID list in `data/inbox_scan_state.json` (never the
+server `\Seen` flag); `python scripts/inbox_scan.py --reset` clears it along
+with the staged matches.
 
 ---
 

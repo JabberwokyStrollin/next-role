@@ -31,6 +31,7 @@ Two cross-cutting rules govern most of the code and are referenced throughout:
 - [`scripts/crawl.py`](#scriptscrawlpy) — two-lane (aggregators + ATS direct) crawler
 - [`scripts/prefilter_staged.py`](#scriptsprefilter_stagedpy) — relaxed pre-filter for staged LinkedIn rows
 - [`scripts/linkedin_fetch.py`](#scriptslinkedin_fetchpy) — IMAP fetch of LinkedIn job-alert emails
+- [`scripts/inbox_scan.py`](#scriptsinbox_scanpy) — IMAP scan for rejection / interview replies to open applications
 
 **Surfaces (CLI + web)**
 
@@ -109,7 +110,10 @@ file.
 | `GHOSTED_DAYS` | `int` | Applications with no response after N days (21) auto-flip to `ghosted` (see `auto_age_application`). |
 | `GHOSTED_REJECTED_DAYS` | `int` | A `ghosted` application still un-answered after N days (45) since applying auto-converts to `rejected` (reason `ghosted_timeout`). Must exceed `GHOSTED_DAYS`. |
 | `PIPELINE_EXPIRY_DAYS` | `int` | An un-applied job (`active` / `cover_letter_ready`) older than N days (45) since ingest (`date_found`) auto-archives with reason `stale_pipeline` (see `scan_stale_jobs.archive_stale_jobs`, auto-run at end of crawl). Distinct from `STALENESS_TIERS` (scoring, keyed off `date_posted`) and `auto_age_application` (ages applications, not jobs). |
-| `REJECTION_REASONS` | `dict[str, str]` | SSOT for rejection-reason key → human label: `generic`, `position_filled`, `interview_failed`, `ghosted_timeout`. Consumed by serve.py status buttons and `metrics.py`. |
+| `REJECTION_REASONS` | `dict[str, str]` | SSOT for rejection-reason key → human label: `generic`, `position_filled`, `interview_failed`, `ghosted_timeout`. Consumed by serve.py status buttons, `metrics.py`, and the inbox scanner. |
+| `DAILY_APPLICATION_GOAL` | `int` | Applications-per-day target (10). The `/today` "Cover letters & apply" section auto-earns its green checkmark once this many applications are logged *today*. Derived from `application_tracker.date_applied`, so it resets daily. serve.py reads the constant; never hardcode the number. |
+| `INBOX_SCAN_WINDOW_DAYS` | `int` | Look-back window (14) for `scripts/inbox_scan.py` — INBOX messages received within this many days are scanned for rejection/interview replies, regardless of read state. |
+| `_POSITION_FILLED_PATTERNS` / `_REJECTION_PATTERNS` / `_INTERVIEW_PATTERNS` | `list[Pattern]` | Deterministic phrase rules for `classify_inbox_email`. Position-filled → rejection reason `position_filled`; general rejection → `generic`; interview/screen invitations → status `interview`. |
 | `GOV_SCREEN_FLAGGED_REGIONS` | `list[str]` | User-editable ISO 3166-1 alpha-2 region codes for the gov/defense screen's tier_c escalation. Empty by default (region logic dormant). |
 | `GOV_SCREEN_FLAG_PENALTY_PCT` | `int` | Apply-rank penalty (%) for a gov-screen `flag` result. Consumed by `gov_screen_penalty_factor` / `apply_rank_score`. |
 | `GOV_SCREEN_SUPPORT_ROLES_EXPOSED` | `bool` | Whether support engineering counts as `exposed` (follow-the-sun ticket routing). Read by `classify_role_exposure`. |
@@ -274,6 +278,19 @@ found. Patterns deliberately err on false negatives — each requires an
 explicit negation token near the word "sponsor". Caller (`ingest.py`) owns
 the discard decision. **Callers skip this for US-derived roles** (the operator
 is a US citizen) — see `ingest.ingest_job` and `scan_no_sponsorship.py`.
+
+#### `classify_inbox_email(subject: str, body: str) -> tuple[str | None, str | None, str]`
+Deterministically classify an inbox email as a rejection or interview request.
+Returns `(status, reason, evidence)`: `("rejected", "position_filled", …)`,
+`("rejected", "generic", …)`, `("interview", None, …)`, or `(None, None, "")`
+when no signal is found. `status` values match `update_status.py`; `reason`
+(when set) is a `REJECTION_REASONS` key. **Rejection is tested before interview**
+so a rejection that mentions "interview" isn't mislabeled. Per the "deterministic
+rules in code" principle, the phrase rules live here (the SSOT), never in a
+prompt — the scanner makes no LLM call. Consumed by `scripts/inbox_scan.py`;
+matches are staged for one-click operator review, so the rules bias toward
+recall. `_first_match_evidence` is the private helper returning a context
+snippet around the first matching pattern.
 
 #### Geography functions (re-exported from `geography.py`)
 `derive_country`, `is_remote_role`, `names_foreign_location`, `location_passes`,
@@ -1145,13 +1162,13 @@ calling `linkedin_fetch._fetch_jd_text`.
 | `ROOT`, `SCRIPTS`, `DATA_DIR`, `OUTPUT_DIR` | Path constants. |
 | `APPLICATION_TRACKER_PATH` | Local copy of the tracker path (also imported from `config.py`). |
 | `MIN_JD_LENGTH` | 200 — JD body length threshold (mirrors ingest). |
-| `DAILY_CHECKLIST_PATH`, `EMAIL_STAGED_PATH` | Daily-checklist state + LinkedIn staged-rows file. |
-| `CHECKLIST_SECTIONS` | Ordered `(id, title, hint)` for the four `/today` sections. |
+| `DAILY_CHECKLIST_PATH`, `EMAIL_STAGED_PATH`, `INBOX_MATCHES_PATH` | Daily-checklist state, LinkedIn staged-rows file, and staged inbox rejection/interview matches (`data/inbox_matches.json`). |
+| `CHECKLIST_SECTIONS` | Ordered `(id, title, hint)` for the four `/today` sections. The `cover_letters` section's green checkmark is auto-earned once `applications_today_count()` reaches `config.DAILY_APPLICATION_GOAL` (see `section_done`); the others use the manual `/today/toggle`. |
 | `STATUS_ACTION_MAP` | Button-value → `(status, rejection_reason \| None)` for status updates POSTed from `/today`. The reason key (SSOT `config.REJECTION_REASONS`) is passed to `update_status.py status --rejection-reason`; includes `rejected_interview_failed`. |
 | `CRAWL_TAIL_MAX`, `INGESTED_RE` | Background crawl: tail-line cap (50) + regex to capture `Ingested: N` from stdout. |
 | `crawl_state_lk`, `crawl_state` | Threading lock + state dict for the background crawl. |
 | `LINKEDIN_REQUIRED_ENV` | `("NEXTROLE_IMAP_HOST", "NEXTROLE_IMAP_USER", "NEXTROLE_IMAP_APP_PASSWORD")`. |
-| `_linkedin_flash`, `_cl_flash`, `_research_flash` | One-shot flash-message slots. `_linkedin_flash` + `_cl_flash` render in their respective `/today` sections; `_research_flash` is popped from both the cover-letters body and `/job/<id>` so the result of "Research now" follows the user back wherever they were. |
+| `_linkedin_flash`, `_cl_flash`, `_research_flash`, `_inbox_flash` | One-shot flash-message slots. `_linkedin_flash` + `_cl_flash` render in their respective `/today` sections; `_research_flash` is popped from both the cover-letters body and `/job/<id>`; `_inbox_flash` renders in the Status-updates section for inbox-scan actions. |
 | `CL_RENDER_CAP` | 30 — rows visible in the cover-letters section by default. |
 | `RESUME_MD_PATH`, `PROFILE_LINKS`, `_MONTH_ABBREVS`, `_DATE_RANGE_RE` | Resume-snippet parsing config (Experience + Education sections of `profile/resume.md`). |
 | `_STATE_AT_END_RE` | Regex for trailing US state codes in education entries. |
@@ -1185,6 +1202,9 @@ calling `linkedin_fetch._fetch_jd_text`.
 #### `POST /today/apply/log` — shell out to `update_status.py log`.
 #### `POST /today/toggle` — flip a section's done flag in `daily_checklist.json`.
 #### `POST /today/status` — shell out to `update_status.py status`.
+#### `POST /today/inbox/scan` — shell out to `inbox_scan.py`; flash the new-match count.
+#### `POST /today/inbox/apply` — apply a staged inbox match by `match_id`: maps its `(suggested_status, suggested_reason)` onto a `STATUS_ACTION_MAP` key and shells out to `update_status.py status` (reusing the manual pipeline), then removes the match.
+#### `POST /today/inbox/dismiss` — drop one staged inbox match by `match_id` without changing status.
 #### `POST /answer-questions/add` — create a new question (JSON in/out: `{job_id, question_text, question_class, char_cap}` → `{ok, card_html, error}`). Driven by `scripts/answer_questions.py:add_question`.
 #### `POST /answer-questions/delete` — delete a draft question (JSON). Refuses to delete finalized questions.
 #### `POST /answer-questions/generate` — generate/regenerate an answer for one question (JSON). Blocks the request thread for the Sonnet 4.6 call (~15–30s). Appends a new draft version; never overwrites `finalized_answer`.
@@ -1203,6 +1223,19 @@ calling `linkedin_fetch._fetch_jd_text`.
 - `load_comp_estimates_by_job() -> dict` — read `comp_estimates.json` and index by `job_id`.
 - `load_companies_by_id() -> dict` — read `company_registry.json` and index by `company_id`.
 - `load_daily_state(date_iso) -> dict` / `save_daily_state(date_iso, state)` — keyed-by-ISO-date checklist state.
+- `load_inbox_matches() -> list[dict]` / `save_inbox_matches(rows)` / `remove_inbox_match(match_id) -> dict | None` — read/write/drop-one for `data/inbox_matches.json` (staged rejection/interview matches).
+
+#### `applications_today_count() -> int`
+Applications logged today, counted from `application_tracker.date_applied ==
+today()`. Derived (never stored), so it resets at midnight. Drives the
+cover-letters daily goal + auto-checkmark.
+
+#### `section_done(sid, state, apps_today) -> bool`
+Whether a checklist section counts as complete for its green badge. Most
+sections read the manual toggle in `state`; `cover_letters` **also**
+auto-completes once `apps_today >= config.DAILY_APPLICATION_GOAL` (a manual
+toggle still forces it done early). Used by `daily_checklist_page` for the
+badge, the done-count/progress bar, and the first-undone auto-open.
 
 #### `days_since_iso(iso_date: str) -> int`
 Local stdlib-only port of `config.days_since` so this file stays importable without an API key.
@@ -1253,6 +1286,11 @@ sweep failure can't block the daily-checklist page.
 #### Cover-letter flash helpers
 - `set_cl_flash(kind, text)` / `pop_cl_flash() -> dict | None` — same shape as the LinkedIn flash slot.
 
+#### Inbox-scan helpers
+- `set_inbox_flash(kind, text)` / `pop_inbox_flash() -> dict | None` — one-shot flash for the Status-updates inbox actions (rendered by `render_inbox_matches_block`).
+- `inbox_suggestion_action(status, reason) -> str | None` — maps a staged suggestion (`("interview", None)` / `("rejected", <reason>)`) onto the shared `STATUS_ACTION_MAP` key so applying a match reuses the exact manual status pipeline. `None` for unknown suggestions.
+- `run_inbox_scan() -> tuple[bool, int, str]` — subprocess `inbox_scan.py`; parses `SCANNED: N` from output; returns `(ok, n_new_matches, output)`.
+
 #### Research-now action + flash helpers
 - `set_research_flash(kind, text)` / `pop_research_flash() -> dict | None` — slot for the result of `/today/company/research`. Popped at the top of `render_cover_letters_body` and `job_detail_page` so feedback follows the user back to either surface.
 - `_flash_notice_html(flash) -> str` — render a popped flash dict as a `.notice` div, or empty string. Generic over the three flash kinds (`ok`/`warn`/`info`).
@@ -1290,12 +1328,13 @@ sweep failure can't block the daily-checklist page.
 - `render_linkedin_body(view='default') -> str` — LinkedIn-ingest section body; `view` controls passing-only vs. all-rows filter. Every action form (fetch / pre-filter / bulk-discard / per-row) carries a hidden `view` field so the post-action redirect stays on the active view; the section's inline `<script>` also saves/restores `window.scrollY` via `sessionStorage` so acting on a row keeps the scroll position instead of jumping to the top.
 - `render_staged_row(row, view='default') -> str` — one staged-row card; embeds the hidden `view` field so Ingest/Fetch JD/Discard preserve the active view on redirect.
 - `render_crawl_body() -> str` — crawl-section body with the live status badge.
-- `render_status_updates_body(view='active') -> str` / `render_app_row(app) -> str` — status-updates section + per-app row with status-change buttons. Two sub-tabs: `active` (live applications, excludes ghosted) and `ghosted` (auto-flipped, awaiting the `ghosted_timeout` auto-rejection). `render_app_row` includes the `rejected_interview_failed` button.
-- `render_cover_letters_body() -> str` — top-N apply queue, ranked by `apply_rank_score` (full composite minus the gov-screen `flag` penalty), filtered by `company_block_reason` and `gov_screen_block_reason` (gov/defense `fail` roles hidden). Rows still display the pure composite via `job_score`.
+- `render_status_updates_body(view='active') -> str` / `render_app_row(app) -> str` — status-updates section + per-app row with status-change buttons. Two sub-tabs: `active` (live applications, excludes ghosted) and `ghosted` (auto-flipped, awaiting the `ghosted_timeout` auto-rejection). `render_app_row` includes the `rejected_interview_failed` button. Prepends `render_inbox_matches_block(apps)`.
+- `render_inbox_matches_block(apps) -> str` / `render_inbox_match_row(m) -> str` — top-of-section panel for the inbox scanner: a "Scan inbox for replies" button (disabled when `linkedin_env_missing()`), plus any staged matches from `data/inbox_matches.json` whose application is still open, each with a one-click **Apply: <suggestion>** (posts to `/today/inbox/apply`) and **Dismiss** (`/today/inbox/dismiss`). Rows show company, title, the detected suggestion badge, sender/subject, and the evidence snippet. Staged suggestions only — applying is always an explicit operator action.
+- `render_cover_letters_body() -> str` — top-N apply queue, ranked by `apply_rank_score` (full composite minus the gov-screen `flag` penalty), filtered by `company_block_reason` and `gov_screen_block_reason` (gov/defense `fail` roles hidden). Rows still display the pure composite via `job_score`. Renders the **Applications sent today: X / `DAILY_APPLICATION_GOAL`** meter (from `applications_today_count`), which turns green + shows "✓ goal met" once the goal is reached.
 - `_fmt_currency(value, currency) -> str` — `"CAD 245,000"` formatting.
 - `render_comp_panel(comp_record, job_id) -> str` — comp-estimate accordion inside a cover-letter row.
 - `render_cl_row(job, co_by_id=None, comp_record=None, apps=None) -> str` — one cover-letter row in the apply queue. When `apps` is supplied, runs `config.find_duplicate_application`; on a hit it renders an "⚠ already applied" badge and gates Mark Applied behind a confirm dialog that posts `force=1`. Also renders a `gov/defense: flag` badge showing the apply-rank penalty (`rank N/130`) when the gov-screen result is `flag`; `fail` roles are excluded upstream so they don't reach this renderer. The row still displays the pure composite via `job_score`, but the apply queue is ordered by `apply_rank_score`.
-- `daily_checklist_page(open_section=None, view='default') -> str` — the `/today` page assembly; `view` is the shared sub-tab param threaded to `render_section_body`.
+- `daily_checklist_page(open_section=None, view='default') -> str` — the `/today` page assembly; `view` is the shared sub-tab param threaded to `render_section_body`. Uses `section_done(sid, state, applications_today_count())` for each section's badge, the done-count/progress bar, and the first-undone auto-open, so the cover-letters checkmark reflects the daily goal.
 - `_aq_chip_html(slug, label) -> str` — one resume-entry chip on the answer-questions card.
 - `_aq_card_html(job_id, question) -> str` — full question card HTML, used both for initial page render and as the `card_html` payload returned by every `/answer-questions/*` mutating endpoint so the client can swap a single card's `outerHTML` without a full reload.
 - `render_answer_questions_page(job_id) -> str` — the `/answer-questions` full-page view: header (back link + job header + composite score), motivation section, behavioral section, global resume-entry-notes panel, and the page-local JS (`_AQ_PAGE_JS`). Lazy-imports `answer_questions` so the module's API-key check doesn't fire on server startup.
@@ -1576,6 +1615,58 @@ Argparse: `--dry-run`, `--sample EML_PATH`, `--reset`, `--rehydrate`.
 Prints machine-readable last lines for `serve.py` to parse:
 `FETCHED: N`, `RESET: local=N staged=N server=N`, `REHYDRATE:
 normalized=N total=N`, or `ERROR: <message>`.
+
+---
+
+## `scripts/inbox_scan.py`
+
+**Role.** Scans the mailbox for rejection letters and interview requests and
+stages them for one-click review in the `/today` "Status updates" section.
+Connects via IMAP (same `NEXTROLE_IMAP_*` env vars as `linkedin_fetch.py`,
+reusing its `get_creds`), looks at INBOX messages received within the last
+`config.INBOX_SCAN_WINDOW_DAYS` days, matches each to an **open** application in
+`application_tracker.json` (by company name in the sender/subject or the
+sender's domain label), and classifies it via `config.classify_inbox_email`.
+Matches are written to `data/inbox_matches.json`; nothing mutates application
+status here (the operator applies each match from the UI).
+
+**Read-flag safety.** Unlike `linkedin_fetch.py`, this scanner **never marks
+messages `\Seen`** — every fetch uses `BODY.PEEK` and it issues no `STORE`. It
+keeps its own processed-Message-ID list in `data/inbox_scan_state.json`, so the
+scan is independent of the server-side read flag: reading mail in your own
+client neither hides matches from the scanner nor is changed by it.
+
+### Module-level constants
+
+| Name | Purpose |
+|---|---|
+| `INBOX_MATCHES`, `INBOX_STATE` | `data/inbox_matches.json` (staged matches) and `data/inbox_scan_state.json` (own dedup state). |
+| `TERMINAL_STATUSES` | `frozenset({"rejected", "offer", "withdrawn"})` — applications a reply can no longer change; excluded from matching. Every other status (incl. `ghosted`) is "open". |
+| `_GENERIC_CO_TOKENS` | Company-name tokens too generic to match on (`inc`, `llc`, `technologies`, …); dropped from the match phrase. |
+
+### Functions
+
+- `load_matches()` / `save_matches(rows)` — read/write `inbox_matches.json`.
+- `load_processed_ids() -> set[str]` / `add_processed_ids(new_ids)` — the own-dedup Message-ID state.
+- `load_open_applications() -> list[dict]` — applications whose status ∉ `TERMINAL_STATUSES`.
+- `_decode_header(raw) -> str` — RFC 2047 header decode.
+- `_extract_text(msg) -> str` — message body as plain text (prefer `text/plain`, else strip HTML).
+- `_received_date(msg) -> str` — `Date:` header → `YYYY-MM-DD`.
+- `_company_core_tokens(name)` / `_company_slug(name)` / `_sender_domain_label(from_header)` — normalization helpers for matching.
+- `company_matches(company_name, from_header, subject) -> bool` — company-name phrase match in From/Subject, or slug overlap with the sender domain label (covers ATS relays, which name the company in the From-display/subject).
+- `_title_tokens(title)` / `match_application(open_apps, from_header, subject, body) -> dict | None` — pick the open application the message relates to; when several open apps share the matched company, prefer the one whose title tokens appear in the subject/body.
+- `_message_key(mid, from_header, subject, received) -> str` — stable dedup key (Message-ID, else a content digest).
+- `build_match(...) -> dict` — assemble one staged-match record (see DATA.md `inbox_matches.json`).
+- `_since_date(window_days) -> str` — IMAP `SINCE` token (DD-Mon-YYYY).
+- `scan_via_imap(window_days, dry_run=False) -> int` — main flow: `SINCE` search, header-peek + cheap company match, then body-peek + classify, stage new matches. Returns count staged.
+- `scan_from_sample(path, dry_run=False) -> int` — classify a local `.eml` against open applications. For testing without IMAP.
+- `reset_state() -> tuple[int, int]` — clear staged matches + processed-id state.
+
+#### `main() -> None`
+Argparse: `--dry-run`, `--window-days N` (default `INBOX_SCAN_WINDOW_DAYS`),
+`--sample EML_PATH`, `--reset`. Prints a machine-readable last line for
+`serve.py` to parse: `SCANNED: N`, `RESET: matches=N processed=N`, or
+`ERROR: <message>`.
 
 ---
 

@@ -68,7 +68,11 @@ runs at the end of every crawl.)
    `/metrics` can break them down. Two sub-tabs: **Active** (live
    applications) and **Ghosted** (no response past 21 days; these
    auto-convert to a rejection once they pass 45 days since you applied, so
-   the list keeps itself clean).
+   the list keeps itself clean). The **Scan inbox for replies** button pulls
+   rejection and interview-request emails from the last 14 days (via IMAP),
+   matches them to your open applications, and stages one-click status
+   suggestions — you review and Apply/Dismiss each; nothing changes
+   automatically. It never marks your mail read (see *Mailbox scan* below).
 2. **Crawl** — kick off the two-lane crawler in the background and
    watch its tail update live.
 3. **LinkedIn ingest** — pull job-alert emails via IMAP, pre-filter
@@ -76,10 +80,14 @@ runs at the end of every crawl.)
    you like.
 4. **Cover letters & apply** — ranked apply queue. For each job:
    generate a cover letter, optionally generate a comp estimate, open
-   the `.docx`, log the application. The **Answer Questions** button on
-   each row opens `/answer-questions?job_id=…` for ad-hoc application
-   prompts ("Why this company?", "Tell us about a time you…") — paste
-   the question, hit Generate, copy the result.
+   the `.docx`, log the application. An **Applications sent today: X / 10**
+   meter tracks the day's submissions; this section auto-earns its green
+   checkmark once you hit the daily goal (10 by default —
+   `DAILY_APPLICATION_GOAL` in `scripts/config.py`). The count is derived
+   from that day's logged applications, so it resets every day. The
+   **Answer Questions** button on each row opens `/answer-questions?job_id=…`
+   for ad-hoc application prompts ("Why this company?", "Tell us about a time
+   you…") — paste the question, hit Generate, copy the result.
 
 The plain `/` route is the single-URL ingest form — paste a posting URL,
 fill in title/company/location, submit. The server auto-fetches the JD
@@ -218,6 +226,32 @@ or open `/today`, which also frees the company's throttle slot. There
 is no time-based cooldown — the slot is gated entirely on application
 status.
 
+### Mailbox scan (rejections & interview requests)
+
+Instead of hand-updating status from each email, let next-role read them
+for you. The **Scan inbox for replies** button in the `/today` *Status
+updates* section (or `python scripts/inbox_scan.py`) connects over IMAP,
+looks at inbox mail from the last `INBOX_SCAN_WINDOW_DAYS` days (14),
+matches each message to one of your open applications by company name /
+sender domain, and classifies it as a **rejection** or **interview
+request** using deterministic phrase rules (no Claude call, no cost).
+
+Each hit is **staged** as a one-click suggestion — you Apply (which runs
+the normal status update) or Dismiss it. Nothing changes automatically.
+
+It uses the same `NEXTROLE_IMAP_*` credentials as LinkedIn ingest (see
+SETUP.md) and is careful with your mailbox: it **never marks messages
+read** (every fetch uses `BODY.PEEK`) and keeps its own dedup state, so
+reading a message in your own mail client neither hides it from the
+scanner nor is affected by the scan.
+
+```bash
+python scripts/inbox_scan.py                 # scan + stage matches
+python scripts/inbox_scan.py --dry-run       # classify only, write nothing
+python scripts/inbox_scan.py --window-days 30  # widen the look-back window
+python scripts/inbox_scan.py --reset         # clear staged matches + dedup state
+```
+
 ---
 
 ## Scoring (summary)
@@ -324,6 +358,7 @@ scripts/
   crawl.py              — two-lane (aggregators + ATS) crawler
   prefilter_staged.py   — relaxed pre-filter for LinkedIn-staged rows
   linkedin_fetch.py     — IMAP fetch of LinkedIn job-alert emails
+  inbox_scan.py         — IMAP scan for rejection / interview replies to open applications
   dashboard.py          — terminal pipeline summary
   update_status.py      — application logging + status transitions
   metrics.py            — read-only analytics for the /metrics page
