@@ -75,7 +75,7 @@ status transitions, and the `/today` apply queue all read from this file.
 **Lifecycle.**
 
 - **Created** by `ingest.ingest_job` after validation + scoring.
-- **Mutated by** `update_status.cmd_log` (`pipeline_status: "active" → "applied"`), `generate_cl.js` (`cover_letter_generated`, `cover_letter_version`, `cover_letter_path`, `pipeline_status: "active" → "cover_letter_ready"`), `rescore_all.py` (re-writes `stack_match_score`, `seniority_score`, `domain_fit_score`, `score_notes`, `scored_at`), `scan_no_sponsorship.py` / `scan_foreign_locations.py` (`pipeline_status: → "archived"` with `archived_at` + `archived_reason`; the latter also runs from `crawl.crawl`'s end-of-run sweep), `serve.py` `/today/cl/archive` (operator archives a dead posting).
+- **Mutated by** `update_status.cmd_log` (`pipeline_status: "active" → "applied"`), `generate_cl.js` (`cover_letter_generated`, `cover_letter_version`, `cover_letter_path`, `pipeline_status: "active" → "cover_letter_ready"`), `rescore_all.py` (re-writes `stack_match_score`, `seniority_score`, `domain_fit_score`, `score_notes`, `scored_at`), `scan_no_sponsorship.py` / `scan_foreign_locations.py` / `scan_stale_jobs.py` (`pipeline_status: → "archived"` with `archived_at` + `archived_reason`; the latter two also run from `crawl.crawl`'s end-of-run sweeps — `scan_stale_jobs.py` expires un-applied rows older than `PIPELINE_EXPIRY_DAYS` since `date_found` — also runs on every `/today` render via `serve.apply_stale_job_check`), `serve.py` `/today/cl/archive` (operator archives a dead posting).
 - **Deletion** never happens — old jobs are archived in place.
 
 ### Schema
@@ -114,8 +114,8 @@ status transitions, and the `/today` apply queue all read from this file.
 | `tags` | list[string] | ✅ | Always `[]` in current builds. Reserved. |
 | `notes` | string | ✅ | Always `""` at ingest. Surfaces don't write to it yet. |
 | `scored_at` | ISO datetime | optional | Set by `score_jd.update_job_record` and `rescore_all.py`. Absent on rows ingested before that field was added. |
-| `archived_at` | ISO datetime | optional | Set by `scan_no_sponsorship.py`, `scan_foreign_locations.py`, and `/today/cl/archive`. |
-| `archived_reason` | string | optional | Set alongside `archived_at`. E.g. `"JD says no sponsorship"`, `"foreign-pinned remote (not an eligible geography)"`. |
+| `archived_at` | ISO datetime | optional | Set by `scan_no_sponsorship.py`, `scan_foreign_locations.py`, `scan_stale_jobs.py`, and `/today/cl/archive`. |
+| `archived_reason` | string | optional | Set alongside `archived_at`. E.g. `"JD says no sponsorship"`, `"foreign-pinned remote (not an eligible geography)"`, `"stale_pipeline"` (un-applied past `PIPELINE_EXPIRY_DAYS` since `date_found`). |
 
 ### Cross-references
 
@@ -605,7 +605,7 @@ forensics.
 | `company_created` | `ingest.get_or_stub_company` | `"Stub record created for <name> — research pending on rank."` |
 | `validation_summary` | `ingest.ingest_job` (success path) | `"Job ingested. Stack: X/35, Velocity: Y/5, Seniority: Z/25, Domain: W/20. Staleness: …"` |
 | `job_discarded` | `ingest.ingest_job` (various gates) | `"Job discarded: <reason>"` — reasons include missing fields, JD too short, ethics-excluded company, JD refuses sponsorship (skipped for US roles), location not an enabled target geography (US off / not remote, or remote pinned to a foreign region like "Remote - India"). |
-| `job_archived` | `scan_no_sponsorship.py`, `scan_foreign_locations.py` (also via `crawl.crawl`'s end-of-run sweep) | `"Retroactive archive: JD says no sponsorship (\"...<snippet>...\")."` or `"Retroactive archive: foreign-pinned remote location '...'."` |
+| `job_archived` | `scan_no_sponsorship.py`, `scan_foreign_locations.py`, `scan_stale_jobs.py` (the latter two also via `crawl.crawl`'s end-of-run sweeps; `scan_stale_jobs.py` additionally on every `/today` render via `serve.apply_stale_job_check`) | `"Retroactive archive: JD says no sponsorship (\"...<snippet>...\")."`, `"Retroactive archive: foreign-pinned remote location '...'."`, or `"Expired from pipeline: <n>d un-applied (> <N>d since ingest)."` |
 | `application_logged` | `update_status.cmd_log` | `"Application logged. Method: <m>. Country: <c>. CL v<n>. Score at apply: <s>."` |
 | `application_status_change` | `update_status.cmd_status` | `"Status: <old> → <new>."` |
 | `cover_letter_generated` | `generate_cl.js` | `"Cover letter v<n> generated → <filename>"` |

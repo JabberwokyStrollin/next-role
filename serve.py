@@ -70,6 +70,7 @@ from config import (  # noqa: E402
     apply_rank_score,
     gov_screen_block_reason,
 )
+from scan_stale_jobs import archive_stale_jobs  # noqa: E402
 
 APPLICATION_TRACKER_PATH = DATA_DIR / "application_tracker.json"
 
@@ -292,6 +293,19 @@ def apply_ghosted_check() -> None:
             updated = True
     if updated:
         save_applications(apps)
+
+
+def apply_stale_job_check() -> None:
+    """Expire un-applied jobs that have sat in the pipeline past
+    config.PIPELINE_EXPIRY_DAYS (measured from date_found). Delegates to
+    scan_stale_jobs.archive_stale_jobs — the same function the crawl runs at
+    end-of-run — so the web view and the crawl never diverge. Called on every
+    /today render, giving the sweep an at-least-daily cadence without a cron.
+    Best-effort: a sweep failure must never block the daily-checklist page."""
+    try:
+        archive_stale_jobs(apply=True)
+    except Exception:
+        pass
 
 
 # ── Status-update action map (button value → update_status.py args) ─────────-
@@ -4176,6 +4190,7 @@ _AQ_PAGE_JS = """
 
 def daily_checklist_page(open_section: str | None = None, view: str = "default") -> str:
     apply_ghosted_check()
+    apply_stale_job_check()
     today_iso = date.today().isoformat()
     state     = load_daily_state(today_iso)
 

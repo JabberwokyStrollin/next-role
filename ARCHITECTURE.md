@@ -50,6 +50,7 @@ Two cross-cutting rules govern most of the code and are referenced throughout:
 - [`scripts/rescore_all.py`](#scriptsrescore_allpy) — bulk re-score under a new rubric
 - [`scripts/scan_no_sponsorship.py`](#scriptsscan_no_sponsorshippy) — retroactive no-sponsorship sweep
 - [`scripts/scan_foreign_locations.py`](#scriptsscan_foreign_locationspy) — retroactive foreign-pinned-location sweep
+- [`scripts/scan_stale_jobs.py`](#scriptsscan_stale_jobspy) — expire jobs sitting un-applied past `PIPELINE_EXPIRY_DAYS`
 - [`scripts/cleanup_staged_jd.py`](#scriptscleanup_staged_jdpy) — clear similar-jobs noise from staged rows
 - [`scripts/backfill_target_boards.py`](#scriptsbackfill_target_boardspy) — discover ATS boards from existing pipeline
 - [`scripts/discover_boards_from_careers.py`](#scriptsdiscover_boards_from_careerspy) — discover ATS boards from careers pages
@@ -107,6 +108,7 @@ file.
 | `STALENESS_TIERS` | `dict[str, (int, int)]` | Inclusive day-range per tier label (`fresh` / `soft_stale` / `hard_stale`). |
 | `GHOSTED_DAYS` | `int` | Applications with no response after N days (21) auto-flip to `ghosted` (see `auto_age_application`). |
 | `GHOSTED_REJECTED_DAYS` | `int` | A `ghosted` application still un-answered after N days (45) since applying auto-converts to `rejected` (reason `ghosted_timeout`). Must exceed `GHOSTED_DAYS`. |
+| `PIPELINE_EXPIRY_DAYS` | `int` | An un-applied job (`active` / `cover_letter_ready`) older than N days (45) since ingest (`date_found`) auto-archives with reason `stale_pipeline` (see `scan_stale_jobs.archive_stale_jobs`, auto-run at end of crawl). Distinct from `STALENESS_TIERS` (scoring, keyed off `date_posted`) and `auto_age_application` (ages applications, not jobs). |
 | `REJECTION_REASONS` | `dict[str, str]` | SSOT for rejection-reason key → human label: `generic`, `position_filled`, `interview_failed`, `ghosted_timeout`. Consumed by serve.py status buttons and `metrics.py`. |
 | `GOV_SCREEN_FLAGGED_REGIONS` | `list[str]` | User-editable ISO 3166-1 alpha-2 region codes for the gov/defense screen's tier_c escalation. Empty by default (region logic dormant). |
 | `GOV_SCREEN_FLAG_PENALTY_PCT` | `int` | Apply-rank penalty (%) for a gov-screen `flag` result. Consumed by `gov_screen_penalty_factor` / `apply_rank_score`. |
@@ -872,7 +874,7 @@ Main entry. Returns the number of jobs ingested.
   - `verbose` — print pre-filter decision (pass/fail + reason) for every listing.
   - `source` — restrict to one of `remoteok`/`remotive`/`greenhouse`/`lever`/`ashby`. Default is all.
   - `limit` — cap ingest count after pre-filter.
-- **Side effects:** appends to `crawl_log.jsonl`, may grow `target_boards.json` via `auto_add_board`, calls `ingest_job` for each passing candidate, and (non-dry-run only) runs `scan_foreign_locations.archive_foreign_pinned(apply=True)` as a best-effort self-cleaning sweep — a no-op unless the foreign denylist expanded or a stray foreign row slipped in.
+- **Side effects:** appends to `crawl_log.jsonl`, may grow `target_boards.json` via `auto_add_board`, calls `ingest_job` for each passing candidate, and (non-dry-run only) runs `scan_foreign_locations.archive_foreign_pinned(apply=True)` then `scan_stale_jobs.archive_stale_jobs(apply=True)` as best-effort self-cleaning sweeps — the first a no-op unless the foreign denylist expanded or a stray foreign row slipped in; the second archives any un-applied row that has crossed `PIPELINE_EXPIRY_DAYS` since the last crawl.
 
 #### `main() -> None`
 CLI shim around `crawl()`. Flags: `--dry-run`, `--verbose`, `--source NAME`, `--limit N`.
@@ -1223,6 +1225,14 @@ Runs the time-based application aging on every record by delegating to
 `applied → ghosted` after `GHOSTED_DAYS`, then `ghosted → rejected` after
 `GHOSTED_REJECTED_DAYS`. Called on `/today` render so the web view stays in
 sync with the CLI.
+
+#### `apply_stale_job_check() -> None`
+Expires un-applied jobs older than `config.PIPELINE_EXPIRY_DAYS` (since
+`date_found`) by delegating to `scan_stale_jobs.archive_stale_jobs(apply=True)`
+— the same function the crawl runs at end-of-run, so the web view and the crawl
+never diverge. Called on every `/today` render, giving the sweep an
+at-least-daily cadence without a cron. Best-effort (swallows exceptions) so a
+sweep failure can't block the daily-checklist page.
 
 #### Background-crawl helpers
 - `_crawl_worker() -> None` — daemon thread; runs `scripts/crawl.py` and streams its output into `crawl_state["output_tail"]` while parsing `Ingested: N` from the last matching line. Updates state to `done`/`error` on exit.
@@ -2004,6 +2014,52 @@ auto-sweep.
 #### `main() -> int`
 Argparse `--apply` / `--include-applied`. Previews via
 `archive_foreign_pinned(apply=False, verbose=True)`, then archives on `--apply`.
+
+---
+
+## `scripts/scan_stale_jobs.py`
+
+**Role.** Expire jobs that have sat un-applied in the pipeline too long — a row
+whose ingest timestamp (`date_found`) is older than `config.PIPELINE_EXPIRY_DAYS`
+(45) and that is still `active` / `cover_letter_ready` auto-archives with reason
+`stale_pipeline`. Age is measured from `date_found` (always present, = "how long
+it's been ours to act on"), not `date_posted` (source-supplied, often null). This
+is distinct from `STALENESS_TIERS` (scoring only) and `auto_age_application`
+(ages applications). Applied rows are never swept here. Default is dry-run;
+`--apply` archives. Also runs automatically (apply mode) in two places, so the
+sweep needs no cron: at the end of every real crawl via `crawl.crawl` →
+`archive_stale_jobs`, and on every `/today` render via
+`serve.apply_stale_job_check` (an at-least-daily cadence).
+
+### Module-level constants
+
+| Name | Purpose |
+|---|---|
+| `ARCHIVE_REASON` | `"stale_pipeline"` — written to `archived_reason`. |
+| `_DEFAULT_STATUSES` | `{active, cover_letter_ready}` — the statuses swept unless `--include-applied`. |
+
+### Functions
+
+#### `_job_age_days(job) -> int | None`
+Days since `date_found` (via `config.days_since` on the `YYYY-MM-DD` prefix).
+Returns `None` when the timestamp is missing/unparseable, so such a row is never
+swept.
+
+#### `is_stale(job) -> bool`
+SSOT predicate: `_job_age_days(job)` is not `None` and `> PIPELINE_EXPIRY_DAYS`.
+
+#### `find_stale(jobs, statuses) -> list[dict]`
+The in-scope jobs (status in `statuses`) that are stale.
+
+#### `archive_stale_jobs(apply=True, include_applied=False, verbose=False) -> int`
+Archives stale un-applied jobs in place; returns the count archived (or that
+*would* be, when `apply=False`). Writes a `.bak` backup + `job_archived` log
+entries **only when there's something to archive**. Shared by the CLI and the
+crawl's end-of-run auto-sweep.
+
+#### `main() -> int`
+Argparse `--apply` / `--include-applied`. Previews via
+`archive_stale_jobs(apply=False, verbose=True)`, then archives on `--apply`.
 
 ---
 
