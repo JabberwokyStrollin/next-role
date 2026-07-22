@@ -263,6 +263,20 @@ REJECTION_REASONS: dict[str, str] = {
     "ghosted_timeout":  "Auto-rejected (ghosted)",
 }
 
+# Daily application goal. The /today "Cover letters & apply" section auto-earns
+# its green checkmark once this many applications have been logged *today*
+# (counted by application_tracker.date_applied == today()). The count resets
+# every day because it is derived, never stored. Tune here — serve.py reads the
+# constant, never hardcodes the number.
+DAILY_APPLICATION_GOAL = 10
+
+# Inbox scanner look-back window (days). scripts/inbox_scan.py scans INBOX
+# messages received within this many days of the scan, regardless of read
+# state, and matches them to open applications. Independent of the server-side
+# \Seen flag — the scanner keeps its own processed-Message-ID state so reading
+# mail in your client neither hides matches from us nor is affected by us.
+INBOX_SCAN_WINDOW_DAYS = 14
+
 # ─── JSON helpers ─────────────────────────────────────────────────────────────
 
 def _sanitize(obj):
@@ -626,6 +640,108 @@ def detect_no_sponsorship(jd_text: str) -> str | None:
             end   = min(len(jd_text), m.end() + 20)
             return jd_text[start:end].strip()
     return None
+
+
+# ─── Inbox email classification (deterministic; used by inbox_scan.py) ────────-
+#
+# scripts/inbox_scan.py matches inbox messages to open applications, then calls
+# ``classify_inbox_email`` to decide whether the message reads like a rejection
+# or an interview request. Per the project's "deterministic rules belong in
+# code" principle, the phrase rules live here (the SSOT), not in a prompt — the
+# scanner never calls an LLM. Matches are *staged* for one-click operator review
+# in the /today "Status updates" section; nothing mutates automatically, so the
+# rules bias toward recall (a few false positives are harmless — the operator
+# confirms or dismisses each).
+#
+# Ordering matters: rejection is checked FIRST because a rejection email often
+# contains the word "interview" ("thank you for interviewing", "we won't be
+# advancing you to the interview stage"), whereas genuine interview invitations
+# rarely contain unambiguous rejection language. Checking rejection first stops
+# a rejection from being mis-suggested as an interview.
+
+# Phrases that mark the role itself as closed/filled → rejection_reason
+# "position_filled" (checked before the generic rejection bucket).
+_POSITION_FILLED_PATTERNS: list[_re.Pattern] = [
+    _re.compile(r"\b(?:position|role|vacancy|req(?:uisition)?)\b[^.!?\n]{0,40}?\b(?:has been|was|been|is now)\s+filled\b", _re.I),
+    _re.compile(r"\bfilled\s+(?:the|this)\s+(?:position|role|vacancy)\b", _re.I),
+    _re.compile(r"\b(?:position|role|vacancy)\b[^.!?\n]{0,30}?\b(?:is\s+)?no\s+longer\s+(?:available|open)\b", _re.I),
+    _re.compile(r"\b(?:position|role|req(?:uisition)?)\b[^.!?\n]{0,30}?\b(?:has been|was)\s+closed\b", _re.I),
+]
+
+# General rejection phrases → rejection_reason "generic".
+_REJECTION_PATTERNS: list[_re.Pattern] = [
+    _re.compile(r"\bmov(?:e|ing)\s+forward\s+with\s+other\b", _re.I),
+    _re.compile(r"\b(?:decided|chosen)\s+to\s+(?:move\s+forward|proceed|pursue)\s+with\s+other\b", _re.I),
+    _re.compile(r"\b(?:will\s+not|won'?t|not)\s+be\s+(?:moving|proceeding|progressing|advancing)\b", _re.I),
+    _re.compile(r"\bnot\s+(?:be\s+)?(?:selected|moving\s+forward|progressing)\b", _re.I),
+    _re.compile(r"\bregret\s+to\s+inform\b", _re.I),
+    _re.compile(r"\bpursue\s+other\s+(?:candidates|applicants)\b", _re.I),
+    _re.compile(r"\bno\s+longer\s+(?:be\s+)?(?:considering|under\s+consideration)\b", _re.I),
+    _re.compile(r"\bnot\s+(?:be\s+)?extend(?:ing)?\s+an?\s+offer\b", _re.I),
+    _re.compile(r"\bdecided\s+not\s+to\s+(?:move|proceed|continue)\b", _re.I),
+    _re.compile(r"\bunfortunately\b[^.!?\n]{0,60}?\b(?:not|other\s+candidates|another\s+candidate)\b", _re.I),
+    _re.compile(r"\bwish\s+you\s+(?:the\s+best|luck)\s+(?:in|with)\s+your\b", _re.I),
+]
+
+# Interview / advancement phrases → status "interview" (recruiter screen and
+# interview invitations both map here; the operator can down-map to "recruiter
+# screen" from the active-list buttons if it was only a screener).
+_INTERVIEW_PATTERNS: list[_re.Pattern] = [
+    _re.compile(r"\b(?:would|we'?d|like|love)\s+to\s+(?:schedule|set\s+up|arrange|invite|chat|talk|connect|speak)\b", _re.I),
+    _re.compile(r"\binvite\s+you\s+to\b[^.!?\n]{0,30}?\b(?:interview|conversation|call|next\s+round|chat)\b", _re.I),
+    _re.compile(r"\bschedule\s+(?:a|an|your|some\s+time\s+for\s+a)\s+(?:call|interview|chat|conversation|screen|time)\b", _re.I),
+    _re.compile(r"\bset\s+up\s+(?:a|an|some)\s+(?:call|time|interview|chat|conversation)\b", _re.I),
+    _re.compile(r"\byour\s+availabilit(?:y|ies)\b", _re.I),
+    _re.compile(r"\b(?:are|when\s+are)\s+you\s+available\b", _re.I),
+    _re.compile(r"\b(?:phone|recruiter|technical|initial|hiring\s+manager)\s+screen\b", _re.I),
+    _re.compile(r"\b(?:book|find|pick)\s+a\s+time\b", _re.I),
+    _re.compile(r"\bcalendly\b", _re.I),
+    _re.compile(r"\bmov(?:e|ing)\s+(?:you\s+)?forward\s+to\s+(?:the\s+)?(?:next|interview)\b", _re.I),
+    _re.compile(r"\bnext\s+steps?\b[^.!?\n]{0,40}?\b(?:schedule|call|interview|availabilit|meet)\b", _re.I),
+]
+
+
+def _first_match_evidence(text: str, patterns: list[_re.Pattern]) -> str | None:
+    """Return a short snippet around the first matching pattern, or None."""
+    for pat in patterns:
+        m = pat.search(text)
+        if m:
+            start = max(0, m.start() - 25)
+            end   = min(len(text), m.end() + 25)
+            return " ".join(text[start:end].split())
+    return None
+
+
+def classify_inbox_email(subject: str, body: str) -> tuple[str | None, str | None, str]:
+    """
+    Deterministically classify an inbox email as a rejection or interview
+    request from its subject + body. Returns ``(status, reason, evidence)``:
+
+    - ``("rejected", "position_filled", <snippet>)`` — the role was filled/closed.
+    - ``("rejected", "generic", <snippet>)`` — a general rejection.
+    - ``("interview", None, <snippet>)`` — an interview / screen invitation.
+    - ``(None, None, "")`` — no rejection or interview signal detected.
+
+    ``status`` values line up with ``update_status.py`` statuses and
+    ``reason`` (when set) is a ``REJECTION_REASONS`` key. Rejection is tested
+    before interview so a rejection that mentions "interview" isn't mislabeled.
+    The evidence snippet is display-only context for the operator.
+    """
+    haystack = f"{subject or ''}\n{body or ''}"
+
+    ev = _first_match_evidence(haystack, _POSITION_FILLED_PATTERNS)
+    if ev:
+        return "rejected", "position_filled", ev
+
+    ev = _first_match_evidence(haystack, _REJECTION_PATTERNS)
+    if ev:
+        return "rejected", "generic", ev
+
+    ev = _first_match_evidence(haystack, _INTERVIEW_PATTERNS)
+    if ev:
+        return "interview", None, ev
+
+    return None, None, ""
 
 
 # ─── Ethics auto-exclude rules (deterministic post-process) ──────────────────

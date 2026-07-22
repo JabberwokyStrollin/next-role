@@ -56,6 +56,8 @@ JSONL logs have no foreign keys to the rest — they're parallel.
 | `email_config.json` | JSON object | LinkedIn IMAP sender allowlist | `linkedin_fetch.py` (auto-creates) | `linkedin_fetch.py` |
 | `email_state.json` | JSON object | Cross-run `seen_message_ids` for IMAP dedup | `linkedin_fetch.py` | `linkedin_fetch.py` |
 | `email_staged.json` | JSON array | Parsed LinkedIn alert jobs awaiting per-row ingest | `linkedin_fetch.py`, `prefilter_staged.py`, `cleanup_staged_jd.py`, `serve.py` | `serve.py` `/today` |
+| `inbox_matches.json` | JSON array | Staged rejection/interview email matches awaiting one-click review | `inbox_scan.py`, `serve.py` (apply/dismiss) | `serve.py` `/today` |
+| `inbox_scan_state.json` | JSON object | Cross-run `processed_message_ids` for the inbox scanner's own dedup | `inbox_scan.py` | `inbox_scan.py` |
 | `crawl_log.jsonl` | JSONL | Per-run crawl summaries (funnel breakdown) | `crawl.py` | manual inspection |
 | `jd_fetch_log.jsonl` | JSONL | Per-URL JD-fetch diagnostics from `linkedin_fetch._fetch_jd_text` | `linkedin_fetch.py` | manual inspection |
 | `board_discovery_log.jsonl` | JSONL | Per-company careers-page scrape diagnostics | `discover_boards_from_careers.py` | manual inspection |
@@ -669,6 +671,14 @@ object with **any subset** of these boolean keys (absent ≡ `false`):
 
 Section IDs come from `serve.py:CHECKLIST_SECTIONS`.
 
+> The **`cover_letters`** checkmark is **also auto-earned** (without a stored
+> flag) once the day's logged applications reach `config.DAILY_APPLICATION_GOAL`
+> — `serve.py:section_done` treats the section done when either the stored flag
+> is `true` **or** `applications_today_count()` (derived from
+> `application_tracker.date_applied == today()`) meets the goal. So a green
+> `cover_letters` checkmark may appear on a date with no `cover_letters` key
+> here. The manual toggle still works to force it done early.
+
 ### Example
 
 ```json
@@ -802,6 +812,96 @@ either ingests them (which removes them) or discards them.
 
 When the staged list is empty (current state on disk), the file contains
 just `[]`.
+
+---
+
+## `data/inbox_matches.json`
+
+**Role.** Rejection / interview-request emails found by `inbox_scan.py`,
+matched to an open application and awaiting one-click review in the `/today`
+"Status updates" section. Staged suggestions only — applying a match is always
+an explicit operator action.
+
+**Lifecycle.**
+
+- **Appended** by `inbox_scan.py` (`scan_via_imap` / `scan_from_sample`) for each newly-matched, newly-classified message.
+- **Removed** one-by-one by `serve.py:remove_inbox_match` when the operator **Applies** (which shells out to `update_status.py status`) or **Dismisses** a match.
+- **Cleared** entirely by `inbox_scan.py --reset` (alongside `inbox_scan_state.json`).
+- A match stays out of the file once applied/dismissed because its Message-ID remains in `inbox_scan_state.json`, so a re-scan won't re-stage it. The `/today` renderer also hides any match whose application has since reached a terminal status.
+
+### Schema
+
+| Field | Type | Notes |
+|---|---|---|
+| `match_id` | hex string (12 chars) | Primary key. |
+| `message_id` | string | Dedup key — RFC 822 `Message-ID`, or a synthesized `nomid:<digest>` when the header is absent. |
+| `application_id` | string | The matched `application_tracker.application_id`. |
+| `job_id` | string | The matched application's `job_id` (convenience). |
+| `company_name` | string | From the matched application. |
+| `title` | string | From the matched application. |
+| `app_status` | string | The application's status at scan time. |
+| `from_addr` | string | The email's `From` header (decoded, truncated). |
+| `subject` | string | The email's `Subject` (decoded, truncated). |
+| `received` | ISO date | The email's `Date` header as `YYYY-MM-DD` (`""` if unparseable). |
+| `suggested_status` | string | `"rejected"` or `"interview"` — an `update_status.py` status. |
+| `suggested_reason` | string \| null | A `REJECTION_REASONS` key (`position_filled` / `generic`) when `suggested_status="rejected"`; `null` for interviews. |
+| `evidence` | string | Short snippet around the phrase that triggered the classification (operator context). |
+| `detected_at` | ISO datetime | When the scan staged this match. |
+
+### Example
+
+```json
+[
+  {
+    "match_id":         "9c2a71f0e4b8",
+    "message_id":       "<CAF...@mail.gmail.com>",
+    "application_id":   "b1e7…",
+    "job_id":           "a0c4…",
+    "company_name":     "Stripe",
+    "title":            "Staff Software Engineer",
+    "app_status":       "applied",
+    "from_addr":        "Stripe Recruiting <no-reply@stripe.com>",
+    "subject":          "Update on your application",
+    "received":         "2026-07-20",
+    "suggested_status": "rejected",
+    "suggested_reason": "generic",
+    "evidence":         "we have decided to move forward with other candidates",
+    "detected_at":      "2026-07-21T14:03:00+00:00"
+  }
+]
+```
+
+---
+
+## `data/inbox_scan_state.json`
+
+**Role.** The inbox scanner's own cross-run dedup state — the `Message-ID`s
+(or synthesized keys) of every message it has already staged. Kept separate
+from the server-side `\Seen` flag on purpose: `inbox_scan.py` never marks mail
+read, so this file is the only "already handled" signal, and reading a message
+in your own client doesn't affect it.
+
+**Lifecycle.**
+
+- **Updated** by `inbox_scan.add_processed_ids` after staging matches.
+- **Cleared** by `inbox_scan.py --reset` (alongside `inbox_matches.json`).
+
+### Schema
+
+| Field | Type | Notes |
+|---|---|---|
+| `processed_message_ids` | list[string] | Sorted list of Message-IDs / `nomid:<digest>` keys already staged. |
+
+### Example
+
+```json
+{
+  "processed_message_ids": [
+    "<CAF...@mail.gmail.com>",
+    "nomid:stripeupdateonyourapplication20260720"
+  ]
+}
+```
 
 ---
 

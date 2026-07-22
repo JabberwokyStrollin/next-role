@@ -57,6 +57,8 @@ from config import (  # noqa: E402
     PRE_RESEARCH_MAX,
     MAX_ACTIVE_APPS_PER_COMPANY,
     GHOSTED_REJECTED_DAYS,
+    DAILY_APPLICATION_GOAL,
+    INBOX_SCAN_WINDOW_DAYS,
     REJECTION_REASONS,
     GOV_SCREEN_INTERVIEW_QUESTIONS,
     GOV_SCREEN_FLAG_PENALTY_PCT,
@@ -100,6 +102,7 @@ MIN_JD_LENGTH = 200
 
 DAILY_CHECKLIST_PATH = DATA_DIR / "daily_checklist.json"
 EMAIL_STAGED_PATH    = DATA_DIR / "email_staged.json"
+INBOX_MATCHES_PATH   = DATA_DIR / "inbox_matches.json"
 
 CHECKLIST_SECTIONS = [
     ("status_updates",  "Status updates",
@@ -277,6 +280,26 @@ def save_daily_state(date_iso: str, state: dict) -> None:
     DAILY_CHECKLIST_PATH.write_text(
         json.dumps(all_state, indent=2), encoding="utf-8"
     )
+
+
+def applications_today_count() -> int:
+    """Applications logged today, counted from application_tracker.date_applied.
+    Derived (never stored), so it resets automatically at midnight. Drives the
+    Cover-letters section's daily goal / auto-checkmark."""
+    iso = date.today().isoformat()
+    return sum(1 for a in load_applications() if a.get("date_applied") == iso)
+
+
+def section_done(sid: str, state: dict, apps_today: int) -> bool:
+    """Whether a checklist section counts as complete for its green checkmark.
+    Most sections track a manual toggle in ``state``; the cover_letters section
+    ALSO auto-completes once the day's applications reach DAILY_APPLICATION_GOAL
+    (the manual toggle still forces it done early)."""
+    if state.get(sid):
+        return True
+    if sid == "cover_letters":
+        return apps_today >= DAILY_APPLICATION_GOAL
+    return False
 
 
 def apply_ghosted_check() -> None:
@@ -618,6 +641,88 @@ def run_linkedin_fetch() -> tuple[bool, int, str]:
     n      = 0
     for line in reversed(output.splitlines()):
         m = re.match(r"FETCHED:\s+(\d+)", line.strip())
+        if m:
+            n = int(m.group(1))
+            break
+    return result.returncode == 0, n, output
+
+
+# ── Inbox scan (rejection / interview detection) ─────────────────────────────-
+
+_inbox_flash: dict | None = None
+
+
+def set_inbox_flash(kind: str, text: str) -> None:
+    """One-shot flash for the Status-updates inbox actions. kind: ok|warn|info."""
+    global _inbox_flash
+    _inbox_flash = {"kind": kind, "text": text}
+
+
+def pop_inbox_flash() -> dict | None:
+    global _inbox_flash
+    f, _inbox_flash = _inbox_flash, None
+    return f
+
+
+def load_inbox_matches() -> list[dict]:
+    if not INBOX_MATCHES_PATH.exists():
+        return []
+    try:
+        return json.loads(INBOX_MATCHES_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def save_inbox_matches(rows: list[dict]) -> None:
+    INBOX_MATCHES_PATH.write_text(
+        json.dumps(rows, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def remove_inbox_match(match_id: str) -> dict | None:
+    rows = load_inbox_matches()
+    target, kept = None, []
+    for r in rows:
+        if r.get("match_id") == match_id:
+            target = r
+        else:
+            kept.append(r)
+    if target is not None:
+        save_inbox_matches(kept)
+    return target
+
+
+# Map a staged suggestion (suggested_status, suggested_reason) onto the shared
+# STATUS_ACTION_MAP key so applying a match reuses the exact same status
+# pipeline as the manual buttons. Returns None if the suggestion is unknown.
+def inbox_suggestion_action(status: str, reason: str | None) -> str | None:
+    if status == "interview":
+        return "interview"
+    if status == "rejected":
+        return f"rejected_{reason}" if reason else "rejected_generic"
+    return None
+
+
+def run_inbox_scan() -> tuple[bool, int, str]:
+    """Run scripts/inbox_scan.py. Returns (ok, n_new_matches, output)."""
+    cmd = [sys.executable, "-u", str(SCRIPTS / "inbox_scan.py")]
+    try:
+        result = subprocess.run(
+            cmd, cwd=ROOT,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            encoding="utf-8", errors="replace",
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        return False, 0, "Inbox scan timed out after 300s."
+    except Exception as e:
+        return False, 0, f"Failed to launch inbox scan: {e}"
+
+    output = result.stdout or ""
+    n      = 0
+    for line in reversed(output.splitlines()):
+        m = re.match(r"SCANNED:\s+(\d+)", line.strip())
         if m:
             n = int(m.group(1))
             break
@@ -1035,6 +1140,11 @@ STYLE = """
                   height: 6px; background: #f0f0ee; border-radius: 3px;
                   overflow: hidden; }
   .progress-fill { display: block; height: 100%; background: #2E75B6; }
+  .apps-goal { display: flex; align-items: center; gap: 12px; margin: 4px 0 14px;
+               font-size: 13px; color: #444; }
+  .apps-goal .progress-fill { background: #2E75B6; }
+  .apps-goal.apps-goal-met .progress-fill { background: #1a5c2e; }
+  .apps-goal-check { color: #1a5c2e; font-weight: 600; margin-left: 6px; }
   .checklist-section { background: #fff; border: 0.5px solid rgba(0,0,0,0.12);
                        border-radius: 10px; padding: 14px 20px;
                        margin-bottom: 10px; }
@@ -3016,6 +3126,8 @@ def render_status_updates_body(view: str = "active") -> str:
     """
     apps = load_applications()
 
+    inbox_block = render_inbox_matches_block(apps)
+
     active  = [a for a in apps
                if a.get("status") not in ("rejected", "offer", "withdrawn", "ghosted")]
     ghosted = [a for a in apps if a.get("status") == "ghosted"]
@@ -3043,7 +3155,7 @@ def render_status_updates_body(view: str = "active") -> str:
     if not shown:
         empty = ("No ghosted applications." if is_ghosted_view
                  else "No applications need check-in.")
-        return tabs + f'<p style="color:#888;font-size:13px">{empty}</p>'
+        return inbox_block + tabs + f'<p style="color:#888;font-size:13px">{empty}</p>'
 
     note = ""
     if is_ghosted_view:
@@ -3055,7 +3167,117 @@ def render_status_updates_body(view: str = "active") -> str:
         )
 
     rows = "".join(render_app_row(a) for a in shown)
-    return tabs + note + f'<div class="app-list">{rows}</div>'
+    return inbox_block + tabs + note + f'<div class="app-list">{rows}</div>'
+
+
+def render_inbox_matches_block(apps: list[dict]) -> str:
+    """Top-of-section panel: a 'Scan inbox' button plus any staged rejection /
+    interview emails detected by scripts/inbox_scan.py, each with one-click
+    Apply (reuses the manual status pipeline) / Dismiss. Staged suggestions
+    only — applying is always an explicit operator action."""
+    from html import escape as esc
+
+    parts = []
+
+    flash = pop_inbox_flash()
+    if flash:
+        parts.append(_flash_notice_html(flash))
+
+    missing = linkedin_env_missing()
+    scan_disabled = ' disabled title="Set IMAP env vars first"' if missing else ""
+    parts.append(
+        '<div class="linkedin-actions" style="margin-bottom:10px">'
+        '<form method="POST" action="/today/inbox/scan" style="display:inline">'
+        f'<button class="btn btn-secondary" style="margin-top:0"{scan_disabled}>'
+        'Scan inbox for replies</button>'
+        '</form>'
+        '<span class="section-placeholder" style="font-style:normal">'
+        'Detects rejections &amp; interview requests from the last '
+        f'{INBOX_SCAN_WINDOW_DAYS} days and matches them to your open applications.'
+        '</span>'
+        '</div>'
+    )
+
+    if missing:
+        parts.append(
+            '<div class="notice notice-warn">'
+            f'Inbox scan needs the same IMAP env vars as LinkedIn ingest: '
+            f'<code>{esc(", ".join(missing))}</code>.</div>'
+        )
+
+    matches = load_inbox_matches()
+    # Only surface matches whose application is still open (skip any that were
+    # resolved via another path since the scan). Compare against live statuses.
+    app_by_id = {a.get("application_id"): a for a in apps}
+    live = []
+    for m in matches:
+        a = app_by_id.get(m.get("application_id"))
+        if a and a.get("status") not in ("rejected", "offer", "withdrawn"):
+            live.append(m)
+
+    if not live:
+        return "".join(parts)
+
+    rows = "".join(render_inbox_match_row(m) for m in live)
+    parts.append(
+        f'<div class="notice notice-info" style="margin-bottom:8px">'
+        f'<strong>{len(live)}</strong> inbox match(es) detected — review and apply.'
+        f'</div>'
+        f'<div class="app-list">{rows}</div>'
+    )
+    return "".join(parts)
+
+
+def render_inbox_match_row(m: dict) -> str:
+    from html import escape as esc
+    company  = esc(m.get("company_name", "?"))[:30]
+    title    = esc(m.get("title", ""))[:60]
+    subject  = esc(m.get("subject", ""))[:90]
+    from_a   = esc(m.get("from_addr", ""))[:70]
+    evidence = esc(m.get("evidence", ""))
+    received = esc(m.get("received", "") or "")
+    match_id = esc(m.get("match_id", ""))
+
+    status   = m.get("suggested_status", "")
+    reason   = m.get("suggested_reason")
+    action   = inbox_suggestion_action(status, reason)
+    if status == "interview":
+        sug_label, sug_cls = "Interview request", "app-status-interview"
+    else:
+        rlabel  = REJECTION_REASONS.get(reason or "", "Rejection")
+        sug_label, sug_cls = rlabel, "app-status-rejected"
+
+    apply_btn = ""
+    if action:
+        apply_btn = (
+            '<form method="POST" action="/today/inbox/apply" style="display:inline">'
+            f'<input type="hidden" name="match_id" value="{match_id}">'
+            f'<button class="btn-status" type="submit">Apply: {esc(sug_label)}</button>'
+            '</form>'
+        )
+
+    meta_bits = " · ".join(x for x in (f"from {from_a}", received) if x)
+    return f"""
+    <div class="app-row">
+      <div class="app-meta">
+        <span class="app-company">{company}</span>
+        <span class="app-title">{title}</span>
+        <span class="app-status {sug_cls}">{esc(sug_label)}</span>
+      </div>
+      <div style="font-size:12px;color:#555;margin:2px 0 4px">
+        <span style="color:#888">{meta_bits}</span><br>
+        <strong>Subject:</strong> {subject}
+        {f'<br><em>“{evidence}”</em>' if evidence else ''}
+      </div>
+      <div class="app-buttons">
+        {apply_btn}
+        <form method="POST" action="/today/inbox/dismiss" style="display:inline">
+          <input type="hidden" name="match_id" value="{match_id}">
+          <button class="btn-status" type="submit">Dismiss</button>
+        </form>
+      </div>
+    </div>
+    """
 
 
 def render_app_row(app: dict) -> str:
@@ -3117,6 +3339,24 @@ def render_cover_letters_body() -> str:
     research_notice = _flash_notice_html(pop_research_flash())
     if research_notice:
         parts.append(research_notice)
+
+    # Applications-sent-today meter. Counted from application_tracker
+    # (date_applied == today) so it resets daily; hitting DAILY_APPLICATION_GOAL
+    # auto-earns this section's green checkmark (see section_done).
+    apps_today = applications_today_count()
+    goal       = DAILY_APPLICATION_GOAL
+    goal_met   = apps_today >= goal
+    fill_pct   = min(100, int(apps_today / goal * 100)) if goal else 0
+    meter_cls  = "apps-goal-met" if goal_met else ""
+    goal_tag   = ' <span class="apps-goal-check">✓ goal met</span>' if goal_met else ""
+    parts.append(
+        f'<div class="apps-goal {meter_cls}">'
+        f'<span class="apps-goal-label">Applications sent today: '
+        f'<strong>{apps_today}</strong> / {goal}{goal_tag}</span>'
+        f'<span class="progress-bar"><span class="progress-fill" '
+        f'style="width:{fill_pct}%"></span></span>'
+        f'</div>'
+    )
 
     jobs     = load_pipeline()
     co_by_id = load_companies_by_id()
@@ -4194,14 +4434,17 @@ def daily_checklist_page(open_section: str | None = None, view: str = "default")
     today_iso = date.today().isoformat()
     state     = load_daily_state(today_iso)
 
-    done_count   = sum(1 for sid, _, _ in CHECKLIST_SECTIONS if state.get(sid))
+    apps_today   = applications_today_count()
+    done_count   = sum(1 for sid, _, _ in CHECKLIST_SECTIONS
+                       if section_done(sid, state, apps_today))
     total        = len(CHECKLIST_SECTIONS)
     progress_pct = int(done_count / total * 100) if total else 0
 
     valid_sids    = {sid for sid, _, _ in CHECKLIST_SECTIONS}
     explicit_open = open_section if open_section in valid_sids else None
     first_undone  = next(
-        (sid for sid, _, _ in CHECKLIST_SECTIONS if not state.get(sid)),
+        (sid for sid, _, _ in CHECKLIST_SECTIONS
+         if not section_done(sid, state, apps_today)),
         None,
     )
 
@@ -4215,12 +4458,28 @@ def daily_checklist_page(open_section: str | None = None, view: str = "default")
 
     sections_html = ""
     for i, (sid, title, hint) in enumerate(CHECKLIST_SECTIONS, 1):
-        done         = state.get(sid, False)
+        done         = section_done(sid, state, apps_today)
         badge_char   = "✓" if done else "○"
         badge_class  = "badge-done" if done else "badge-undone"
         is_open      = (sid == explicit_open) or (explicit_open is None and sid == first_undone)
         open_attr    = "open" if is_open else ""
-        toggle_label = "Mark section incomplete" if done else "Mark section done"
+        # The cover_letters checkmark can be auto-earned by the daily goal; the
+        # manual toggle still forces it done early but can't un-earn the goal.
+        auto_done = done and not state.get(sid)
+        if auto_done:
+            toggle_html = (
+                '<p class="section-placeholder" style="margin-top:14px">'
+                f'✓ Auto-completed — {apps_today} of {DAILY_APPLICATION_GOAL} '
+                'applications logged today.</p>'
+            )
+        else:
+            toggle_label = "Mark section incomplete" if done else "Mark section done"
+            toggle_html = (
+                '<form method="POST" action="/today/toggle" style="margin-top:14px">'
+                f'<input type="hidden" name="section" value="{sid}">'
+                f'<button class="btn btn-secondary" style="margin-top:0">{toggle_label}</button>'
+                '</form>'
+            )
 
         sections_html += f"""
         <details {open_attr} class="checklist-section">
@@ -4231,10 +4490,7 @@ def daily_checklist_page(open_section: str | None = None, view: str = "default")
           <div class="section-body">
             <p class="section-hint">{hint}</p>
             {render_section_body(sid, view=view)}
-            <form method="POST" action="/today/toggle" style="margin-top:14px">
-              <input type="hidden" name="section" value="{sid}">
-              <button class="btn btn-secondary" style="margin-top:0">{toggle_label}</button>
-            </form>
+            {toggle_html}
           </div>
         </details>
         """
@@ -4804,6 +5060,77 @@ class Handler(BaseHTTPRequestHandler):
                     encoding="utf-8", errors="replace",
                 )
 
+            self.redirect_today("status_updates")
+            return
+
+        if path == "/today/inbox/scan":
+            length = int(self.headers.get("Content-Length", 0))
+            if length:
+                self.rfile.read(length)
+            ok, n, output = run_inbox_scan()
+            if ok:
+                set_inbox_flash("ok", f"Inbox scan complete — {n} new match(es).")
+            else:
+                tail = "; ".join([l for l in output.splitlines() if l.strip()][-3:])
+                set_inbox_flash("warn", f"Inbox scan failed — {tail or 'see server log'}")
+            self.redirect_today("status_updates")
+            return
+
+        if path == "/today/inbox/apply":
+            length   = int(self.headers.get("Content-Length", 0))
+            raw      = self.rfile.read(length).decode("utf-8")
+            params   = parse_qs(raw)
+            match_id = params.get("match_id", [""])[0].strip()
+
+            match = next((m for m in load_inbox_matches()
+                          if m.get("match_id") == match_id), None)
+            if not match:
+                set_inbox_flash("warn", "Apply failed — match not found.")
+            else:
+                app_id = match.get("application_id")
+                action = inbox_suggestion_action(
+                    match.get("suggested_status", ""), match.get("suggested_reason"))
+                if not app_id or action not in STATUS_ACTION_MAP:
+                    set_inbox_flash("warn", "Apply failed — unknown suggestion.")
+                else:
+                    status, reason = STATUS_ACTION_MAP[action]
+                    cmd = [
+                        sys.executable, str(SCRIPTS / "update_status.py"),
+                        "status", "--app-id", app_id, "--status", status,
+                        "--notes", "Applied from inbox scan.",
+                    ]
+                    if reason:
+                        cmd += ["--rejection-reason", reason]
+                    result = subprocess.run(
+                        cmd, cwd=ROOT,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        encoding="utf-8", errors="replace",
+                    )
+                    if result.returncode == 0:
+                        remove_inbox_match(match_id)
+                        set_inbox_flash(
+                            "ok",
+                            f"{match.get('company_name','?')} → "
+                            f"{status.replace('_', ' ')}.",
+                        )
+                    else:
+                        tail = "; ".join(
+                            [l for l in (result.stdout or "").splitlines() if l.strip()][-3:])
+                        set_inbox_flash("warn", f"Apply failed — {tail or 'see server log'}")
+
+            self.redirect_today("status_updates")
+            return
+
+        if path == "/today/inbox/dismiss":
+            length   = int(self.headers.get("Content-Length", 0))
+            raw      = self.rfile.read(length).decode("utf-8")
+            params   = parse_qs(raw)
+            match_id = params.get("match_id", [""])[0].strip()
+            if match_id:
+                target = remove_inbox_match(match_id)
+                if target:
+                    set_inbox_flash(
+                        "info", f"Dismissed match for {target.get('company_name','?')}.")
             self.redirect_today("status_updates")
             return
 
