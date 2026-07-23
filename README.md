@@ -54,7 +54,7 @@ workflow* below.
 python serve.py
 ```
 
-Opens `http://localhost:5000/today` — the daily checklist with four
+Opens `http://localhost:5000/today` — the daily checklist with five
 sections you tick off as you work through them. Opening this page also runs
 two self-cleaning sweeps (no cron needed): application aging (ghosted →
 rejected) and **pipeline expiry** — un-applied jobs older than
@@ -88,6 +88,12 @@ runs at the end of every crawl.)
    **Answer Questions** button on each row opens `/answer-questions?job_id=…`
    for ad-hoc application prompts ("Why this company?", "Tell us about a time
    you…") — paste the question, hit Generate, copy the result.
+5. **Code drills** — interview-prep coding practice (see *Code drills* below).
+   **Generate new drill prompt** has Claude produce a fresh, underspecified
+   Java drill; you implement it by hand in the sibling project, then **Check
+   my code & get feedback** for a review and **Mark drill complete**. A
+   **drills-completed-today: X / 1** meter auto-earns the section checkmark
+   (`DAILY_DRILL_GOAL`).
 
 The plain `/` route is the single-URL ingest form — paste a posting URL,
 fill in title/company/location, submit. The server auto-fetches the JD
@@ -258,6 +264,32 @@ python scripts/inbox_scan.py --window-days 30  # widen the look-back window
 python scripts/inbox_scan.py --reset         # clear staged matches + dedup state
 ```
 
+### Code drills (interview prep)
+
+The `/today` **Code drills** section keeps your hand-coding fluency sharp with
+short, interview-style Java exercises — the kind an interviewer describes out
+loud on a whiteboard/live screen.
+
+- **Generate new drill prompt** — Claude writes the next drill: a brief,
+  deliberately **underspecified** prompt plus a partial interface (method
+  names + params, **no return types** — deciding those is part of the drill).
+  It gives no hints about edge cases or what to watch for. Drills are numbered
+  in sequence (`Drill3`, `Drill4`, …) after whatever's already in the project.
+- Implement `Drill<N>.java` + `Drill<N>Test.java` **by hand** in the sibling
+  `manual-code-drills` Maven project. **Open manual-code-drills** launches it
+  in your editor (VS Code by default; override with `NEXTROLE_EDITOR_CMD`).
+- **Check my code & get feedback** — Claude reads your attempt + test and
+  returns an interview-style review (correctness, the ambiguities you resolved,
+  idiomatic Java, complexity, test quality, and signal an interviewer would
+  flag). The latest feedback shows inline.
+- **Mark drill complete** — counts toward the **drills-completed-today: X / 1**
+  meter (`DAILY_DRILL_GOAL`), which auto-earns the section's checkmark.
+
+next-role generates prompts and reviews attempts (Sonnet, same key as cover
+letters) — it never compiles or runs the Java; that's what the Maven project
+and `mvn test` are for. Drill state lives in `data/drills.json`. See *Code
+drills* in SETUP.md for the sibling-project layout and env vars.
+
 ---
 
 ## Scoring (summary)
@@ -337,6 +369,8 @@ prompt.
 | Generate cover letter | Sonnet 4.6 | ~$0.03 |
 | Generate comp estimate | Opus 4.7 | ~$0.15–0.20 |
 | Answer one application question | Sonnet 4.6 | ~$0.02–0.05 |
+| Generate a code drill | Sonnet 4.6 | ~$0.01 |
+| Review a code-drill attempt | Sonnet 4.6 | ~$0.02–0.05 |
 
 Bulk re-score under a new rubric:
 `python scripts/rescore_all.py --dry-run` prints a projected bill before
@@ -365,6 +399,7 @@ scripts/
   prefilter_staged.py   — relaxed pre-filter for LinkedIn-staged rows
   linkedin_fetch.py     — IMAP fetch of LinkedIn job-alert emails
   inbox_scan.py         — IMAP scan for rejection / interview replies to open applications
+  drills.py             — generate interview-prep code drills + review attempts (Sonnet)
   dashboard.py          — terminal pipeline summary
   update_status.py      — application logging + status transitions
   metrics.py            — read-only analytics for the /metrics page
