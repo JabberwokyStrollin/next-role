@@ -233,11 +233,17 @@ for you. The **Scan inbox for replies** button in the `/today` *Status
 updates* section (or `python scripts/inbox_scan.py`) connects over IMAP,
 looks at inbox mail from the last `INBOX_SCAN_WINDOW_DAYS` days (14),
 matches each message to one of your open applications by company name /
-sender domain, and classifies it as a **rejection** or **interview
-request** using deterministic phrase rules (no Claude call, no cost).
+sender domain, and classifies it as a **rejection**, an **interview /
+screen invitation**, or an **offer** using deterministic phrase rules (no
+Claude call, no cost). Plain "thank you for applying" confirmations are
+ignored — only real status changes are staged.
 
 Each hit is **staged** as a one-click suggestion — you Apply (which runs
 the normal status update) or Dismiss it. Nothing changes automatically.
+The suggested status tracks where the application already is: an interview
+email becomes a **recruiter screen** the first time (then an **interview
+request** once you're already screening), and a rejection after any live
+contact is logged as **rejected (interview failed)**.
 
 It uses the same `NEXTROLE_IMAP_*` credentials as LinkedIn ingest (see
 SETUP.md) and is careful with your mailbox: it **never marks messages

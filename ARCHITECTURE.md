@@ -113,7 +113,9 @@ file.
 | `REJECTION_REASONS` | `dict[str, str]` | SSOT for rejection-reason key → human label: `generic`, `position_filled`, `interview_failed`, `ghosted_timeout`. Consumed by serve.py status buttons, `metrics.py`, and the inbox scanner. |
 | `DAILY_APPLICATION_GOAL` | `int` | Applications-per-day target (10). The `/today` "Cover letters & apply" section auto-earns its green checkmark once this many applications are logged *today*. Derived from `application_tracker.date_applied`, so it resets daily. serve.py reads the constant; never hardcode the number. |
 | `INBOX_SCAN_WINDOW_DAYS` | `int` | Look-back window (14) for `scripts/inbox_scan.py` — INBOX messages received within this many days are scanned for rejection/interview replies, regardless of read state. |
-| `_POSITION_FILLED_PATTERNS` / `_REJECTION_PATTERNS` / `_INTERVIEW_PATTERNS` | `list[Pattern]` | Deterministic phrase rules for `classify_inbox_email`. Position-filled → rejection reason `position_filled`; general rejection → `generic`; interview/screen invitations → status `interview`. |
+| `_POSITION_FILLED_PATTERNS` / `_REJECTION_PATTERNS` / `_OFFER_PATTERNS` / `_INTERVIEW_PATTERNS` | `list[Pattern]` | Deterministic phrase rules for `classify_inbox_email`. Position-filled → rejection reason `position_filled`; general rejection → `generic`; offer → `offer`; advancement (recruiter screen / interview invitation) → signal `interview`. "invite" counts only when followed by an interview/call word (so "invite you to follow us on LinkedIn" is ignored). |
+| `_CONDITIONAL_LEAD_RE` | `Pattern` | Guard used by `_first_match_evidence(..., skip_conditional=True)` to skip rejection phrases embedded in a conditional clause ("If you are not selected …") — application-confirmation boilerplate, not a real rejection. |
+| `_ADVANCE_IN_PROGRESS` | `frozenset` | Statuses (`recruiter_screen`, `interview`) at which a rejection is an interview failure and a further advancement email promotes the screen. Consumed by `suggest_status_transition`. |
 | `GOV_SCREEN_FLAGGED_REGIONS` | `list[str]` | User-editable ISO 3166-1 alpha-2 region codes for the gov/defense screen's tier_c escalation. Empty by default (region logic dormant). |
 | `GOV_SCREEN_FLAG_PENALTY_PCT` | `int` | Apply-rank penalty (%) for a gov-screen `flag` result. Consumed by `gov_screen_penalty_factor` / `apply_rank_score`. |
 | `GOV_SCREEN_SUPPORT_ROLES_EXPOSED` | `bool` | Whether support engineering counts as `exposed` (follow-the-sun ticket routing). Read by `classify_role_exposure`. |
@@ -280,17 +282,34 @@ the discard decision. **Callers skip this for US-derived roles** (the operator
 is a US citizen) — see `ingest.ingest_job` and `scan_no_sponsorship.py`.
 
 #### `classify_inbox_email(subject: str, body: str) -> tuple[str | None, str | None, str]`
-Deterministically classify an inbox email as a rejection or interview request.
-Returns `(status, reason, evidence)`: `("rejected", "position_filled", …)`,
-`("rejected", "generic", …)`, `("interview", None, …)`, or `(None, None, "")`
-when no signal is found. `status` values match `update_status.py`; `reason`
-(when set) is a `REJECTION_REASONS` key. **Rejection is tested before interview**
-so a rejection that mentions "interview" isn't mislabeled. Per the "deterministic
+Deterministically classify an inbox email's *own signal*. Returns
+`(status, reason, evidence)`: `("rejected", "position_filled", …)`,
+`("rejected", "generic", …)`, `("offer", None, …)`, `("interview", None, …)`
+(an **advancement** signal — recruiter screen OR interview invitation), or
+`(None, None, "")` when no signal is found (including application-received
+confirmations). Order is **rejection → offer → interview** so a rejection that
+mentions "interview"/"offer" isn't mislabeled. This is only what the email says;
+the concrete status the operator applies is resolved from the application's
+current status by `suggest_status_transition` (below). Per the "deterministic
 rules in code" principle, the phrase rules live here (the SSOT), never in a
-prompt — the scanner makes no LLM call. Consumed by `scripts/inbox_scan.py`;
-matches are staged for one-click operator review, so the rules bias toward
-recall. `_first_match_evidence` is the private helper returning a context
-snippet around the first matching pattern.
+prompt — the scanner makes no LLM call. Matches are staged for one-click operator
+review, so the rules bias toward recall. `_first_match_evidence(text, patterns,
+skip_conditional=False)` is the private helper returning a context snippet around
+the first matching pattern; `skip_conditional=True` ignores matches inside a
+conditional clause (the "If you are not selected …" confirmation boilerplate).
+
+#### `suggest_status_transition(email_status, email_reason, current_status) -> tuple[str | None, str | None]`
+The transition SSOT: maps a `classify_inbox_email` signal + the application's
+current status onto the concrete `(suggested_status, suggested_reason)` the
+operator should apply (or `(None, None)`). **offer** → `("offer", None)`.
+**rejected** → `("rejected", "interview_failed")` when the app is already at
+`recruiter_screen`/`interview` (rejection after real contact = interview
+failure), else `("rejected", <email_reason or "generic">)`. **interview**
+(advancement) → `recruiter_screen` for a still-`applied`/`ghosted` role (the
+first live contact is a screen), promoted to `interview` once already at
+`recruiter_screen`, and stays `interview` for a role already interviewing (a
+later round). Kept out of the composite/scoring path — pure status-transition
+policy. Consumed by `serve.py` (`inbox_match_suggestion`).
 
 #### Geography functions (re-exported from `geography.py`)
 `derive_country`, `is_remote_role`, `names_foreign_location`, `location_passes`,
@@ -1203,7 +1222,7 @@ calling `linkedin_fetch._fetch_jd_text`.
 #### `POST /today/toggle` — flip a section's done flag in `daily_checklist.json`.
 #### `POST /today/status` — shell out to `update_status.py status`.
 #### `POST /today/inbox/scan` — shell out to `inbox_scan.py`; flash the new-match count.
-#### `POST /today/inbox/apply` — apply a staged inbox match by `match_id`: maps its `(suggested_status, suggested_reason)` onto a `STATUS_ACTION_MAP` key and shells out to `update_status.py status` (reusing the manual pipeline), then removes the match.
+#### `POST /today/inbox/apply` — apply a staged inbox match by `match_id`: resolves the match's raw email signal against the application's **live** status via `inbox_match_suggestion` → `config.suggest_status_transition`, maps the result onto a `STATUS_ACTION_MAP` key, and shells out to `update_status.py status` (reusing the manual pipeline), then removes the match.
 #### `POST /today/inbox/dismiss` — drop one staged inbox match by `match_id` without changing status.
 #### `POST /answer-questions/add` — create a new question (JSON in/out: `{job_id, question_text, question_class, char_cap}` → `{ok, card_html, error}`). Driven by `scripts/answer_questions.py:add_question`.
 #### `POST /answer-questions/delete` — delete a draft question (JSON). Refuses to delete finalized questions.
@@ -1288,7 +1307,8 @@ sweep failure can't block the daily-checklist page.
 
 #### Inbox-scan helpers
 - `set_inbox_flash(kind, text)` / `pop_inbox_flash() -> dict | None` — one-shot flash for the Status-updates inbox actions (rendered by `render_inbox_matches_block`).
-- `inbox_suggestion_action(status, reason) -> str | None` — maps a staged suggestion (`("interview", None)` / `("rejected", <reason>)`) onto the shared `STATUS_ACTION_MAP` key so applying a match reuses the exact manual status pipeline. `None` for unknown suggestions.
+- `inbox_match_suggestion(match, current_status) -> (status, reason)` — resolves a staged match's raw email signal (`email_status`/`email_reason`, with back-compat fallback to legacy `suggested_status`/`suggested_reason`) against the application's **live** status via `config.suggest_status_transition`, so the shown suggestion adapts if status changed between scan and review.
+- `inbox_suggestion_action(status, reason) -> str | None` — maps a resolved suggestion (`recruiter_screen` / `interview` / `offer` / `("rejected", <reason>)`) onto the shared `STATUS_ACTION_MAP` key so applying a match reuses the exact manual status pipeline. `None` for unknown suggestions. `_INBOX_SUGGESTION_LABELS` supplies the human badge/button text.
 - `run_inbox_scan() -> tuple[bool, int, str]` — subprocess `inbox_scan.py`; parses `SCANNED: N` from output; returns `(ok, n_new_matches, output)`.
 
 #### Research-now action + flash helpers
@@ -1329,7 +1349,7 @@ sweep failure can't block the daily-checklist page.
 - `render_staged_row(row, view='default') -> str` — one staged-row card; embeds the hidden `view` field so Ingest/Fetch JD/Discard preserve the active view on redirect.
 - `render_crawl_body() -> str` — crawl-section body with the live status badge.
 - `render_status_updates_body(view='active') -> str` / `render_app_row(app) -> str` — status-updates section + per-app row with status-change buttons. Two sub-tabs: `active` (live applications, excludes ghosted) and `ghosted` (auto-flipped, awaiting the `ghosted_timeout` auto-rejection). `render_app_row` includes the `rejected_interview_failed` button. Prepends `render_inbox_matches_block(apps)`.
-- `render_inbox_matches_block(apps) -> str` / `render_inbox_match_row(m) -> str` — top-of-section panel for the inbox scanner: a "Scan inbox for replies" button (disabled when `linkedin_env_missing()`), plus any staged matches from `data/inbox_matches.json` whose application is still open, each with a one-click **Apply: <suggestion>** (posts to `/today/inbox/apply`) and **Dismiss** (`/today/inbox/dismiss`). Rows show company, title, the detected suggestion badge, sender/subject, and the evidence snippet. Staged suggestions only — applying is always an explicit operator action.
+- `render_inbox_matches_block(apps) -> str` / `render_inbox_match_row(m, current_status=None) -> str` — top-of-section panel for the inbox scanner: a "Scan inbox for replies" button (disabled when `linkedin_env_missing()`), plus any staged matches from `data/inbox_matches.json` whose application is still open, each with a one-click **Apply: <suggestion>** (posts to `/today/inbox/apply`) and **Dismiss** (`/today/inbox/dismiss`). The block passes each match's live application status into the row, which resolves the suggestion via `inbox_match_suggestion`. Rows show company, title, the resolved suggestion badge (recruiter screen / interview / offer / rejection reason), sender/subject, and the evidence snippet. Staged suggestions only — applying is always an explicit operator action.
 - `render_cover_letters_body() -> str` — top-N apply queue, ranked by `apply_rank_score` (full composite minus the gov-screen `flag` penalty), filtered by `company_block_reason` and `gov_screen_block_reason` (gov/defense `fail` roles hidden). Rows still display the pure composite via `job_score`. Renders the **Applications sent today: X / `DAILY_APPLICATION_GOAL`** meter (from `applications_today_count`), which turns green + shows "✓ goal met" once the goal is reached.
 - `_fmt_currency(value, currency) -> str` — `"CAD 245,000"` formatting.
 - `render_comp_panel(comp_record, job_id) -> str` — comp-estimate accordion inside a cover-letter row.
@@ -1620,13 +1640,16 @@ normalized=N total=N`, or `ERROR: <message>`.
 
 ## `scripts/inbox_scan.py`
 
-**Role.** Scans the mailbox for rejection letters and interview requests and
-stages them for one-click review in the `/today` "Status updates" section.
-Connects via IMAP (same `NEXTROLE_IMAP_*` env vars as `linkedin_fetch.py`,
+**Role.** Scans the mailbox for rejections, interview/screen invitations, and
+offers and stages them for one-click review in the `/today` "Status updates"
+section. Connects via IMAP (same `NEXTROLE_IMAP_*` env vars as `linkedin_fetch.py`,
 reusing its `get_creds`), looks at INBOX messages received within the last
 `config.INBOX_SCAN_WINDOW_DAYS` days, matches each to an **open** application in
 `application_tracker.json` (by company name in the sender/subject or the
 sender's domain label), and classifies it via `config.classify_inbox_email`.
+The match stores the **raw email signal** (`email_status`/`email_reason`); the
+concrete status to apply is resolved later against the live application status
+by `serve.py` (`config.suggest_status_transition`), never frozen at scan time.
 Matches are written to `data/inbox_matches.json`; nothing mutates application
 status here (the operator applies each match from the UI).
 

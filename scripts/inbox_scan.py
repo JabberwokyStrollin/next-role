@@ -245,7 +245,14 @@ def _message_key(mid: str, from_header: str, subject: str, received: str) -> str
 
 
 def build_match(app: dict, from_header: str, subject: str, received: str,
-                status: str, reason: str | None, evidence: str, mid: str) -> dict:
+                email_status: str, email_reason: str | None, evidence: str,
+                mid: str) -> dict:
+    """Assemble one staged-match record. Stores the raw *email signal*
+    (``email_status`` / ``email_reason`` from ``classify_inbox_email``); the
+    concrete status the operator applies is derived from this signal AND the
+    application's live status at surface time (``config.suggest_status_transition``
+    via ``serve.py``), never frozen here — so a status change between scan and
+    review is reflected."""
     return {
         "match_id":         uuid.uuid4().hex[:12],
         "message_id":       mid,
@@ -257,8 +264,8 @@ def build_match(app: dict, from_header: str, subject: str, received: str,
         "from_addr":        from_header[:200],
         "subject":          subject[:200],
         "received":         received,
-        "suggested_status": status,
-        "suggested_reason": reason,
+        "email_status":     email_status,
+        "email_reason":     email_reason,
         "evidence":         evidence[:200],
         "detected_at":      now_utc(),
     }
