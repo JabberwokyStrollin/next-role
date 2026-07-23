@@ -71,6 +71,7 @@ from config import (  # noqa: E402
     gov_screen_result,
     apply_rank_score,
     gov_screen_block_reason,
+    suggest_status_transition,
 )
 from scan_stale_jobs import archive_stale_jobs  # noqa: E402
 
@@ -693,15 +694,39 @@ def remove_inbox_match(match_id: str) -> dict | None:
     return target
 
 
-# Map a staged suggestion (suggested_status, suggested_reason) onto the shared
+# Resolve a staged match's raw email signal against the application's *live*
+# status into the concrete (suggested_status, suggested_reason) — so the shown
+# suggestion adapts if the status changed between scan and review (e.g. a
+# recruiter-screen email now reads as an interview promotion). Delegates to the
+# config SSOT. Back-compat: older matches stored suggested_status/suggested_reason
+# (the resolved value) instead of the raw email_status/email_reason.
+def inbox_match_suggestion(match: dict, current_status: str | None):
+    email_status = match.get("email_status", match.get("suggested_status"))
+    email_reason = match.get("email_reason", match.get("suggested_reason"))
+    return suggest_status_transition(email_status, email_reason, current_status)
+
+
+# Map a resolved suggestion (suggested_status, suggested_reason) onto the shared
 # STATUS_ACTION_MAP key so applying a match reuses the exact same status
 # pipeline as the manual buttons. Returns None if the suggestion is unknown.
 def inbox_suggestion_action(status: str, reason: str | None) -> str | None:
+    if status == "recruiter_screen":
+        return "recruiter_screen"
     if status == "interview":
         return "interview"
+    if status == "offer":
+        return "offer"
     if status == "rejected":
         return f"rejected_{reason}" if reason else "rejected_generic"
     return None
+
+
+# Human labels for the resolved suggestion badge / apply button.
+_INBOX_SUGGESTION_LABELS = {
+    "recruiter_screen": "Recruiter screen",
+    "interview":        "Interview request",
+    "offer":            "Offer",
+}
 
 
 def run_inbox_scan() -> tuple[bool, int, str]:
@@ -1183,6 +1208,8 @@ STYLE = """
   .app-status-recruiter_screen { background: #fef3cd; color: #7a4f00; }
   .app-status-interview        { background: #d4edda; color: #155724; }
   .app-status-ghosted          { background: #f0f0ee; color: #888; }
+  .app-status-offer            { background: #d1f2d9; color: #0b6b2f; }
+  .app-status-rejected         { background: #fdecec; color: #a12622; }
   .app-buttons { display: flex; flex-wrap: wrap; gap: 6px;
                  margin: 8px 0 0 0; padding: 0; }
   .btn-status  { font-size: 11px; padding: 4px 10px; background: #f0f0ee;
@@ -3218,7 +3245,9 @@ def render_inbox_matches_block(apps: list[dict]) -> str:
     if not live:
         return "".join(parts)
 
-    rows = "".join(render_inbox_match_row(m) for m in live)
+    rows = "".join(
+        render_inbox_match_row(m, (app_by_id.get(m.get("application_id")) or {}).get("status"))
+        for m in live)
     parts.append(
         f'<div class="notice notice-info" style="margin-bottom:8px">'
         f'<strong>{len(live)}</strong> inbox match(es) detected — review and apply.'
@@ -3228,7 +3257,7 @@ def render_inbox_matches_block(apps: list[dict]) -> str:
     return "".join(parts)
 
 
-def render_inbox_match_row(m: dict) -> str:
+def render_inbox_match_row(m: dict, current_status: str | None = None) -> str:
     from html import escape as esc
     company  = esc(m.get("company_name", "?"))[:30]
     title    = esc(m.get("title", ""))[:60]
@@ -3238,14 +3267,14 @@ def render_inbox_match_row(m: dict) -> str:
     received = esc(m.get("received", "") or "")
     match_id = esc(m.get("match_id", ""))
 
-    status   = m.get("suggested_status", "")
-    reason   = m.get("suggested_reason")
+    # Resolve the email signal against the application's live status.
+    status, reason = inbox_match_suggestion(m, current_status)
     action   = inbox_suggestion_action(status, reason)
-    if status == "interview":
-        sug_label, sug_cls = "Interview request", "app-status-interview"
+    if status == "rejected":
+        sug_label = REJECTION_REASONS.get(reason or "", "Rejection")
     else:
-        rlabel  = REJECTION_REASONS.get(reason or "", "Rejection")
-        sug_label, sug_cls = rlabel, "app-status-rejected"
+        sug_label = _INBOX_SUGGESTION_LABELS.get(status or "", "Update")
+    sug_cls = f"app-status-{status}" if status else "pf-badge"
 
     apply_btn = ""
     if action:
@@ -5088,8 +5117,11 @@ class Handler(BaseHTTPRequestHandler):
                 set_inbox_flash("warn", "Apply failed — match not found.")
             else:
                 app_id = match.get("application_id")
-                action = inbox_suggestion_action(
-                    match.get("suggested_status", ""), match.get("suggested_reason"))
+                live   = next((a for a in load_applications()
+                               if a.get("application_id") == app_id), None)
+                current = live.get("status") if live else match.get("app_status")
+                sug_status, sug_reason = inbox_match_suggestion(match, current)
+                action = inbox_suggestion_action(sug_status, sug_reason)
                 if not app_id or action not in STATUS_ACTION_MAP:
                     set_inbox_flash("warn", "Apply failed — unknown suggestion.")
                 else:

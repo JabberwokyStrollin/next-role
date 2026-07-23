@@ -655,9 +655,19 @@ def detect_no_sponsorship(jd_text: str) -> str | None:
 #
 # Ordering matters: rejection is checked FIRST because a rejection email often
 # contains the word "interview" ("thank you for interviewing", "we won't be
-# advancing you to the interview stage"), whereas genuine interview invitations
-# rarely contain unambiguous rejection language. Checking rejection first stops
-# a rejection from being mis-suggested as an interview.
+# advancing you to the interview stage") or "offer" ("not extending an offer"),
+# whereas genuine interview/offer messages rarely contain unambiguous rejection
+# language. The order is rejection → offer → interview, so a rejection that
+# mentions "interview"/"offer" isn't mislabeled.
+#
+# Application-received confirmations ("Thank you for applying …") are NOT a
+# status change and must not be surfaced. Their two boilerplate traps are
+# handled without a separate acknowledgment list: (1) conditional rejection
+# phrasing ("If you are not selected for this position …") is skipped via the
+# ``_CONDITIONAL_LEAD_RE`` guard on the generic-rejection bucket, and (2) social
+# invitations ("we'd like to invite you to follow us on LinkedIn") no longer
+# trip the interview rules — "invite" only counts when followed by an
+# interview/call word.
 
 # Phrases that mark the role itself as closed/filled → rejection_reason
 # "position_filled" (checked before the generic rejection bucket).
@@ -683,12 +693,15 @@ _REJECTION_PATTERNS: list[_re.Pattern] = [
     _re.compile(r"\bwish\s+you\s+(?:the\s+best|luck)\s+(?:in|with)\s+your\b", _re.I),
 ]
 
-# Interview / advancement phrases → status "interview" (recruiter screen and
-# interview invitations both map here; the operator can down-map to "recruiter
-# screen" from the active-list buttons if it was only a screener).
+# Advancement phrases → email signal "interview". This is only a *signal that
+# the process moved forward* (recruiter screen OR interview invitation both land
+# here); the concrete status to apply — recruiter_screen vs interview — is a
+# function of the application's current status, resolved by
+# ``suggest_status_transition``. "invite" only counts when it precedes an
+# interview/call word, so "invite you to follow us on LinkedIn" is not a match.
 _INTERVIEW_PATTERNS: list[_re.Pattern] = [
-    _re.compile(r"\b(?:would|we'?d|like|love)\s+to\s+(?:schedule|set\s+up|arrange|invite|chat|talk|connect|speak)\b", _re.I),
-    _re.compile(r"\binvite\s+you\s+to\b[^.!?\n]{0,30}?\b(?:interview|conversation|call|next\s+round|chat)\b", _re.I),
+    _re.compile(r"\b(?:would|we'?d|like|love)\s+to\s+(?:schedule|set\s+up|arrange|chat|talk|connect|speak)\b", _re.I),
+    _re.compile(r"\binvite\s+you\s+(?:to|for)\b[^.!?\n]{0,30}?\b(?:interview|conversation|call|next\s+round|chat|screen|meeting)\b", _re.I),
     _re.compile(r"\bschedule\s+(?:a|an|your|some\s+time\s+for\s+a)\s+(?:call|interview|chat|conversation|screen|time)\b", _re.I),
     _re.compile(r"\bset\s+up\s+(?:a|an|some)\s+(?:call|time|interview|chat|conversation)\b", _re.I),
     _re.compile(r"\byour\s+availabilit(?:y|ies)\b", _re.I),
@@ -700,12 +713,36 @@ _INTERVIEW_PATTERNS: list[_re.Pattern] = [
     _re.compile(r"\bnext\s+steps?\b[^.!?\n]{0,40}?\b(?:schedule|call|interview|availabilit|meet)\b", _re.I),
 ]
 
+# Offer phrases → status "offer". Checked AFTER rejection so "we will not be
+# extending an offer" resolves to a rejection, not an offer.
+_OFFER_PATTERNS: list[_re.Pattern] = [
+    _re.compile(r"\b(?:pleased|excited|thrilled|happy|delighted)\s+to\s+(?:offer|extend)\b", _re.I),
+    _re.compile(r"\b(?:extend|extending)\s+(?:to\s+you\s+)?an?\s+offer\b", _re.I),
+    _re.compile(r"\bwe(?:'d| would)\s+like\s+to\s+offer\s+you\b", _re.I),
+    _re.compile(r"\boffer\s+of\s+employment\b", _re.I),
+    _re.compile(r"\b(?:formal|written|verbal)\s+offer\b", _re.I),
+    _re.compile(r"\boffer\s+letter\b", _re.I),
+    _re.compile(r"\byour\s+offer\s+(?:letter|package|details)\b", _re.I),
+]
 
-def _first_match_evidence(text: str, patterns: list[_re.Pattern]) -> str | None:
-    """Return a short snippet around the first matching pattern, or None."""
+# A rejection phrase embedded in a conditional clause ("If you are not selected
+# for this position …") is application-confirmation boilerplate, not a rejection.
+_CONDITIONAL_LEAD_RE = _re.compile(
+    r"\b(?:if|should|unless|whether|in\s+case|in\s+the\s+event)\b[^.!?\n]{0,25}$", _re.I)
+
+
+def _first_match_evidence(text: str, patterns: list[_re.Pattern],
+                          skip_conditional: bool = False) -> str | None:
+    """Return a short snippet around the first matching pattern, or None. When
+    ``skip_conditional`` is set, a match whose lead-in is a conditional clause
+    ("if you are not selected …") is skipped — that phrasing is confirmation
+    boilerplate, not an actual status change."""
     for pat in patterns:
-        m = pat.search(text)
-        if m:
+        for m in pat.finditer(text):
+            if skip_conditional:
+                lead = text[max(0, m.start() - 30):m.start()]
+                if _CONDITIONAL_LEAD_RE.search(lead):
+                    continue
             start = max(0, m.start() - 25)
             end   = min(len(text), m.end() + 25)
             return " ".join(text[start:end].split())
@@ -714,34 +751,83 @@ def _first_match_evidence(text: str, patterns: list[_re.Pattern]) -> str | None:
 
 def classify_inbox_email(subject: str, body: str) -> tuple[str | None, str | None, str]:
     """
-    Deterministically classify an inbox email as a rejection or interview
-    request from its subject + body. Returns ``(status, reason, evidence)``:
+    Deterministically classify an inbox email from its subject + body. Returns
+    ``(status, reason, evidence)`` where ``status`` is the *email signal*:
 
     - ``("rejected", "position_filled", <snippet>)`` — the role was filled/closed.
     - ``("rejected", "generic", <snippet>)`` — a general rejection.
-    - ``("interview", None, <snippet>)`` — an interview / screen invitation.
-    - ``(None, None, "")`` — no rejection or interview signal detected.
+    - ``("offer", None, <snippet>)`` — an offer.
+    - ``("interview", None, <snippet>)`` — an advancement signal (recruiter
+      screen OR interview invitation).
+    - ``(None, None, "")`` — no signal (includes application-received confirmations).
 
-    ``status`` values line up with ``update_status.py`` statuses and
-    ``reason`` (when set) is a ``REJECTION_REASONS`` key. Rejection is tested
-    before interview so a rejection that mentions "interview" isn't mislabeled.
-    The evidence snippet is display-only context for the operator.
+    This is the email's own signal only. The concrete status the operator should
+    apply — e.g. an "interview" signal becomes ``recruiter_screen`` for a still-
+    ``applied`` role but ``interview`` for one already in a screen — is resolved
+    from the application's current status by ``suggest_status_transition``.
+    Order is rejection → offer → interview so a rejection mentioning
+    "interview"/"offer" isn't mislabeled. The evidence snippet is display-only.
     """
     haystack = f"{subject or ''}\n{body or ''}"
 
-    ev = _first_match_evidence(haystack, _POSITION_FILLED_PATTERNS)
+    ev = _first_match_evidence(haystack, _POSITION_FILLED_PATTERNS, skip_conditional=True)
     if ev:
         return "rejected", "position_filled", ev
 
-    ev = _first_match_evidence(haystack, _REJECTION_PATTERNS)
+    ev = _first_match_evidence(haystack, _REJECTION_PATTERNS, skip_conditional=True)
     if ev:
         return "rejected", "generic", ev
+
+    ev = _first_match_evidence(haystack, _OFFER_PATTERNS)
+    if ev:
+        return "offer", None, ev
 
     ev = _first_match_evidence(haystack, _INTERVIEW_PATTERNS)
     if ev:
         return "interview", None, ev
 
     return None, None, ""
+
+
+# Statuses that mean "already in live conversation" — used by
+# ``suggest_status_transition`` to decide that a rejection at this point is an
+# interview failure, and that a further advancement email promotes the screen.
+_ADVANCE_IN_PROGRESS: frozenset = frozenset({"recruiter_screen", "interview"})
+
+
+def suggest_status_transition(email_status: str | None, email_reason: str | None,
+                              current_status: str | None) -> tuple[str | None, str | None]:
+    """Map an email signal + the application's current status onto the status
+    the operator should apply. Returns ``(suggested_status, suggested_reason)``,
+    or ``(None, None)`` when there's nothing actionable.
+
+    - **offer** → ``("offer", None)`` regardless of current status.
+    - **rejected** → ``("rejected", "interview_failed")`` if the application is
+      already in a recruiter screen / interview (a rejection after real contact
+      is an interview failure); otherwise ``("rejected", <email_reason or
+      "generic">)``.
+    - **interview** (advancement signal) → the first live contact is a recruiter
+      screen, so a still-``applied`` (or ``ghosted``) role becomes
+      ``recruiter_screen``; a role already at ``recruiter_screen`` is promoted to
+      ``interview``; one already at ``interview`` stays ``interview`` (a later
+      round).
+
+    ``suggested_status``/``suggested_reason`` line up with ``update_status.py``
+    statuses and ``REJECTION_REASONS`` keys.
+    """
+    if email_status == "offer":
+        return "offer", None
+    if email_status == "rejected":
+        if current_status in _ADVANCE_IN_PROGRESS:
+            return "rejected", "interview_failed"
+        return "rejected", (email_reason or "generic")
+    if email_status == "interview":
+        if current_status == "recruiter_screen":
+            return "interview", None
+        if current_status == "interview":
+            return "interview", None
+        return "recruiter_screen", None
+    return None, None
 
 
 # ─── Ethics auto-exclude rules (deterministic post-process) ──────────────────

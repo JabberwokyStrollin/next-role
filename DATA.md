@@ -56,7 +56,7 @@ JSONL logs have no foreign keys to the rest — they're parallel.
 | `email_config.json` | JSON object | LinkedIn IMAP sender allowlist | `linkedin_fetch.py` (auto-creates) | `linkedin_fetch.py` |
 | `email_state.json` | JSON object | Cross-run `seen_message_ids` for IMAP dedup | `linkedin_fetch.py` | `linkedin_fetch.py` |
 | `email_staged.json` | JSON array | Parsed LinkedIn alert jobs awaiting per-row ingest | `linkedin_fetch.py`, `prefilter_staged.py`, `cleanup_staged_jd.py`, `serve.py` | `serve.py` `/today` |
-| `inbox_matches.json` | JSON array | Staged rejection/interview email matches awaiting one-click review | `inbox_scan.py`, `serve.py` (apply/dismiss) | `serve.py` `/today` |
+| `inbox_matches.json` | JSON array | Staged rejection / interview / offer email matches awaiting one-click review | `inbox_scan.py`, `serve.py` (apply/dismiss) | `serve.py` `/today` |
 | `inbox_scan_state.json` | JSON object | Cross-run `processed_message_ids` for the inbox scanner's own dedup | `inbox_scan.py` | `inbox_scan.py` |
 | `crawl_log.jsonl` | JSONL | Per-run crawl summaries (funnel breakdown) | `crawl.py` | manual inspection |
 | `jd_fetch_log.jsonl` | JSONL | Per-URL JD-fetch diagnostics from `linkedin_fetch._fetch_jd_text` | `linkedin_fetch.py` | manual inspection |
@@ -817,10 +817,15 @@ just `[]`.
 
 ## `data/inbox_matches.json`
 
-**Role.** Rejection / interview-request emails found by `inbox_scan.py`,
+**Role.** Rejection / interview-request / offer emails found by `inbox_scan.py`,
 matched to an open application and awaiting one-click review in the `/today`
 "Status updates" section. Staged suggestions only — applying a match is always
-an explicit operator action.
+an explicit operator action. The record stores the **raw email signal**
+(`email_status`/`email_reason`); the concrete status shown/applied is derived at
+surface time from that signal + the application's live status via
+`config.suggest_status_transition` (so an interview email reads as a recruiter
+screen for a still-`applied` role, an interview for one already screening, and a
+rejection after any live contact as an interview failure).
 
 **Lifecycle.**
 
@@ -828,6 +833,7 @@ an explicit operator action.
 - **Removed** one-by-one by `serve.py:remove_inbox_match` when the operator **Applies** (which shells out to `update_status.py status`) or **Dismisses** a match.
 - **Cleared** entirely by `inbox_scan.py --reset` (alongside `inbox_scan_state.json`).
 - A match stays out of the file once applied/dismissed because its Message-ID remains in `inbox_scan_state.json`, so a re-scan won't re-stage it. The `/today` renderer also hides any match whose application has since reached a terminal status.
+- **Legacy fields.** Matches staged before the raw-signal split carry `suggested_status`/`suggested_reason` (the pre-resolved value) instead of `email_status`/`email_reason`. `serve.py:inbox_match_suggestion` falls back to them, so old files still render — but re-scanning (`--reset` first) restages under the current classifier.
 
 ### Schema
 
@@ -843,8 +849,8 @@ an explicit operator action.
 | `from_addr` | string | The email's `From` header (decoded, truncated). |
 | `subject` | string | The email's `Subject` (decoded, truncated). |
 | `received` | ISO date | The email's `Date` header as `YYYY-MM-DD` (`""` if unparseable). |
-| `suggested_status` | string | `"rejected"` or `"interview"` — an `update_status.py` status. |
-| `suggested_reason` | string \| null | A `REJECTION_REASONS` key (`position_filled` / `generic`) when `suggested_status="rejected"`; `null` for interviews. |
+| `email_status` | string | The email's own signal: `"rejected"`, `"offer"`, or `"interview"` (advancement — recruiter screen OR interview invitation). Resolved to a concrete `update_status.py` status at surface time by `config.suggest_status_transition`. |
+| `email_reason` | string \| null | A `REJECTION_REASONS` key (`position_filled` / `generic`) when `email_status="rejected"`; `null` otherwise. |
 | `evidence` | string | Short snippet around the phrase that triggered the classification (operator context). |
 | `detected_at` | ISO datetime | When the scan staged this match. |
 
@@ -863,8 +869,8 @@ an explicit operator action.
     "from_addr":        "Stripe Recruiting <no-reply@stripe.com>",
     "subject":          "Update on your application",
     "received":         "2026-07-20",
-    "suggested_status": "rejected",
-    "suggested_reason": "generic",
+    "email_status":     "rejected",
+    "email_reason":     "generic",
     "evidence":         "we have decided to move forward with other candidates",
     "detected_at":      "2026-07-21T14:03:00+00:00"
   }
