@@ -44,6 +44,92 @@ CRAWL_LOG_PATH           = DATA_DIR / "crawl_log.jsonl"
 COMP_ESTIMATES_PATH        = DATA_DIR / "comp_estimates.json"
 APPLICATION_QUESTIONS_PATH = DATA_DIR / "application_questions.json"
 RESUME_ENTRY_NOTES_PATH    = DATA_DIR / "resume_entry_notes.json"
+DRILLS_STORE_PATH          = DATA_DIR / "drills.json"
+
+# ─── Code drills (interview-prep) ─────────────────────────────────────────────
+#
+# The /today "Code drills" section generates interview-style Java drills and
+# reviews the operator's manual attempts. The actual code + JUnit tests live in
+# a SIBLING Maven project (default ../manual-code-drills, override with
+# NEXTROLE_DRILLS_DIR) numbered Drill1.java, Drill2.java, …; generated drills
+# continue that sequence. "Open manual-code-drills" launches EDITOR_CMD on that
+# folder (default "code", the VS Code CLI; override with NEXTROLE_EDITOR_CMD for
+# a different editor), falling back to the OS file manager if the launch fails.
+
+MANUAL_CODE_DRILLS_DIR = Path(
+    os.environ.get("NEXTROLE_DRILLS_DIR") or (ROOT.parent / "manual-code-drills")
+).resolve()
+EDITOR_CMD = os.environ.get("NEXTROLE_EDITOR_CMD", "code").strip()
+_DRILLS_JAVA_PKG_DIR = "src/main/java/drills"
+_DRILLS_TEST_PKG_DIR = "src/test/java/drills"
+
+
+def drill_impl_path(number: int) -> Path:
+    """Absolute path to Drill<number>.java in the sibling Maven project."""
+    return MANUAL_CODE_DRILLS_DIR / _DRILLS_JAVA_PKG_DIR / f"Drill{number}.java"
+
+
+def drill_test_path(number: int) -> Path:
+    """Absolute path to Drill<number>Test.java in the sibling Maven project."""
+    return MANUAL_CODE_DRILLS_DIR / _DRILLS_TEST_PKG_DIR / f"Drill{number}Test.java"
+
+
+def load_drills() -> list:
+    """Generated drill records from data/drills.json ([] if missing/invalid)."""
+    data = load_json(DRILLS_STORE_PATH)
+    return data if isinstance(data, list) else []
+
+
+def save_drills(rows: list) -> None:
+    save_json(DRILLS_STORE_PATH, rows)
+
+
+def next_drill_number() -> int:
+    """The next drill number: one past the highest existing Drill<N>.java in the
+    sibling Maven project AND the highest number already in the store, so the
+    sequence never collides with hand-written drills (Drill1/Drill2/…)."""
+    highest = 0
+    pkg = MANUAL_CODE_DRILLS_DIR / _DRILLS_JAVA_PKG_DIR
+    if pkg.is_dir():
+        for f in pkg.glob("Drill*.java"):
+            m = _re.match(r"Drill(\d+)\.java$", f.name)
+            if m:
+                highest = max(highest, int(m.group(1)))
+    for d in load_drills():
+        try:
+            highest = max(highest, int(d.get("number", 0)))
+        except (TypeError, ValueError):
+            pass
+    return highest + 1
+
+
+def current_drill(drills: list | None = None) -> dict | None:
+    """The most recent drill (highest number), or None when the store is empty."""
+    drills = load_drills() if drills is None else drills
+    if not drills:
+        return None
+    return max(drills, key=lambda d: int(d.get("number", 0)))
+
+
+def drills_completed_today(drills: list | None = None) -> int:
+    """How many drills were marked complete today (drives the section goal)."""
+    drills = load_drills() if drills is None else drills
+    t = today()
+    return sum(1 for d in drills
+               if d.get("status") == "complete"
+               and (d.get("completed_at") or "")[:10] == t)
+
+
+def mark_drill_complete(number: int) -> bool:
+    """Flag drill ``number`` complete (idempotent). Returns True if found."""
+    drills = load_drills()
+    for d in drills:
+        if int(d.get("number", 0)) == int(number):
+            d["status"]       = "complete"
+            d["completed_at"] = now_utc()
+            save_drills(drills)
+            return True
+    return False
 
 # ─── Rules files ──────────────────────────────────────────────────────────────
 
@@ -269,6 +355,12 @@ REJECTION_REASONS: dict[str, str] = {
 # every day because it is derived, never stored. Tune here — serve.py reads the
 # constant, never hardcodes the number.
 DAILY_APPLICATION_GOAL = 10
+
+# Daily code-drill goal. The /today "Code drills" section auto-earns its green
+# checkmark once this many drills are marked complete *today* (counted by
+# drills.json completed_at == today()). Default 1 — drills are deliberate,
+# low-volume practice, unlike applications. serve.py reads the constant.
+DAILY_DRILL_GOAL = 1
 
 # Inbox scanner look-back window (days). scripts/inbox_scan.py scans INBOX
 # messages received within this many days of the scan, regardless of read

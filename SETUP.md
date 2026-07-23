@@ -59,7 +59,7 @@ cp -r profile.example profile          # Mac/Linux
 Copy-Item -Recurse profile.example profile   # Windows
 ```
 
-Edit these four files in `profile/`:
+Edit these files in `profile/`:
 
 | File | What it controls |
 |---|---|
@@ -71,6 +71,43 @@ Edit these four files in `profile/`:
 > **profile/ is gitignored.** Your resume and personal scoring criteria
 > never leave your machine. Back up the directory externally (OneDrive,
 > Dropbox, or a private repo).
+
+### Code drills (optional)
+
+The `/today` **Code drills** section generates interview-prep Java drills
+with Claude and reviews your manual attempts. There's nothing to author —
+click **Generate new drill prompt** and Claude produces a short,
+deliberately underspecified prompt plus a partial interface (method names +
+params, no return types — deciding those is part of the drill). You
+implement it by hand, then click **Check my code & get feedback**.
+
+It expects a **sibling Maven project** where the code + JUnit tests live:
+
+```
+applications/
+  next-role/            ← this repo
+  manual-code-drills/   ← sibling: Drill1.java, Drill2.java, … + tests
+```
+
+- The default location is `../manual-code-drills` (override with the
+  `NEXTROLE_DRILLS_DIR` env var). Generated drills continue the numbering
+  after the highest `Drill<N>.java` already there.
+- **Open manual-code-drills** launches the folder in your editor. It defaults
+  to the **VS Code** CLI (`code`), which works out of the box if VS Code's
+  "code" command is on your PATH (it is by default on Windows). To use a
+  different editor, set `NEXTROLE_EDITOR_CMD` to its CLI:
+
+  ```powershell
+  $env:NEXTROLE_EDITOR_CMD = "code"          # VS Code (default)
+  # or an IntelliJ launcher, Sublime, etc.:
+  # $env:NEXTROLE_EDITOR_CMD = "C:\Program Files\JetBrains\...\bin\idea64.exe"
+  ```
+
+  If the launch fails, the button falls back to opening the folder in File
+  Explorer.
+- Generation + review use the same `ANTHROPIC_API_KEY` and Sonnet model as
+  cover letters; next-role never compiles or runs the Java itself. Drill
+  state is stored in `data/drills.json` (gitignored).
 
 ### Resume tips
 
@@ -156,6 +193,13 @@ EOF
 For other providers, swap `NEXTROLE_IMAP_HOST` for your provider's IMAP
 host (e.g. `outlook.office365.com`, `imap.fastmail.com`) and follow that
 provider's app-password flow.
+
+### Optional env vars
+
+| Var | Purpose |
+|---|---|
+| `NEXTROLE_EDITOR_CMD` | Editor CLI for the Code-drills **Open manual-code-drills** button (default `code`, VS Code). Falls back to the OS file manager if the launch fails. |
+| `NEXTROLE_DRILLS_DIR` | Override the sibling drills project location (default `../manual-code-drills`). |
 
 ### Sender allowlist
 

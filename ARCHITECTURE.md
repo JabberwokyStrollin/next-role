@@ -32,6 +32,7 @@ Two cross-cutting rules govern most of the code and are referenced throughout:
 - [`scripts/prefilter_staged.py`](#scriptsprefilter_stagedpy) — relaxed pre-filter for staged LinkedIn rows
 - [`scripts/linkedin_fetch.py`](#scriptslinkedin_fetchpy) — IMAP fetch of LinkedIn job-alert emails
 - [`scripts/inbox_scan.py`](#scriptsinbox_scanpy) — IMAP scan for rejection / interview replies to open applications
+- [`scripts/drills.py`](#scriptsdrillspy) — generate interview-prep code drills + review manual attempts (Sonnet)
 
 **Surfaces (CLI + web)**
 
@@ -112,6 +113,9 @@ file.
 | `PIPELINE_EXPIRY_DAYS` | `int` | An un-applied job (`active` / `cover_letter_ready`) older than N days (45) since ingest (`date_found`) auto-archives with reason `stale_pipeline` (see `scan_stale_jobs.archive_stale_jobs`, auto-run at end of crawl). Distinct from `STALENESS_TIERS` (scoring, keyed off `date_posted`) and `auto_age_application` (ages applications, not jobs). |
 | `REJECTION_REASONS` | `dict[str, str]` | SSOT for rejection-reason key → human label: `generic`, `position_filled`, `interview_failed`, `ghosted_timeout`. Consumed by serve.py status buttons, `metrics.py`, and the inbox scanner. |
 | `DAILY_APPLICATION_GOAL` | `int` | Applications-per-day target (10). The `/today` "Cover letters & apply" section auto-earns its green checkmark once this many applications are logged *today*. Derived from `application_tracker.date_applied`, so it resets daily. serve.py reads the constant; never hardcode the number. |
+| `DAILY_DRILL_GOAL` | `int` | Code-drills-per-day target (1). The `/today` "Code drills" section auto-earns its checkmark once this many drills are marked complete *today* (`drills_completed_today`). |
+| `DRILLS_STORE_PATH`, `MANUAL_CODE_DRILLS_DIR`, `EDITOR_CMD` | Path / str | Generated-drill store (`data/drills.json`); the sibling Maven project holding the code (default `../manual-code-drills`, override `NEXTROLE_DRILLS_DIR`); the editor CLI for the open button (`NEXTROLE_EDITOR_CMD`, default `"code"` for VS Code → file-manager fallback on failure). |
+| Drill helpers | funcs | `drill_impl_path(n)` / `drill_test_path(n)` (→ `Drill<n>.java` / `Drill<n>Test.java` in the Maven project); `load_drills`/`save_drills`; `next_drill_number()` (max of on-disk `Drill<N>.java` + store numbers, +1); `current_drill()` (highest number); `drills_completed_today()`; `mark_drill_complete(n)`. |
 | `INBOX_SCAN_WINDOW_DAYS` | `int` | Look-back window (14) for `scripts/inbox_scan.py` — INBOX messages received within this many days are scanned for rejection/interview replies, regardless of read state. |
 | `_POSITION_FILLED_PATTERNS` / `_REJECTION_PATTERNS` / `_OFFER_PATTERNS` / `_INTERVIEW_PATTERNS` | `list[Pattern]` | Deterministic phrase rules for `classify_inbox_email`. Position-filled → rejection reason `position_filled`; general rejection → `generic`; offer → `offer`; advancement (recruiter screen / interview invitation) → signal `interview`. "invite" counts only when followed by an interview/call word (so "invite you to follow us on LinkedIn" is ignored). |
 | `_CONDITIONAL_LEAD_RE` | `Pattern` | Guard used by `_first_match_evidence(..., skip_conditional=True)` to skip rejection phrases embedded in a conditional clause ("If you are not selected …") — application-confirmation boilerplate, not a real rejection. |
@@ -1153,9 +1157,9 @@ HTTP server (`BaseHTTPRequestHandler`) with three top-level surfaces:
 
 - `/` — single-URL ingest form. Auto-fetches JD; falls back to a paste
   textbox for JS-rendered pages (Workday, etc.).
-- `/today` — daily checklist with four collapsible sections: status
-  updates, crawl, LinkedIn ingest, cover letters & apply. Each section
-  has its own POST handlers; the page round-trips state through query
+- `/today` — daily checklist with five collapsible sections: status
+  updates, crawl, LinkedIn ingest, cover letters & apply, code drills. Each
+  section has its own POST handlers; the page round-trips state through query
   params (`?open=<section>&view=<view>`).
 - `/pipeline`, `/resume`, `/job/<id>`, `/search` — supporting views. The
   top-nav search box (rendered by `page()` on every surface) submits to
@@ -1182,12 +1186,12 @@ calling `linkedin_fetch._fetch_jd_text`.
 | `APPLICATION_TRACKER_PATH` | Local copy of the tracker path (also imported from `config.py`). |
 | `MIN_JD_LENGTH` | 200 — JD body length threshold (mirrors ingest). |
 | `DAILY_CHECKLIST_PATH`, `EMAIL_STAGED_PATH`, `INBOX_MATCHES_PATH` | Daily-checklist state, LinkedIn staged-rows file, and staged inbox rejection/interview matches (`data/inbox_matches.json`). |
-| `CHECKLIST_SECTIONS` | Ordered `(id, title, hint)` for the four `/today` sections. The `cover_letters` section's green checkmark is auto-earned once `applications_today_count()` reaches `config.DAILY_APPLICATION_GOAL` (see `section_done`); the others use the manual `/today/toggle`. |
+| `CHECKLIST_SECTIONS` | Ordered `(id, title, hint)` for the five `/today` sections (status_updates, crawl, linkedin_ingest, cover_letters, code_drills). The `cover_letters` checkmark is auto-earned once `applications_today_count()` reaches `config.DAILY_APPLICATION_GOAL`, and `code_drills` once `config.drills_completed_today()` reaches `config.DAILY_DRILL_GOAL` (see `section_done`); the others use the manual `/today/toggle`. Code-drills store + constants live in `config.py`. |
 | `STATUS_ACTION_MAP` | Button-value → `(status, rejection_reason \| None)` for status updates POSTed from `/today`. The reason key (SSOT `config.REJECTION_REASONS`) is passed to `update_status.py status --rejection-reason`; includes `rejected_interview_failed`. |
 | `CRAWL_TAIL_MAX`, `INGESTED_RE` | Background crawl: tail-line cap (50) + regex to capture `Ingested: N` from stdout. |
 | `crawl_state_lk`, `crawl_state` | Threading lock + state dict for the background crawl. |
 | `LINKEDIN_REQUIRED_ENV` | `("NEXTROLE_IMAP_HOST", "NEXTROLE_IMAP_USER", "NEXTROLE_IMAP_APP_PASSWORD")`. |
-| `_linkedin_flash`, `_cl_flash`, `_research_flash`, `_inbox_flash` | One-shot flash-message slots. `_linkedin_flash` + `_cl_flash` render in their respective `/today` sections; `_research_flash` is popped from both the cover-letters body and `/job/<id>`; `_inbox_flash` renders in the Status-updates section for inbox-scan actions. |
+| `_linkedin_flash`, `_cl_flash`, `_research_flash`, `_inbox_flash`, `_drill_flash` | One-shot flash-message slots. `_linkedin_flash` + `_cl_flash` render in their respective `/today` sections; `_research_flash` is popped from both the cover-letters body and `/job/<id>`; `_inbox_flash` renders in the Status-updates section for inbox-scan actions; `_drill_flash` renders in the Code-drills section for practice/open actions. |
 | `CL_RENDER_CAP` | 30 — rows visible in the cover-letters section by default. |
 | `RESUME_MD_PATH`, `PROFILE_LINKS`, `_MONTH_ABBREVS`, `_DATE_RANGE_RE` | Resume-snippet parsing config (Experience + Education sections of `profile/resume.md`). |
 | `_STATE_AT_END_RE` | Regex for trailing US state codes in education entries. |
@@ -1220,6 +1224,10 @@ calling `linkedin_fetch._fetch_jd_text`.
 #### `POST /today/cl/archive` — flip job to `archived` (e.g. closed posting).
 #### `POST /today/apply/log` — shell out to `update_status.py log`.
 #### `POST /today/toggle` — flip a section's done flag in `daily_checklist.json`.
+#### `POST /today/drill/generate` — shell out to `scripts/drills.py generate` (Claude): produce the next drill and append it to `data/drills.json`. Flashes the new drill number.
+#### `POST /today/drill/review` — shell out to `scripts/drills.py review --number N` (Claude): read the operator's `Drill<N>.java`+test from the Maven project, store + surface interview-style feedback.
+#### `POST /today/drill/complete` — mark drill `number` complete via `config.mark_drill_complete` (sets `status`/`completed_at`), counting toward `DAILY_DRILL_GOAL`.
+#### `POST /today/drill/open-ide` — launch `config.EDITOR_CMD` (default `code`, VS Code) on `config.MANUAL_CODE_DRILLS_DIR`; resolves the launcher via `shutil.which` and routes `.cmd`/`.bat` (e.g. `code.cmd`) through `cmd /c`. Falls back to `os.startfile` (file manager) if the launch fails.
 #### `POST /today/status` — shell out to `update_status.py status`.
 #### `POST /today/inbox/scan` — shell out to `inbox_scan.py`; flash the new-match count.
 #### `POST /today/inbox/apply` — apply a staged inbox match by `match_id`: resolves the match's raw email signal against the application's **live** status via `inbox_match_suggestion` → `config.suggest_status_transition`, maps the result onto a `STATUS_ACTION_MAP` key, and shells out to `update_status.py status` (reusing the manual pipeline), then removes the match.
@@ -1252,9 +1260,10 @@ cover-letters daily goal + auto-checkmark.
 #### `section_done(sid, state, apps_today) -> bool`
 Whether a checklist section counts as complete for its green badge. Most
 sections read the manual toggle in `state`; `cover_letters` **also**
-auto-completes once `apps_today >= config.DAILY_APPLICATION_GOAL` (a manual
-toggle still forces it done early). Used by `daily_checklist_page` for the
-badge, the done-count/progress bar, and the first-undone auto-open.
+auto-completes once `apps_today >= config.DAILY_APPLICATION_GOAL`, and
+`code_drills` once `config.drills_completed_today() >= config.DAILY_DRILL_GOAL`
+(a manual toggle still forces either done early). Used by `daily_checklist_page`
+for the badge, the done-count/progress bar, and the first-undone auto-open.
 
 #### `days_since_iso(iso_date: str) -> int`
 Local stdlib-only port of `config.days_since` so this file stays importable without an API key.
@@ -1344,13 +1353,14 @@ sweep failure can't block the daily-checklist page.
 - `_render_gov_company_block(company) -> str` / `_render_gov_job_block(job, company) -> str` — gov/defense screen surfacing. The first renders the company-level flag + evidence (empty for `none`); the second computes the per-role result via `config.gov_screen_result` and renders a card with flag, role exposure, result badge, the apply-rank effect (`flag` → −`GOV_SCREEN_FLAG_PENALTY_PCT`% penalty shown as `base → adj`; `fail` → "excluded"), and the interview questions when emitted (empty when there's nothing to surface). `_GOV_FLAG_LABEL` / `_GOV_RESULT_LABEL` are the shared badge label+color SSOT.
 - `job_detail_page(job_id) -> str` — full per-job view with score breakdown, JD viewer, comp panel, the company-research card, and the gov/defense screen card (`_render_gov_job_block`), pinned high (right under the header for non-interview status, right under the comp card for interview-stage).
 - `resume_page() -> str` — `/resume` view.
-- `render_section_body(sid, view='default') -> str` — dispatches to the per-section body renderer. A single `view` query param is shared across sections; only the open section interprets it (status_updates: `active`/`ghosted`; linkedin: `default`/`all`/`failing`).
+- `render_section_body(sid, view='default') -> str` — dispatches to the per-section body renderer. A single `view` query param is shared across sections; only the open section interprets it (status_updates: `active`/`ghosted`; linkedin: `default`/`all`/`failing`; code_drills: `<drill-id>` / `reveal` / `<drill-id>:reveal`).
 - `render_linkedin_body(view='default') -> str` — LinkedIn-ingest section body; `view` controls passing-only vs. all-rows filter. Every action form (fetch / pre-filter / bulk-discard / per-row) carries a hidden `view` field so the post-action redirect stays on the active view; the section's inline `<script>` also saves/restores `window.scrollY` via `sessionStorage` so acting on a row keeps the scroll position instead of jumping to the top.
 - `render_staged_row(row, view='default') -> str` — one staged-row card; embeds the hidden `view` field so Ingest/Fetch JD/Discard preserve the active view on redirect.
 - `render_crawl_body() -> str` — crawl-section body with the live status badge.
 - `render_status_updates_body(view='active') -> str` / `render_app_row(app) -> str` — status-updates section + per-app row with status-change buttons. Two sub-tabs: `active` (live applications, excludes ghosted) and `ghosted` (auto-flipped, awaiting the `ghosted_timeout` auto-rejection). `render_app_row` includes the `rejected_interview_failed` button. Prepends `render_inbox_matches_block(apps)`.
 - `render_inbox_matches_block(apps) -> str` / `render_inbox_match_row(m, current_status=None) -> str` — top-of-section panel for the inbox scanner: a "Scan inbox for replies" button (disabled when `linkedin_env_missing()`), plus any staged matches from `data/inbox_matches.json` whose application is still open, each with a one-click **Apply: <suggestion>** (posts to `/today/inbox/apply`) and **Dismiss** (`/today/inbox/dismiss`). The block passes each match's live application status into the row, which resolves the suggestion via `inbox_match_suggestion`. Rows show company, title, the resolved suggestion badge (recruiter screen / interview / offer / rejection reason), sender/subject, and the evidence snippet. Staged suggestions only — applying is always an explicit operator action.
 - `render_cover_letters_body() -> str` — top-N apply queue, ranked by `apply_rank_score` (full composite minus the gov-screen `flag` penalty), filtered by `company_block_reason` and `gov_screen_block_reason` (gov/defense `fail` roles hidden). Rows still display the pure composite via `job_score`. Renders the **Applications sent today: X / `DAILY_APPLICATION_GOAL`** meter (from `applications_today_count`), which turns green + shows "✓ goal met" once the goal is reached.
+- **Code drills** (`render_drills_body(view='default') -> str`) — the `code_drills` section. Reads the generated drills from `config.load_drills` and shows: a **drills-completed-today: X / `DAILY_DRILL_GOAL`** meter, the **current drill** (`config.current_drill` — highest number) with its prompt + partial interface (return types intentionally omitted), and the actions **Open manual-code-drills** / **Generate new drill prompt** / **Check my code & get feedback** / **Mark drill complete**. The latest review feedback renders inline. `run_drill_command(*args)` shells out to `scripts/drills.py` (generate/review, ~15-30s Claude call, 180s timeout); `set_drill_flash`/`pop_drill_flash` back the section's one-shot flash. Nothing here compiles or runs Java — the code lives in the sibling `manual-code-drills` Maven project (`config.MANUAL_CODE_DRILLS_DIR`).
 - `_fmt_currency(value, currency) -> str` — `"CAD 245,000"` formatting.
 - `render_comp_panel(comp_record, job_id) -> str` — comp-estimate accordion inside a cover-letter row.
 - `render_cl_row(job, co_by_id=None, comp_record=None, apps=None) -> str` — one cover-letter row in the apply queue. When `apps` is supplied, runs `config.find_duplicate_application`; on a hit it renders an "⚠ already applied" badge and gates Mark Applied behind a confirm dialog that posts `force=1`. Also renders a `gov/defense: flag` badge showing the apply-rank penalty (`rank N/130`) when the gov-screen result is `flag`; `fail` roles are excluded upstream so they don't reach this renderer. The row still displays the pure composite via `job_score`, but the apply queue is ordered by `apply_rank_score`.
@@ -1689,6 +1699,39 @@ client neither hides matches from the scanner nor is changed by it.
 Argparse: `--dry-run`, `--window-days N` (default `INBOX_SCAN_WINDOW_DAYS`),
 `--sample EML_PATH`, `--reset`. Prints a machine-readable last line for
 `serve.py` to parse: `SCANNED: N`, `RESET: matches=N processed=N`, or
+`ERROR: <message>`.
+
+---
+
+## `scripts/drills.py`
+
+**Role.** Backs the `/today` "Code drills" section with two Claude-driven
+actions (Java only). The store, numbering, and completion helpers live in
+`config.py`; this script adds the LLM calls. Uses `CL_MODEL` (Sonnet), the same
+key/model as cover letters / answer-questions. **Never compiles or runs Java** —
+the code + JUnit tests live in the sibling Maven project
+(`config.MANUAL_CODE_DRILLS_DIR`).
+
+**Functions.**
+
+- `generate_drill(language='java') -> dict` — asks Claude for the next drill: a
+  short, deliberately **underspecified** interview-style prompt plus a partial
+  interface (method names + params, **no return types**, **no hints** about edge
+  cases / pitfalls). The system prompt (`_GENERATE_SYSTEM`) enforces those
+  constraints and passes prior drill titles to avoid repeats. Numbered via
+  `config.next_drill_number`, appended via `config.save_drills`, logged
+  (`drill_generated`).
+- `review_drill(number) -> str` — reads the operator's `Drill<N>.java` +
+  `Drill<N>Test.java` from the Maven project and asks Claude
+  (`_REVIEW_SYSTEM`) for an interview-style review (correctness, the
+  ambiguities the prompt left open, idiomatic Java, complexity, test quality,
+  interview signal). Appends `{at, text}` to the record's `feedback` and returns
+  it. Raises `FileNotFoundError` if no attempt exists yet.
+- `_call_claude`, `_extract_json`, `_append_log` — helpers mirroring
+  `answer_questions.py`.
+
+**CLI.** `python scripts/drills.py generate` / `... review --number N`. Prints a
+machine-readable last line for `serve.py`: `GENERATED: <n>`, `REVIEWED: <n>`, or
 `ERROR: <message>`.
 
 ---

@@ -58,6 +58,7 @@ JSONL logs have no foreign keys to the rest — they're parallel.
 | `email_staged.json` | JSON array | Parsed LinkedIn alert jobs awaiting per-row ingest | `linkedin_fetch.py`, `prefilter_staged.py`, `cleanup_staged_jd.py`, `serve.py` | `serve.py` `/today` |
 | `inbox_matches.json` | JSON array | Staged rejection / interview / offer email matches awaiting one-click review | `inbox_scan.py`, `serve.py` (apply/dismiss) | `serve.py` `/today` |
 | `inbox_scan_state.json` | JSON object | Cross-run `processed_message_ids` for the inbox scanner's own dedup | `inbox_scan.py` | `inbox_scan.py` |
+| `drills.json` | JSON array | Claude-generated code drills (prompt, partial interface, status, review feedback) for the `/today` Code-drills section | `scripts/drills.py`, `serve.py` (complete) | `serve.py` `/today` |
 | `crawl_log.jsonl` | JSONL | Per-run crawl summaries (funnel breakdown) | `crawl.py` | manual inspection |
 | `jd_fetch_log.jsonl` | JSONL | Per-URL JD-fetch diagnostics from `linkedin_fetch._fetch_jd_text` | `linkedin_fetch.py` | manual inspection |
 | `board_discovery_log.jsonl` | JSONL | Per-company careers-page scrape diagnostics | `discover_boards_from_careers.py` | manual inspection |
@@ -907,6 +908,64 @@ in your own client doesn't affect it.
     "nomid:stripeupdateonyourapplication20260720"
   ]
 }
+```
+
+---
+
+## `data/drills.json`
+
+**Role.** Claude-generated interview-prep coding drills for the `/today` "Code
+drills" section. Each drill is a short, deliberately underspecified prompt with
+a partial interface (method names + params, **no return types**). The actual
+`Drill<N>.java` + `Drill<N>Test.java` live in the sibling Maven project
+(`config.MANUAL_CODE_DRILLS_DIR`, default `../manual-code-drills`), **not** here;
+this file only holds the generated prompts, status, and review feedback.
+
+**Lifecycle.**
+
+- **Appended** by `scripts/drills.py generate` (`config.save_drills`) — one
+  record per generated drill, numbered one past the highest `Drill<N>.java` in
+  the Maven project and the highest number already in the store
+  (`config.next_drill_number`).
+- **Mutated by** `scripts/drills.py review` (appends to `feedback`) and
+  `serve.py` via `config.mark_drill_complete` (sets `status`/`completed_at`).
+- **Read** by `serve.py` for the current drill (`config.current_drill`), the
+  drills-completed-today meter (`config.drills_completed_today`), and
+  `section_done`.
+- **Never deleted.**
+
+### Schema
+
+A JSON array; each record:
+
+| Field | Type | Notes |
+|---|---|---|
+| `number` | int | Drill number (continues the `Drill<N>.java` sequence). Primary key. |
+| `language` | string | `"java"` (only language currently generated). |
+| `title` | string | Short generated name. |
+| `prompt` | string | The interview-style, underspecified problem statement. No hints. |
+| `interface` | list[string] | Method-name-with-params strings, **without return types** (deciding those is part of the drill). |
+| `status` | `"active"` / `"complete"` | `complete` once marked done. |
+| `created_at` | ISO datetime | When generated. |
+| `completed_at` | ISO datetime / `null` | Set by `mark_drill_complete`; its date drives the daily goal. |
+| `feedback` | list[object] | Review history: `{"at": ISO, "text": <markdown feedback>}`, appended by each review. |
+
+### Example
+
+```json
+[
+  {
+    "number": 3,
+    "language": "java",
+    "title": "Recent Activity Feed Tracker",
+    "prompt": "Build a simple activity feed. Users log events (a user + an event type); support pulling the most recent N events, the distinct event types for a user, and the most active user…",
+    "interface": ["record(String user, String eventType)", "recent(int n)", "typesFor(String user)", "mostActive()"],
+    "status": "active",
+    "created_at": "2026-07-23T23:28:08+00:00",
+    "completed_at": null,
+    "feedback": []
+  }
+]
 ```
 
 ---
