@@ -61,9 +61,11 @@ rejected); **pipeline expiry** — un-applied jobs older than
 `PIPELINE_EXPIRY_DAYS` (45) since they were ingested are auto-archived, so the
 apply queue never fills with months-old postings (the same expiry sweep also
 runs at the end of every crawl); and a **daily data backup** — an
-at-most-once-per-day local snapshot of the gitignored `data/*.json` files into
+at-most-once-per-day snapshot of the gitignored `data/*.json` files into
 `data/backups/<date>/` (kept 7 days), so a stray delete or corrupt write is
-recoverable.
+recoverable. Set `NEXTROLE_BACKUP_DIR` to a path outside the repo (e.g. a
+cloud-synced folder) so snapshots also survive a full `data/` loss — see
+SETUP.md.
 
 1. **Status updates** — outcomes on already-submitted applications
    (recruiter screens, interview requests, rejections, offers). Rejections

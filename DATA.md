@@ -979,11 +979,13 @@ A JSON array; each record:
 
 ## `data/backups/`
 
-**Role.** Local daily snapshots of the gitignored `data/` files, so a stray
-delete or corrupt write can be recovered. Each snapshot is a dir named for the
-date (`data/backups/2026-07-23/`) holding a copy of every `data/*.json` at
-snapshot time **except** `job_pipeline.json` (large, regenerable via crawl,
-already `.bak`'d by `rescore_all`/`scan_*`) and any `*.bak` files.
+**Role.** Daily snapshots of the gitignored `data/` files, so a stray delete or
+corrupt write can be recovered. Each snapshot is a dir named for the date
+(`<backup-dir>/2026-07-23/`) holding a copy of every `data/*.json` at snapshot
+time **except** `job_pipeline.json` (large, regenerable via crawl, already
+`.bak`'d by `rescore_all`/`scan_*`) and any `*.bak` files. The backup dir
+defaults to `data/backups/` (in-repo, gitignored) and is relocated with the
+`NEXTROLE_BACKUP_DIR` env var (`config.DATA_BACKUP_DIR`).
 
 **Lifecycle.**
 
@@ -991,10 +993,10 @@ already `.bak`'d by `rescore_all`/`scan_*`) and any `*.bak` files.
   every `/today` render (`serve.apply_data_backup`) — at most once per day
   (skipped if today's dir already exists; `--force` overrides).
 - **Pruned** to the most recent `config.DATA_BACKUP_RETAIN_DAYS` (7) snapshots.
-- **Recovery** is a manual copy back into `data/`. This guards against
-  single-file loss *within* `data/`; it does **not** protect against losing the
-  whole `data/` tree (the snapshots live under it) — keep the external backup of
-  `data/` recommended in SETUP.md.
+- **Recovery** is a manual copy back into `data/`. With the default in-repo
+  location this guards single-file loss *within* `data/`; set
+  `NEXTROLE_BACKUP_DIR` to a path outside the repo (SETUP.md) so snapshots also
+  survive a full `data/` loss.
 
 ---
 

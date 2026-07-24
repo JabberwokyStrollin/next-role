@@ -145,12 +145,17 @@ Move-Item data "$env:USERPROFILE\OneDrive\next-role-data"
 New-Item -ItemType SymbolicLink -Path data -Target "$env:USERPROFILE\OneDrive\next-role-data"
 ```
 
-**Automatic local snapshots.** Opening `/today` also takes an
-at-most-once-per-day snapshot of the `data/*.json` files into
-`data/backups/<date>/` (kept 7 days; `scripts/backup_data.py`), so a stray
-delete or corrupt write is recoverable by copying the file back. This guards
-individual files *within* `data/` — it does **not** replace the external backup
-above, which is what protects against losing the whole `data/` tree.
+**Automatic snapshots.** Opening `/today` also takes an at-most-once-per-day
+snapshot of the `data/*.json` files into `<backup-dir>/<date>/` (kept 7 days;
+`scripts/backup_data.py`), so a stray delete or corrupt write is recoverable by
+copying the file back. The default backup dir is `data/backups/` (in-repo,
+gitignored) — that guards individual files *within* `data/`. To also survive
+losing the whole `data/` tree, set `NEXTROLE_BACKUP_DIR` to a path **outside the
+repo** (ideally the cloud-synced folder above):
+
+```powershell
+$env:NEXTROLE_BACKUP_DIR = "$env:USERPROFILE\OneDrive\next-role-backups"
+```
 
 See `DATA.md` for the full schema of every file under `data/`.
 
@@ -207,6 +212,7 @@ provider's app-password flow.
 |---|---|
 | `NEXTROLE_EDITOR_CMD` | Editor CLI for the Code-drills **Open manual-code-drills** button (default `code`, VS Code). Falls back to the OS file manager if the launch fails. |
 | `NEXTROLE_DRILLS_DIR` | Override the sibling drills project location (default `../manual-code-drills`). |
+| `NEXTROLE_BACKUP_DIR` | Where daily `data/` snapshots are written (default `data/backups/`, in-repo). Set to a path outside the repo so snapshots survive a full `data/` loss. |
 
 ### Sender allowlist
 
