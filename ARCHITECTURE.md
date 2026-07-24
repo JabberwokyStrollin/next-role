@@ -416,11 +416,12 @@ past these states, are untouched; the auto-rejection leaves `response_date`
 company throttle — this advances application *status*; it is not a cooldown.
 
 #### `normalize_role_title(title: str) -> str`
-Reduces a title to a comparable core: lowercases, drops any specialization
-after the first comma or `(`, strips punctuation, collapses whitespace.
-`"Staff II Software Engineer, Data Ingestion"` and `"Staff II Software
-Engineer"` both → `"staff ii software engineer"`. Used only by
-`find_duplicate_application`.
+Reduces a title to a comparable form: lowercases, strips punctuation, collapses
+whitespace. The **full** title is compared — a specialization after a comma / `(`
+is kept — so `"Senior Software Engineer, Analytics Platform"` → `"senior software
+engineer analytics platform"` is **distinct** from plain `"Senior Software
+Engineer"`. (Comma and parenthesis variants of the same specialization still
+normalize alike.) Used only by `find_duplicate_application`.
 
 #### `find_duplicate_application(company_id, title, apps, exclude_app_id=None) -> dict | None`
 Apply-time duplicate guard. Returns an existing application at the same
@@ -1476,8 +1477,8 @@ Implements `update_status.py log --job-id UUID [--method M] [--plain-text] [--no
 
 - Loads the job from `job_pipeline.json`. Exits 1 if not found.
 - Refuses to double-log the **same job** (warns and returns).
-- Refuses to log a **same company + core title** duplicate
-  (`config.find_duplicate_application`) unless `--force` — exits 2 with a
+- Refuses to log a **same company + same title** duplicate
+  (`config.find_duplicate_application`, full-title match) unless `--force` — exits 2 with a
   warning otherwise.
 - Builds an application record (including `rejection_reason=None`) with
   `composite_score_at_apply` filled from the SSOT `composite_score`.

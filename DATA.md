@@ -286,7 +286,7 @@ applications panel, the `/today` status-updates section, and (via
 
 **Lifecycle.**
 
-- **Created** by `update_status.cmd_log` — flips the source job's `pipeline_status` to `"applied"` and snapshots the composite score. Blocks a second application to the same company + core title (see `config.find_duplicate_application`) unless `--force` is passed.
+- **Created** by `update_status.cmd_log` — flips the source job's `pipeline_status` to `"applied"` and snapshots the composite score. Blocks a second application to the same company + same (full) title (see `config.find_duplicate_application`) unless `--force` is passed.
 - **Mutated by** `update_status.cmd_status` (status transitions, `response_date` on first non-applied transition, `rejection_reason` when rejected) and the time-based aging in `config.auto_age_application` — called by both `serve.py:apply_ghosted_check` and `update_status.cmd_list`. Aging advances un-answered applications: `applied` → `ghosted` after `GHOSTED_DAYS` (21), then `ghosted` → `rejected` after `GHOSTED_REJECTED_DAYS` (45, `rejection_reason="ghosted_timeout"`).
 - **Never deleted.**
 
