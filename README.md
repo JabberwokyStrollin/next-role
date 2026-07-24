@@ -275,9 +275,11 @@ loud on a whiteboard/live screen.
   names + params, **no return types** — deciding those is part of the drill).
   It gives no hints about edge cases or what to watch for. Drills are numbered
   in sequence (`Drill3`, `Drill4`, …) after whatever's already in the project.
-- Implement `Drill<N>.java` + `Drill<N>Test.java` **by hand** in the sibling
-  `manual-code-drills` Maven project. **Open manual-code-drills** launches it
-  in your editor (VS Code by default; override with `NEXTROLE_EDITOR_CMD`).
+- The prompt renders as a **ready-to-paste Java class-description comment**
+  (with a copy button) above a `public class Drill<N>` stub — paste it straight
+  into your new file. Implement `Drill<N>.java` + `Drill<N>Test.java` **by hand**
+  in the sibling `manual-code-drills` Maven project. **Open manual-code-drills**
+  launches it in your editor (VS Code by default; override `NEXTROLE_EDITOR_CMD`).
 - **Check my code & get feedback** — Claude reads your attempt + test and
   returns an interview-style review (correctness, the ambiguities you resolved,
   idiomatic Java, complexity, test quality, and signal an interviewer would

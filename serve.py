@@ -2860,10 +2860,37 @@ def run_drill_command(*args: str) -> tuple[bool, str]:
     return result.returncode == 0, (result.stdout or "")
 
 
+def drill_comment_block(drill: dict) -> str:
+    """Format a drill as a ready-to-paste Java class-description comment: the
+    prompt as ``//`` lines (word-wrapped) above a ``public class Drill<N>`` stub,
+    followed by the interface (return types intentionally omitted). Mirrors the
+    hand-written comment style of the existing Drill1/Drill2 sources."""
+    import textwrap
+    num    = drill.get("number")
+    title  = (drill.get("title") or "").strip()
+    prompt = (drill.get("prompt") or "").strip()
+    iface  = drill.get("interface", [])
+
+    lines = [f"// Drill {num}: {title}".rstrip(), "//"]
+    for para in prompt.split("\n"):
+        para = para.strip()
+        if not para:
+            lines.append("//")
+            continue
+        for wl in textwrap.wrap(para, width=76):
+            lines.append(f"// {wl}")
+    if iface:
+        lines.append("//")
+        lines.append("// Interface (you decide the return types):")
+        lines.extend(f"// - {sig}" for sig in iface)
+    lines += [f"public class Drill{num} {{", "", "}"]
+    return "\n".join(lines)
+
+
 def render_drills_body(view: str = "default") -> str:
     """Code-drills section: a drills-completed-today meter, the current drill's
-    prompt + partial interface, and the generate / open / review / complete
-    actions. Latest review feedback (if any) renders inline."""
+    prompt rendered as a copy-pasteable Java class comment, and the generate /
+    open / review / complete actions. Latest review feedback renders inline."""
     from html import escape as esc
 
     parts   = [_flash_notice_html(pop_drill_flash())]
@@ -2903,26 +2930,42 @@ def render_drills_body(view: str = "default") -> str:
                     if complete else
                     '<span class="app-status app-status-applied">active</span>')
 
-    iface = "".join(f"<li><code>{esc(sig)}</code></li>"
-                    for sig in cur.get("interface", []))
-
     parts.append(
         f'<div style="color:#888;font-size:12px;text-transform:uppercase;'
         f'letter-spacing:.04em">Current drill</div>'
         f'<h3 style="margin:2px 0 6px">Drill {num}: {esc(cur.get("title","?"))} '
         f'<span class="pf-badge">{esc(cur.get("language","java"))}</span> '
-        f'{status_badge}</h3>'
-        f'<div style="white-space:pre-wrap;line-height:1.5;margin-bottom:10px">'
-        f'{esc(cur.get("prompt",""))}</div>')
-    if iface:
-        parts.append(
-            '<div style="font-size:13px"><strong>Interface</strong> '
-            '<span style="color:#888">(return types intentionally omitted — '
-            'deciding them is part of the drill)</span>'
-            f'<ul style="margin:4px 0">{iface}</ul></div>')
+        f'{status_badge}</h3>')
+
+    # The prompt + interface, formatted as a ready-to-paste Java class comment
+    # (the prompt IS the class description) with a copy button.
+    block = drill_comment_block(cur)
+    rows  = min(max(block.count("\n") + 1, 6), 30)
+    parts.append(
+        f'<p style="font-size:12px;color:#888;margin:6px 0">Paste this as the top '
+        f'of <code>Drill{num}.java</code> — the prompt is the class description; '
+        f'you decide the return types.</p>'
+        f'<textarea id="drill-comment" readonly rows="{rows}" wrap="off" '
+        f'style="width:100%;box-sizing:border-box;font-family:ui-monospace,'
+        f'Consolas,monospace;font-size:12px;background:#f6f8fa;border:1px solid '
+        f'#e1e4e8;border-radius:6px;padding:10px">{esc(block)}</textarea>'
+        f'<button type="button" class="btn btn-secondary drill-copy" '
+        f'data-target="drill-comment" style="margin-top:6px">'
+        f'Copy prompt comment</button>'
+        f'<script>(function(){{'
+        f'var b=document.querySelector(".drill-copy");if(!b||b._bound)return;'
+        f'b._bound=true;b.addEventListener("click",function(){{'
+        f'var el=document.getElementById(b.getAttribute("data-target"));'
+        f'if(!el)return;el.focus();el.select();'
+        f'var ok=function(){{var o=b.textContent;b.textContent="Copied!";'
+        f'setTimeout(function(){{b.textContent=o;}},1200);}};'
+        f'if(navigator.clipboard&&navigator.clipboard.writeText)'
+        f'{{navigator.clipboard.writeText(el.value).then(ok,function(){{'
+        f'try{{document.execCommand("copy");ok();}}catch(e){{}}}});}}'
+        f'else{{try{{document.execCommand("copy");ok();}}catch(e){{}}}}'
+        f'}});}})();</script>')
 
     # Where to write the attempt.
-    impl_p = drill_impl_path(num)
     parts.append(
         f'<p style="font-size:12px;color:#888;margin:6px 0">Implement '
         f'<code>Drill{num}.java</code> and <code>Drill{num}Test.java</code> in '
