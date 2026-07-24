@@ -145,6 +145,13 @@ Move-Item data "$env:USERPROFILE\OneDrive\next-role-data"
 New-Item -ItemType SymbolicLink -Path data -Target "$env:USERPROFILE\OneDrive\next-role-data"
 ```
 
+**Automatic local snapshots.** Opening `/today` also takes an
+at-most-once-per-day snapshot of the `data/*.json` files into
+`data/backups/<date>/` (kept 7 days; `scripts/backup_data.py`), so a stray
+delete or corrupt write is recoverable by copying the file back. This guards
+individual files *within* `data/` — it does **not** replace the external backup
+above, which is what protects against losing the whole `data/` tree.
+
 See `DATA.md` for the full schema of every file under `data/`.
 
 ---

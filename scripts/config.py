@@ -46,6 +46,16 @@ APPLICATION_QUESTIONS_PATH = DATA_DIR / "application_questions.json"
 RESUME_ENTRY_NOTES_PATH    = DATA_DIR / "resume_entry_notes.json"
 DRILLS_STORE_PATH          = DATA_DIR / "drills.json"
 
+# ─── Data backups (local, gitignored) ─────────────────────────────────────────
+#
+# data/ is gitignored and otherwise unbacked, so a stray delete or corrupt write
+# loses real operator state. scripts/backup_data.py takes an at-most-once-per-day
+# snapshot of the important data/*.json files into data/backups/<YYYY-MM-DD>/ and
+# keeps the most recent DATA_BACKUP_RETAIN_DAYS. Protects against single-file loss
+# within data/, not loss of the whole tree — keep the external backup too.
+DATA_BACKUP_DIR         = DATA_DIR / "backups"
+DATA_BACKUP_RETAIN_DAYS = 7
+
 # ─── Code drills (interview-prep) ─────────────────────────────────────────────
 #
 # The /today "Code drills" section generates interview-style Java drills and

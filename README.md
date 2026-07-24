@@ -56,11 +56,14 @@ python serve.py
 
 Opens `http://localhost:5000/today` — the daily checklist with five
 sections you tick off as you work through them. Opening this page also runs
-two self-cleaning sweeps (no cron needed): application aging (ghosted →
-rejected) and **pipeline expiry** — un-applied jobs older than
+three self-cleaning sweeps (no cron needed): application aging (ghosted →
+rejected); **pipeline expiry** — un-applied jobs older than
 `PIPELINE_EXPIRY_DAYS` (45) since they were ingested are auto-archived, so the
-apply queue never fills with months-old postings. (The same expiry sweep also
-runs at the end of every crawl.)
+apply queue never fills with months-old postings (the same expiry sweep also
+runs at the end of every crawl); and a **daily data backup** — an
+at-most-once-per-day local snapshot of the gitignored `data/*.json` files into
+`data/backups/<date>/` (kept 7 days), so a stray delete or corrupt write is
+recoverable.
 
 1. **Status updates** — outcomes on already-submitted applications
    (recruiter screens, interview requests, rejections, offers). Rejections
@@ -405,6 +408,7 @@ scripts/
   linkedin_fetch.py     — IMAP fetch of LinkedIn job-alert emails
   inbox_scan.py         — IMAP scan for rejection / interview replies to open applications
   drills.py             — generate interview-prep code drills + review attempts (Sonnet)
+  backup_data.py        — daily local snapshots of data/*.json (stray-delete recovery)
   dashboard.py          — terminal pipeline summary
   update_status.py      — application logging + status transitions
   metrics.py            — read-only analytics for the /metrics page
@@ -421,6 +425,7 @@ scripts/
 profile/                — gitignored: your resume, rules, scoring criteria
 profile.example/        — committed templates — copy to profile/ to start
 data/                   — gitignored: pipeline JSON files (see DATA.md)
+data/backups/           — gitignored: daily local snapshots of data/*.json
 output/                 — gitignored: generated cover letters (.docx)
 ```
 
