@@ -1360,7 +1360,8 @@ sweep failure can't block the daily-checklist page.
 - `render_status_updates_body(view='active') -> str` / `render_app_row(app) -> str` — status-updates section + per-app row with status-change buttons. Two sub-tabs: `active` (live applications, excludes ghosted) and `ghosted` (auto-flipped, awaiting the `ghosted_timeout` auto-rejection). `render_app_row` includes the `rejected_interview_failed` button. Prepends `render_inbox_matches_block(apps)`.
 - `render_inbox_matches_block(apps) -> str` / `render_inbox_match_row(m, current_status=None) -> str` — top-of-section panel for the inbox scanner: a "Scan inbox for replies" button (disabled when `linkedin_env_missing()`), plus any staged matches from `data/inbox_matches.json` whose application is still open, each with a one-click **Apply: <suggestion>** (posts to `/today/inbox/apply`) and **Dismiss** (`/today/inbox/dismiss`). The block passes each match's live application status into the row, which resolves the suggestion via `inbox_match_suggestion`. Rows show company, title, the resolved suggestion badge (recruiter screen / interview / offer / rejection reason), sender/subject, and the evidence snippet. Staged suggestions only — applying is always an explicit operator action.
 - `render_cover_letters_body() -> str` — top-N apply queue, ranked by `apply_rank_score` (full composite minus the gov-screen `flag` penalty), filtered by `company_block_reason` and `gov_screen_block_reason` (gov/defense `fail` roles hidden). Rows still display the pure composite via `job_score`. Renders the **Applications sent today: X / `DAILY_APPLICATION_GOAL`** meter (from `applications_today_count`), which turns green + shows "✓ goal met" once the goal is reached.
-- **Code drills** (`render_drills_body(view='default') -> str`) — the `code_drills` section. Reads the generated drills from `config.load_drills` and shows: a **drills-completed-today: X / `DAILY_DRILL_GOAL`** meter, the **current drill** (`config.current_drill` — highest number) with its prompt + partial interface (return types intentionally omitted), and the actions **Open manual-code-drills** / **Generate new drill prompt** / **Check my code & get feedback** / **Mark drill complete**. The latest review feedback renders inline. `run_drill_command(*args)` shells out to `scripts/drills.py` (generate/review, ~15-30s Claude call, 180s timeout); `set_drill_flash`/`pop_drill_flash` back the section's one-shot flash. Nothing here compiles or runs Java — the code lives in the sibling `manual-code-drills` Maven project (`config.MANUAL_CODE_DRILLS_DIR`).
+- **Code drills** (`render_drills_body(view='default') -> str`) — the `code_drills` section. Reads the generated drills from `config.load_drills` and shows: a **drills-completed-today: X / `DAILY_DRILL_GOAL`** meter, the **current drill** (`config.current_drill` — highest number) with its prompt rendered by `drill_comment_block` as a **ready-to-paste Java class-description comment** (a readonly `<textarea>` + a "Copy prompt comment" button, self-contained inline JS) — the comment only, no class stub — and the actions **Open manual-code-drills** / **Generate new drill prompt** / **Check my code & get feedback** / **Mark drill complete**. The latest review feedback renders inline. `run_drill_command(*args)` shells out to `scripts/drills.py` (generate/review, ~15-30s Claude call, 180s timeout); `set_drill_flash`/`pop_drill_flash` back the section's one-shot flash. Nothing here compiles or runs Java — the code lives in the sibling `manual-code-drills` Maven project (`config.MANUAL_CODE_DRILLS_DIR`).
+- `drill_comment_block(drill) -> str` — formats a drill as a `//`-commented, word-wrapped class-description comment (prompt + interface, return types omitted). Comment only — no class stub — so it drops in above whatever class declaration you write. Matches the hand-written Drill1/Drill2 comment style; derived on render from the stored plain-text prompt/interface (nothing extra stored).
 - `_fmt_currency(value, currency) -> str` — `"CAD 245,000"` formatting.
 - `render_comp_panel(comp_record, job_id) -> str` — comp-estimate accordion inside a cover-letter row.
 - `render_cl_row(job, co_by_id=None, comp_record=None, apps=None) -> str` — one cover-letter row in the apply queue. When `apps` is supplied, runs `config.find_duplicate_application`; on a hit it renders an "⚠ already applied" badge and gates Mark Applied behind a confirm dialog that posts `force=1`. Also renders a `gov/defense: flag` badge showing the apply-rank penalty (`rank N/130`) when the gov-screen result is `flag`; `fail` roles are excluded upstream so they don't reach this renderer. The row still displays the pure composite via `job_score`, but the apply queue is ordered by `apply_rank_score`.
@@ -1714,13 +1715,18 @@ the code + JUnit tests live in the sibling Maven project
 
 **Functions.**
 
-- `generate_drill(language='java') -> dict` — asks Claude for the next drill: a
-  short, deliberately **underspecified** interview-style prompt plus a partial
+- `generate_drill(language='java') -> dict` — asks Claude for a drill: a short,
+  deliberately **underspecified** interview-style prompt plus a partial
   interface (method names + params, **no return types**, **no hints** about edge
   cases / pitfalls). The system prompt (`_GENERATE_SYSTEM`) enforces those
-  constraints and passes prior drill titles to avoid repeats. Numbered via
-  `config.next_drill_number`, appended via `config.save_drills`, logged
-  (`drill_generated`).
+  constraints and passes prior drill titles to avoid repeats. **The number does
+  not advance while the current drill is still active** — if `config.current_drill`
+  is `active`, generation reuses that number and *replaces* the record (a
+  reroll); only once it's marked complete (or there is none) does it take
+  `config.next_drill_number`. **Every** generated prompt — including
+  regenerations — is written to the process log (`drill_generated`, with the full
+  `prompt`/`interface` and a `regenerated` flag), so there's a durable record of
+  all drills created even though the store keeps only the latest active version.
 - `review_drill(number) -> str` — reads the operator's `Drill<N>.java` +
   `Drill<N>Test.java` from the Maven project and asks Claude
   (`_REVIEW_SYSTEM`) for an interview-style review (correctness, the

@@ -616,6 +616,8 @@ forensics.
 | `application_question_generated` | `answer_questions.generate_answer` | `"class=<motivation\|behavioral> version=<n> chars=<n> tokens_in=<n> tokens_out=<n>"` |
 | `application_question_edited` | `answer_questions.save_edit` | `"version=<n> chars=<n>"` |
 | `application_question_finalized` | `answer_questions.finalize_answer` | `"version=<n> chars=<n>"` |
+| `drill_generated` | `drills.generate_drill` | `"<Generated\|Regenerated> Drill <n> (java): <title>"`. Also carries the full `prompt`, `interface`, and a `regenerated` bool on the event — the durable record of every drill prompt created (the `drills.json` store keeps only the latest active version). |
+| `drill_reviewed` | `drills.review_drill` | `"Reviewed Drill <n>."` |
 
 ### Example
 
@@ -923,10 +925,14 @@ this file only holds the generated prompts, status, and review feedback.
 
 **Lifecycle.**
 
-- **Appended** by `scripts/drills.py generate` (`config.save_drills`) — one
-  record per generated drill, numbered one past the highest `Drill<N>.java` in
-  the Maven project and the highest number already in the store
-  (`config.next_drill_number`).
+- **Written** by `scripts/drills.py generate` (`config.save_drills`). The number
+  only advances once the current drill is marked **complete**: while the current
+  drill is `active`, regenerating *replaces* it at the same number (a reroll);
+  otherwise a new record takes the next number — one past the highest
+  `Drill<N>.java` in the Maven project and the highest number in the store
+  (`config.next_drill_number`). The store therefore keeps only the latest version
+  of an active drill; the full history of every generated prompt lives in the
+  process log (`drill_generated` events).
 - **Mutated by** `scripts/drills.py review` (appends to `feedback`) and
   `serve.py` via `config.mark_drill_complete` (sets `status`/`completed_at`).
 - **Read** by `serve.py` for the current drill (`config.current_drill`), the
