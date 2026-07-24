@@ -46,14 +46,21 @@ APPLICATION_QUESTIONS_PATH = DATA_DIR / "application_questions.json"
 RESUME_ENTRY_NOTES_PATH    = DATA_DIR / "resume_entry_notes.json"
 DRILLS_STORE_PATH          = DATA_DIR / "drills.json"
 
-# ─── Data backups (local, gitignored) ─────────────────────────────────────────
+# ─── Data backups ─────────────────────────────────────────────────────────────
 #
 # data/ is gitignored and otherwise unbacked, so a stray delete or corrupt write
 # loses real operator state. scripts/backup_data.py takes an at-most-once-per-day
-# snapshot of the important data/*.json files into data/backups/<YYYY-MM-DD>/ and
-# keeps the most recent DATA_BACKUP_RETAIN_DAYS. Protects against single-file loss
-# within data/, not loss of the whole tree — keep the external backup too.
-DATA_BACKUP_DIR         = DATA_DIR / "backups"
+# snapshot of the important data/*.json files into DATA_BACKUP_DIR/<YYYY-MM-DD>/
+# and keeps the most recent DATA_BACKUP_RETAIN_DAYS.
+#
+# Default is data/backups/ (gitignored, in-repo) — that guards single-file loss
+# within data/ but not loss of the whole tree. Set NEXTROLE_BACKUP_DIR to a path
+# OUTSIDE the repo (e.g. a cloud-synced folder) so snapshots survive even a full
+# data/ wipe.
+_backup_env = os.environ.get("NEXTROLE_BACKUP_DIR", "").strip()
+DATA_BACKUP_DIR = (
+    Path(_backup_env).expanduser() if _backup_env else DATA_DIR / "backups"
+).resolve()
 DATA_BACKUP_RETAIN_DAYS = 7
 
 # ─── Code drills (interview-prep) ─────────────────────────────────────────────

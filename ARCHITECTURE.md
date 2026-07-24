@@ -116,7 +116,7 @@ file.
 | `DAILY_APPLICATION_GOAL` | `int` | Applications-per-day target (10). The `/today` "Cover letters & apply" section auto-earns its green checkmark once this many applications are logged *today*. Derived from `application_tracker.date_applied`, so it resets daily. serve.py reads the constant; never hardcode the number. |
 | `DAILY_DRILL_GOAL` | `int` | Code-drills-per-day target (1). The `/today` "Code drills" section auto-earns its checkmark once this many drills are marked complete *today* (`drills_completed_today`). |
 | `DRILLS_STORE_PATH`, `MANUAL_CODE_DRILLS_DIR`, `EDITOR_CMD` | Path / str | Generated-drill store (`data/drills.json`); the sibling Maven project holding the code (default `../manual-code-drills`, override `NEXTROLE_DRILLS_DIR`); the editor CLI for the open button (`NEXTROLE_EDITOR_CMD`, default `"code"` for VS Code → file-manager fallback on failure). |
-| `DATA_BACKUP_DIR`, `DATA_BACKUP_RETAIN_DAYS` | Path / int | Local daily-snapshot dir (`data/backups/`) and retention (7). See `scripts/backup_data.py`. |
+| `DATA_BACKUP_DIR`, `DATA_BACKUP_RETAIN_DAYS` | Path / int | Daily-snapshot dir (default `data/backups/`; override with `NEXTROLE_BACKUP_DIR` to a path outside the repo so snapshots survive a full `data/` loss) and retention (7). See `scripts/backup_data.py`. |
 | Drill helpers | funcs | `drill_impl_path(n)` / `drill_test_path(n)` (→ `Drill<n>.java` / `Drill<n>Test.java` in the Maven project); `load_drills`/`save_drills`; `next_drill_number()` (max of on-disk `Drill<N>.java` + store numbers, +1); `current_drill()` (highest number); `drills_completed_today()`; `mark_drill_complete(n)`. |
 | `INBOX_SCAN_WINDOW_DAYS` | `int` | Look-back window (14) for `scripts/inbox_scan.py` — INBOX messages received within this many days are scanned for rejection/interview replies, regardless of read state. |
 | `_POSITION_FILLED_PATTERNS` / `_REJECTION_PATTERNS` / `_OFFER_PATTERNS` / `_INTERVIEW_PATTERNS` | `list[Pattern]` | Deterministic phrase rules for `classify_inbox_email`. Position-filled → rejection reason `position_filled`; general rejection → `generic`; offer → `offer`; advancement (recruiter screen / interview invitation) → signal `interview`. "invite" counts only when followed by an interview/call word (so "invite you to follow us on LinkedIn" is ignored). |
@@ -1755,11 +1755,13 @@ machine-readable last line for `serve.py`: `GENERATED: <n>`, `REVIEWED: <n>`, or
 
 **Role.** Guards the gitignored, otherwise-unbacked `data/` files against a
 stray delete or corrupt write. Takes an **at-most-once-per-day** snapshot of the
-important `data/*.json` files into `data/backups/<YYYY-MM-DD>/` and prunes to the
-most recent `config.DATA_BACKUP_RETAIN_DAYS` (7). Protects against single-file
-loss *within* `data/`, not loss of the whole tree (snapshots live under it) —
-the external backup in SETUP.md still matters. `job_pipeline.json` is skipped
-(large, regenerable via crawl, already `.bak`'d by `rescore_all`/`scan_*`).
+important `data/*.json` files into `config.DATA_BACKUP_DIR/<YYYY-MM-DD>/` and
+prunes to the most recent `config.DATA_BACKUP_RETAIN_DAYS` (7). The backup dir
+defaults to `data/backups/` (in-repo) but is relocated outside the repo by
+setting `NEXTROLE_BACKUP_DIR` — when in-repo it guards single-file loss *within*
+`data/`; pointed outside, snapshots also survive a full `data/` loss.
+`job_pipeline.json` is skipped (large, regenerable via crawl, already `.bak`'d by
+`rescore_all`/`scan_*`).
 
 **Functions.**
 
