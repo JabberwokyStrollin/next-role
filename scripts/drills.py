@@ -136,9 +136,21 @@ def _append_log(event: dict) -> None:
 
 
 def generate_drill(language: str = "java") -> dict:
-    """Generate the next drill, append it to the store, and return the record."""
-    number   = next_drill_number()
-    existing = [f"Drill {d.get('number')}: {d.get('title','')}" for d in load_drills()]
+    """Generate a drill and return the record. The number does NOT advance while
+    the current drill is still active: regenerating replaces the un-completed
+    drill at the same number. Only once the current drill is marked complete
+    (or there is none) does generation take the next number. Every generated
+    prompt — including regenerations — is logged to the process log, so there's
+    a durable record of which drills were created even though the store keeps
+    only the latest version of an active drill."""
+    drills = load_drills()
+    cur    = current_drill(drills)
+    if cur and cur.get("status") == "active":
+        number, regen = int(cur["number"]), True
+    else:
+        number, regen = next_drill_number(), False
+
+    existing = [f"Drill {d.get('number')}: {d.get('title','')}" for d in drills]
     used = ("\n".join(existing) if existing
             else "(none yet — Drill 1 was a multi-level flag store, "
                  "Drill 2 a word-frequency counter; avoid those shapes)")
@@ -159,12 +171,18 @@ def generate_drill(language: str = "java") -> dict:
         "completed_at": None,
         "feedback":     [],
     }
-    drills = load_drills()
-    drills.append(record)
+    if regen:
+        drills = [record if int(d.get("number", 0)) == number else d for d in drills]
+    else:
+        drills.append(record)
     save_drills(drills)
+
+    verb = "Regenerated" if regen else "Generated"
     _append_log({"event_type": "drill_generated", "entity_type": "drill",
                  "entity_id": str(number), "entity_name": record["title"],
-                 "detail": f"Generated Drill {number} ({language})."})
+                 "detail": f"{verb} Drill {number} ({language}): {record['title']}",
+                 "prompt": record["prompt"], "interface": record["interface"],
+                 "regenerated": regen})
     return record
 
 

@@ -276,10 +276,13 @@ loud on a whiteboard/live screen.
   It gives no hints about edge cases or what to watch for. Drills are numbered
   in sequence (`Drill3`, `Drill4`, …) after whatever's already in the project.
 - The prompt renders as a **ready-to-paste Java class-description comment**
-  (with a copy button) above a `public class Drill<N>` stub — paste it straight
-  into your new file. Implement `Drill<N>.java` + `Drill<N>Test.java` **by hand**
-  in the sibling `manual-code-drills` Maven project. **Open manual-code-drills**
-  launches it in your editor (VS Code by default; override `NEXTROLE_EDITOR_CMD`).
+  (with a copy button) — drop it above the class you write. Implement
+  `Drill<N>.java` + `Drill<N>Test.java` **by hand** in the sibling
+  `manual-code-drills` Maven project. **Open manual-code-drills** launches it in
+  your editor (VS Code by default; override `NEXTROLE_EDITOR_CMD`).
+- Regenerating while a drill is active **rerolls it at the same number** — the
+  number only advances once you **Mark drill complete**. Every generated prompt
+  (including rerolls) is recorded in the process log.
 - **Check my code & get feedback** — Claude reads your attempt + test and
   returns an interview-style review (correctness, the ambiguities you resolved,
   idiomatic Java, complexity, test quality, and signal an interviewer would

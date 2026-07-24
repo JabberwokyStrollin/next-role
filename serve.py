@@ -2862,9 +2862,10 @@ def run_drill_command(*args: str) -> tuple[bool, str]:
 
 def drill_comment_block(drill: dict) -> str:
     """Format a drill as a ready-to-paste Java class-description comment: the
-    prompt as ``//`` lines (word-wrapped) above a ``public class Drill<N>`` stub,
-    followed by the interface (return types intentionally omitted). Mirrors the
-    hand-written comment style of the existing Drill1/Drill2 sources."""
+    prompt as ``//`` lines (word-wrapped), followed by the interface (return
+    types intentionally omitted). Comment only — no class stub — so it drops in
+    above whatever class declaration you write. Mirrors the hand-written comment
+    style of the existing Drill1/Drill2 sources."""
     import textwrap
     num    = drill.get("number")
     title  = (drill.get("title") or "").strip()
@@ -2883,7 +2884,6 @@ def drill_comment_block(drill: dict) -> str:
         lines.append("//")
         lines.append("// Interface (you decide the return types):")
         lines.extend(f"// - {sig}" for sig in iface)
-    lines += [f"public class Drill{num} {{", "", "}"]
     return "\n".join(lines)
 
 
@@ -2905,17 +2905,23 @@ def render_drills_body(view: str = "default") -> str:
         f'style="margin-bottom:12px">Drills completed today: '
         f'<strong>{done}</strong> / {goal}{" · ✓ goal met" if met else ""}</div>')
 
-    # Generate-new-drill button (always available).
+    cur = current_drill(drills)
+
+    # Generate button. While a drill is still active, generating REGENERATES it
+    # at the same number (the number only advances once it's marked complete),
+    # so label it accordingly.
+    gen_active = bool(cur) and cur.get("status") == "active"
+    gen_label  = (f"Regenerate Drill {cur.get('number')} prompt" if gen_active
+                  else "Generate new drill prompt")
     gen_form = (
         '<form method="POST" action="/today/drill/generate" style="display:inline">'
-        '<button class="btn btn-secondary" style="margin-top:0">'
-        'Generate new drill prompt</button></form>')
+        f'<button class="btn btn-secondary" style="margin-top:0">'
+        f'{gen_label}</button></form>')
     ide_form = (
         '<form method="POST" action="/today/drill/open-ide" style="display:inline">'
         '<button class="btn btn-secondary" style="margin-top:0">'
         'Open manual-code-drills</button></form>')
 
-    cur = current_drill(drills)
     if not cur:
         parts.append(
             '<p class="section-placeholder">No drills yet. Generate your first '
