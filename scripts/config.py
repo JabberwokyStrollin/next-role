@@ -1358,22 +1358,26 @@ def auto_age_application(app: dict) -> bool:
 # re-ingested after its first copy was archived), becoming a second pipeline
 # job. ``ingest.check_duplicate`` only matches the exact apply_url of a
 # non-archived job, so it can't see these — and ``cmd_log`` dedups only by
-# job_id. This helper detects "same company + same core title" so apply
-# surfaces can warn before a second application to effectively the same role.
+# job_id. This helper detects "same company + same title" so apply surfaces can
+# warn before a second application to effectively the same role.
+#
+# The whole title is compared (punctuation-normalized), so a distinct
+# specialization is treated as a DIFFERENT role — "Senior Software Engineer,
+# Analytics Platform" does NOT collide with a plain "Senior Software Engineer".
+# This trades some recall (a role reposted with a reworded specialization slips
+# through) for far fewer false "already applied" flags on genuinely different
+# teams at the same company.
 #
 # It is a WARNING signal, not a hard pipeline gate: ingest stays permissive on
 # purpose, and the operator can override with --force / a confirm dialog.
 
 def normalize_role_title(title: str) -> str:
-    """Reduce a job title to a comparable core: lowercase, drop any
-    specialization after the first comma or '(', strip punctuation, collapse
-    whitespace. 'Staff II Software Engineer, Data Ingestion' and 'Staff II
-    Software Engineer' both normalize to 'staff ii software engineer'."""
+    """Reduce a job title to a comparable form: lowercase, strip punctuation,
+    collapse whitespace. The FULL title is compared — including any
+    specialization after a comma / parenthesis — so 'Senior Software Engineer,
+    Analytics Platform' and plain 'Senior Software Engineer' normalize
+    differently and are treated as distinct roles."""
     t = (title or "").lower()
-    for sep in (",", "("):
-        i = t.find(sep)
-        if i > 0:
-            t = t[:i]
     t = _re.sub(r"[^a-z0-9 ]+", " ", t)
     return _re.sub(r"\s+", " ", t).strip()
 
