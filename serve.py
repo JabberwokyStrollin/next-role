@@ -83,6 +83,7 @@ from config import (  # noqa: E402
     drill_test_path,
 )
 from scan_stale_jobs import archive_stale_jobs  # noqa: E402
+from backup_data import backup_once  # noqa: E402
 
 APPLICATION_TRACKER_PATH = DATA_DIR / "application_tracker.json"
 
@@ -342,6 +343,19 @@ def apply_stale_job_check() -> None:
     Best-effort: a sweep failure must never block the daily-checklist page."""
     try:
         archive_stale_jobs(apply=True)
+    except Exception:
+        pass
+
+
+def apply_data_backup() -> None:
+    """Take an at-most-once-per-day local snapshot of the data/ JSON files
+    (drills, applications, company research, …) into data/backups/<date>/, so a
+    stray delete or corrupt write can be recovered. Delegates to
+    backup_data.backup_once (pruned to config.DATA_BACKUP_RETAIN_DAYS). Called on
+    every /today render for an at-least-daily cadence without a cron.
+    Best-effort: a backup failure must never block the daily-checklist page."""
+    try:
+        backup_once()
     except Exception:
         pass
 
@@ -4668,6 +4682,7 @@ _AQ_PAGE_JS = """
 def daily_checklist_page(open_section: str | None = None, view: str = "default") -> str:
     apply_ghosted_check()
     apply_stale_job_check()
+    apply_data_backup()
     today_iso = date.today().isoformat()
     state     = load_daily_state(today_iso)
 

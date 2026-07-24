@@ -33,6 +33,7 @@ Two cross-cutting rules govern most of the code and are referenced throughout:
 - [`scripts/linkedin_fetch.py`](#scriptslinkedin_fetchpy) — IMAP fetch of LinkedIn job-alert emails
 - [`scripts/inbox_scan.py`](#scriptsinbox_scanpy) — IMAP scan for rejection / interview replies to open applications
 - [`scripts/drills.py`](#scriptsdrillspy) — generate interview-prep code drills + review manual attempts (Sonnet)
+- [`scripts/backup_data.py`](#scriptsbackup_datapy) — daily local snapshots of the gitignored data/ files
 
 **Surfaces (CLI + web)**
 
@@ -115,6 +116,7 @@ file.
 | `DAILY_APPLICATION_GOAL` | `int` | Applications-per-day target (10). The `/today` "Cover letters & apply" section auto-earns its green checkmark once this many applications are logged *today*. Derived from `application_tracker.date_applied`, so it resets daily. serve.py reads the constant; never hardcode the number. |
 | `DAILY_DRILL_GOAL` | `int` | Code-drills-per-day target (1). The `/today` "Code drills" section auto-earns its checkmark once this many drills are marked complete *today* (`drills_completed_today`). |
 | `DRILLS_STORE_PATH`, `MANUAL_CODE_DRILLS_DIR`, `EDITOR_CMD` | Path / str | Generated-drill store (`data/drills.json`); the sibling Maven project holding the code (default `../manual-code-drills`, override `NEXTROLE_DRILLS_DIR`); the editor CLI for the open button (`NEXTROLE_EDITOR_CMD`, default `"code"` for VS Code → file-manager fallback on failure). |
+| `DATA_BACKUP_DIR`, `DATA_BACKUP_RETAIN_DAYS` | Path / int | Local daily-snapshot dir (`data/backups/`) and retention (7). See `scripts/backup_data.py`. |
 | Drill helpers | funcs | `drill_impl_path(n)` / `drill_test_path(n)` (→ `Drill<n>.java` / `Drill<n>Test.java` in the Maven project); `load_drills`/`save_drills`; `next_drill_number()` (max of on-disk `Drill<N>.java` + store numbers, +1); `current_drill()` (highest number); `drills_completed_today()`; `mark_drill_complete(n)`. |
 | `INBOX_SCAN_WINDOW_DAYS` | `int` | Look-back window (14) for `scripts/inbox_scan.py` — INBOX messages received within this many days are scanned for rejection/interview replies, regardless of read state. |
 | `_POSITION_FILLED_PATTERNS` / `_REJECTION_PATTERNS` / `_OFFER_PATTERNS` / `_INTERVIEW_PATTERNS` | `list[Pattern]` | Deterministic phrase rules for `classify_inbox_email`. Position-filled → rejection reason `position_filled`; general rejection → `generic`; offer → `offer`; advancement (recruiter screen / interview invitation) → signal `interview`. "invite" counts only when followed by an interview/call word (so "invite you to follow us on LinkedIn" is ignored). |
@@ -1295,6 +1297,13 @@ never diverge. Called on every `/today` render, giving the sweep an
 at-least-daily cadence without a cron. Best-effort (swallows exceptions) so a
 sweep failure can't block the daily-checklist page.
 
+#### `apply_data_backup() -> None`
+Takes an at-most-once-per-day local snapshot of the `data/` JSON files by
+delegating to `backup_data.backup_once` (pruned to
+`config.DATA_BACKUP_RETAIN_DAYS`). Called on every `/today` render alongside the
+other sweeps for an at-least-daily cadence without a cron. Best-effort so a
+backup failure can't block the daily-checklist page.
+
 #### Background-crawl helpers
 - `_crawl_worker() -> None` — daemon thread; runs `scripts/crawl.py` and streams its output into `crawl_state["output_tail"]` while parsing `Ingested: N` from the last matching line. Updates state to `done`/`error` on exit.
 - `start_crawl() -> bool` — kicks off the worker if not already running. Returns `False` if a crawl is in flight.
@@ -1739,6 +1748,31 @@ the code + JUnit tests live in the sibling Maven project
 **CLI.** `python scripts/drills.py generate` / `... review --number N`. Prints a
 machine-readable last line for `serve.py`: `GENERATED: <n>`, `REVIEWED: <n>`, or
 `ERROR: <message>`.
+
+---
+
+## `scripts/backup_data.py`
+
+**Role.** Guards the gitignored, otherwise-unbacked `data/` files against a
+stray delete or corrupt write. Takes an **at-most-once-per-day** snapshot of the
+important `data/*.json` files into `data/backups/<YYYY-MM-DD>/` and prunes to the
+most recent `config.DATA_BACKUP_RETAIN_DAYS` (7). Protects against single-file
+loss *within* `data/`, not loss of the whole tree (snapshots live under it) —
+the external backup in SETUP.md still matters. `job_pipeline.json` is skipped
+(large, regenerable via crawl, already `.bak`'d by `rescore_all`/`scan_*`).
+
+**Functions.**
+
+- `backup_once(force=False) -> (did, dest)` — snapshot today's files unless
+  today's dir already exists (idempotent; `force` overrides). Per-file
+  best-effort copy, then `prune()`. Called by `serve.apply_data_backup` on every
+  `/today` render.
+- `prune(retain=DATA_BACKUP_RETAIN_DAYS) -> int` — delete all but the newest
+  `retain` snapshot dirs.
+- `_source_files()` — `data/*.json` minus `_SKIP_NAMES` (`job_pipeline.json`) and
+  `*.bak`; non-recursive, so `backups/` is never re-snapshotted.
+
+**CLI.** `python scripts/backup_data.py` (snapshot today) / `--force` / `--list`.
 
 ---
 

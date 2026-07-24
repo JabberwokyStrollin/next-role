@@ -59,6 +59,7 @@ JSONL logs have no foreign keys to the rest — they're parallel.
 | `inbox_matches.json` | JSON array | Staged rejection / interview / offer email matches awaiting one-click review | `inbox_scan.py`, `serve.py` (apply/dismiss) | `serve.py` `/today` |
 | `inbox_scan_state.json` | JSON object | Cross-run `processed_message_ids` for the inbox scanner's own dedup | `inbox_scan.py` | `inbox_scan.py` |
 | `drills.json` | JSON array | Claude-generated code drills (prompt, partial interface, status, review feedback) for the `/today` Code-drills section | `scripts/drills.py`, `serve.py` (complete) | `serve.py` `/today` |
+| `backups/<date>/` | dir of JSON | Daily local snapshots of the `data/*.json` files (recovery from a stray delete / corrupt write) | `scripts/backup_data.py` (via `serve.py` `/today`) | manual recovery |
 | `crawl_log.jsonl` | JSONL | Per-run crawl summaries (funnel breakdown) | `crawl.py` | manual inspection |
 | `jd_fetch_log.jsonl` | JSONL | Per-URL JD-fetch diagnostics from `linkedin_fetch._fetch_jd_text` | `linkedin_fetch.py` | manual inspection |
 | `board_discovery_log.jsonl` | JSONL | Per-company careers-page scrape diagnostics | `discover_boards_from_careers.py` | manual inspection |
@@ -973,6 +974,27 @@ A JSON array; each record:
   }
 ]
 ```
+
+---
+
+## `data/backups/`
+
+**Role.** Local daily snapshots of the gitignored `data/` files, so a stray
+delete or corrupt write can be recovered. Each snapshot is a dir named for the
+date (`data/backups/2026-07-23/`) holding a copy of every `data/*.json` at
+snapshot time **except** `job_pipeline.json` (large, regenerable via crawl,
+already `.bak`'d by `rescore_all`/`scan_*`) and any `*.bak` files.
+
+**Lifecycle.**
+
+- **Written** by `scripts/backup_data.py:backup_once`, called best-effort on
+  every `/today` render (`serve.apply_data_backup`) — at most once per day
+  (skipped if today's dir already exists; `--force` overrides).
+- **Pruned** to the most recent `config.DATA_BACKUP_RETAIN_DAYS` (7) snapshots.
+- **Recovery** is a manual copy back into `data/`. This guards against
+  single-file loss *within* `data/`; it does **not** protect against losing the
+  whole `data/` tree (the snapshots live under it) — keep the external backup of
+  `data/` recommended in SETUP.md.
 
 ---
 
