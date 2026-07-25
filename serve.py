@@ -2904,7 +2904,8 @@ def drill_comment_block(drill: dict) -> str:
 def render_drills_body(view: str = "default") -> str:
     """Code-drills section: a drills-completed-today meter, the current drill's
     prompt rendered as a copy-pasteable Java class comment, and the generate /
-    open / review / complete actions. Latest review feedback renders inline."""
+    open / review / correct-answer / complete actions. Latest review feedback and
+    the reference solution (if generated) render inline."""
     from html import escape as esc
 
     parts   = [_flash_notice_html(pop_drill_flash())]
@@ -3002,9 +3003,17 @@ def render_drills_body(view: str = "default") -> str:
         f'<input type="hidden" name="number" value="{num}">'
         '<button class="btn btn-secondary" style="margin-top:0">'
         f'{"Completed ✓" if complete else "Mark drill complete"}</button></form>')
+    has_solution = bool(cur.get("solution"))
+    solve_form = (
+        '<form method="POST" action="/today/drill/solve" style="display:inline">'
+        f'<input type="hidden" name="number" value="{num}">'
+        '<button class="btn btn-secondary" style="margin-top:0">'
+        f'{"Regenerate correct answer" if has_solution else "Show correct answer"}'
+        '</button></form>')
 
     parts.append('<div class="app-buttons" style="margin-top:10px">'
-                 + ide_form + review_form + complete_form + gen_form + '</div>')
+                 + ide_form + review_form + complete_form + solve_form + gen_form
+                 + '</div>')
 
     # Latest review feedback, if any.
     fb = cur.get("feedback") or []
@@ -3016,6 +3025,19 @@ def render_drills_body(view: str = "default") -> str:
             f'{len(fb)} review(s)</span></div>'
             f'<div class="notice notice-info" style="white-space:pre-wrap;'
             f'margin-top:4px">{esc(latest.get("text",""))}</div>')
+
+    # Reference solution ("correct answer"), if generated.
+    sol = cur.get("solution")
+    if sol:
+        parts.append(
+            f'<details style="margin-top:12px"><summary style="cursor:pointer;'
+            f'font-size:13px"><strong>Correct answer</strong> '
+            f'<span style="color:#888">— senior/staff reference · '
+            f'{esc((sol.get("at") or "")[:16])} (try it yourself first)</span>'
+            f'</summary>'
+            f'<div class="notice notice-info" style="white-space:pre-wrap;'
+            f'margin-top:6px;font-size:13px">{esc(sol.get("text",""))}</div>'
+            f'</details>')
 
     return "".join(parts)
 
@@ -5321,6 +5343,22 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     tail = "; ".join([l for l in out.splitlines() if l.strip()][-2:])
                     set_drill_flash("warn", f"Review failed — {tail or 'see server log'}")
+            self.redirect_or_today(params, "code_drills")
+            return
+
+        if path == "/today/drill/solve":
+            length = int(self.headers.get("Content-Length", 0))
+            params = parse_qs(self.rfile.read(length).decode("utf-8"))
+            number = params.get("number", [""])[0].strip()
+            if not number:
+                set_drill_flash("warn", "Correct answer failed — missing drill number.")
+            else:
+                ok, out = run_drill_command("solve", "--number", number)
+                if ok:
+                    set_drill_flash("ok", f"Correct answer ready for Drill {number} (below).")
+                else:
+                    tail = "; ".join([l for l in out.splitlines() if l.strip()][-2:])
+                    set_drill_flash("warn", f"Correct answer failed — {tail or 'see server log'}")
             self.redirect_or_today(params, "code_drills")
             return
 

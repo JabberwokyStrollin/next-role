@@ -1229,6 +1229,7 @@ calling `linkedin_fetch._fetch_jd_text`.
 #### `POST /today/toggle` — flip a section's done flag in `daily_checklist.json`.
 #### `POST /today/drill/generate` — shell out to `scripts/drills.py generate` (Claude): produce the next drill and append it to `data/drills.json`. Flashes the new drill number.
 #### `POST /today/drill/review` — shell out to `scripts/drills.py review --number N` (Claude): read the operator's `Drill<N>.java`+test from the Maven project, store + surface interview-style feedback.
+#### `POST /today/drill/solve` — shell out to `scripts/drills.py solve --number N` (Claude): generate the senior/staff-level reference "correct answer" from the prompt + interface (not the attempt), store it on the record's `solution`, and surface it inline.
 #### `POST /today/drill/complete` — mark drill `number` complete via `config.mark_drill_complete` (sets `status`/`completed_at`), counting toward `DAILY_DRILL_GOAL`.
 #### `POST /today/drill/open-ide` — launch `config.EDITOR_CMD` (default `code`, VS Code) on `config.MANUAL_CODE_DRILLS_DIR`; resolves the launcher via `shutil.which` and routes `.cmd`/`.bat` (e.g. `code.cmd`) through `cmd /c`. Falls back to `os.startfile` (file manager) if the launch fails.
 #### `POST /today/status` — shell out to `update_status.py status`.
@@ -1370,7 +1371,7 @@ backup failure can't block the daily-checklist page.
 - `render_status_updates_body(view='active') -> str` / `render_app_row(app) -> str` — status-updates section + per-app row with status-change buttons. Two sub-tabs: `active` (live applications, excludes ghosted) and `ghosted` (auto-flipped, awaiting the `ghosted_timeout` auto-rejection). `render_app_row` includes the `rejected_interview_failed` button. Prepends `render_inbox_matches_block(apps)`.
 - `render_inbox_matches_block(apps) -> str` / `render_inbox_match_row(m, current_status=None) -> str` — top-of-section panel for the inbox scanner: a "Scan inbox for replies" button (disabled when `linkedin_env_missing()`), plus any staged matches from `data/inbox_matches.json` whose application is still open, each with a one-click **Apply: <suggestion>** (posts to `/today/inbox/apply`) and **Dismiss** (`/today/inbox/dismiss`). The block passes each match's live application status into the row, which resolves the suggestion via `inbox_match_suggestion`. Rows show company, title, the resolved suggestion badge (recruiter screen / interview / offer / rejection reason), sender/subject, and the evidence snippet. Staged suggestions only — applying is always an explicit operator action.
 - `render_cover_letters_body() -> str` — top-N apply queue, ranked by `apply_rank_score` (full composite minus the gov-screen `flag` penalty), filtered by `company_block_reason` and `gov_screen_block_reason` (gov/defense `fail` roles hidden). Rows still display the pure composite via `job_score`. Renders the **Applications sent today: X / `DAILY_APPLICATION_GOAL`** meter (from `applications_today_count`), which turns green + shows "✓ goal met" once the goal is reached.
-- **Code drills** (`render_drills_body(view='default') -> str`) — the `code_drills` section. Reads the generated drills from `config.load_drills` and shows: a **drills-completed-today: X / `DAILY_DRILL_GOAL`** meter, the **current drill** (`config.current_drill` — highest number) with its prompt rendered by `drill_comment_block` as a **ready-to-paste Java class-description comment** (a readonly `<textarea>` + a "Copy prompt comment" button, self-contained inline JS) — the comment only, no class stub — and the actions **Open manual-code-drills** / **Generate new drill prompt** / **Check my code & get feedback** / **Mark drill complete**. The latest review feedback renders inline. `run_drill_command(*args)` shells out to `scripts/drills.py` (generate/review, ~15-30s Claude call, 180s timeout); `set_drill_flash`/`pop_drill_flash` back the section's one-shot flash. Nothing here compiles or runs Java — the code lives in the sibling `manual-code-drills` Maven project (`config.MANUAL_CODE_DRILLS_DIR`).
+- **Code drills** (`render_drills_body(view='default') -> str`) — the `code_drills` section. Reads the generated drills from `config.load_drills` and shows: a **drills-completed-today: X / `DAILY_DRILL_GOAL`** meter, the **current drill** (`config.current_drill` — highest number) with its prompt rendered by `drill_comment_block` as a **ready-to-paste Java class-description comment** (a readonly `<textarea>` + a "Copy prompt comment" button, self-contained inline JS) — the comment only, no class stub — and the actions **Open manual-code-drills** / **Generate new drill prompt** / **Check my code & get feedback** / **Show correct answer** / **Mark drill complete**. The latest review feedback renders inline; the reference solution (once generated) renders in a collapsible **Correct answer** `<details>`. `run_drill_command(*args)` shells out to `scripts/drills.py` (generate/review/solve, ~15-30s Claude call, 180s timeout); `set_drill_flash`/`pop_drill_flash` back the section's one-shot flash. Nothing here compiles or runs Java — the code lives in the sibling `manual-code-drills` Maven project (`config.MANUAL_CODE_DRILLS_DIR`).
 - `drill_comment_block(drill) -> str` — formats a drill as a `//`-commented, word-wrapped class-description comment (prompt + interface, return types omitted). Comment only — no class stub — so it drops in above whatever class declaration you write. Matches the hand-written Drill1/Drill2 comment style; derived on render from the stored plain-text prompt/interface (nothing extra stored).
 - `_fmt_currency(value, currency) -> str` — `"CAD 245,000"` formatting.
 - `render_comp_panel(comp_record, job_id) -> str` — comp-estimate accordion inside a cover-letter row.
@@ -1716,7 +1717,7 @@ Argparse: `--dry-run`, `--window-days N` (default `INBOX_SCAN_WINDOW_DAYS`),
 
 ## `scripts/drills.py`
 
-**Role.** Backs the `/today` "Code drills" section with two Claude-driven
+**Role.** Backs the `/today` "Code drills" section with three Claude-driven
 actions (Java only). The store, numbering, and completion helpers live in
 `config.py`; this script adds the LLM calls. Uses `CL_MODEL` (Sonnet), the same
 key/model as cover letters / answer-questions. **Never compiles or runs Java** —
@@ -1743,12 +1744,17 @@ the code + JUnit tests live in the sibling Maven project
   ambiguities the prompt left open, idiomatic Java, complexity, test quality,
   interview signal). Appends `{at, text}` to the record's `feedback` and returns
   it. Raises `FileNotFoundError` if no attempt exists yet.
+- `solve_drill(number) -> str` — asks Claude (`_SOLVE_SYSTEM`) for the reference
+  "correct answer": a senior/staff-level `Drill<N>` implementation + JUnit test
+  with an explicit design-decisions block, derived from the **prompt + interface
+  only** (it does not read the operator's attempt). Stores it on the record's
+  `solution` (`{at, text}`, overwritten on regenerate) and returns the Markdown.
 - `_call_claude`, `_extract_json`, `_append_log` — helpers mirroring
   `answer_questions.py`.
 
-**CLI.** `python scripts/drills.py generate` / `... review --number N`. Prints a
-machine-readable last line for `serve.py`: `GENERATED: <n>`, `REVIEWED: <n>`, or
-`ERROR: <message>`.
+**CLI.** `python scripts/drills.py generate` / `... review --number N` / `... solve
+--number N`. Prints a machine-readable last line for `serve.py`: `GENERATED: <n>`,
+`REVIEWED: <n>`, `SOLVED: <n>`, or `ERROR: <message>`.
 
 ---
 

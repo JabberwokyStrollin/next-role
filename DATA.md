@@ -619,6 +619,7 @@ forensics.
 | `application_question_finalized` | `answer_questions.finalize_answer` | `"version=<n> chars=<n>"` |
 | `drill_generated` | `drills.generate_drill` | `"<Generated\|Regenerated> Drill <n> (java): <title>"`. Also carries the full `prompt`, `interface`, and a `regenerated` bool on the event — the durable record of every drill prompt created (the `drills.json` store keeps only the latest active version). |
 | `drill_reviewed` | `drills.review_drill` | `"Reviewed Drill <n>."` |
+| `drill_solved` | `drills.solve_drill` | `"Generated reference solution for Drill <n>."` |
 
 ### Example
 
@@ -956,6 +957,7 @@ A JSON array; each record:
 | `created_at` | ISO datetime | When generated. |
 | `completed_at` | ISO datetime / `null` | Set by `mark_drill_complete`; its date drives the daily goal. |
 | `feedback` | list[object] | Review history: `{"at": ISO, "text": <markdown feedback>}`, appended by each review. |
+| `solution` | object / absent | The reference "correct answer": `{"at": ISO, "text": <markdown: design notes + Java impl + test>}`. Written by `drills.solve_drill`, overwritten on regenerate; absent until first requested. |
 
 ### Example
 
