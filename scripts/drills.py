@@ -1,7 +1,8 @@
 """
-drills.py — generate interview-prep coding drills and review manual attempts.
+drills.py — generate interview-prep coding drills, review attempts, and produce
+reference solutions.
 
-Two Claude-backed actions behind the /today "Code drills" section (Java only):
+Three Claude-backed actions behind the /today "Code drills" section (Java only):
 
     generate  Produce the NEXT drill — a short, informal, deliberately
               underspecified interview-style prompt plus a minimal interface
@@ -15,19 +16,27 @@ Two Claude-backed actions behind the /today "Code drills" section (Java only):
               (correctness, idiomatic Java, complexity, test quality, and
               signal issues an interviewer would flag). Stored on the record.
 
+    solve     Produce the reference "correct answer" — a senior/staff-level
+              implementation + JUnit test with a design-decisions block — from
+              the prompt + interface alone (does not read the attempt). Stored
+              on the record as `solution`.
+
 The code + JUnit tests live in the sibling Maven project
 (config.MANUAL_CODE_DRILLS_DIR, default ../manual-code-drills); this script
-only produces prompts and reviews attempts — it never compiles or runs Java.
+only produces prompts, reviews, and reference solutions — it never compiles or
+runs Java.
 
 Uses CL_MODEL (Sonnet), matching answer_questions.py / generate_cl.js.
 
 Usage:
     python scripts/drills.py generate
     python scripts/drills.py review --number 3
+    python scripts/drills.py solve  --number 3
 
 Machine-readable last line:
     GENERATED: <number>     on generate success
     REVIEWED: <number>      on review success
+    SOLVED: <number>        on solve success
     ERROR: <message>        on failure
 """
 
@@ -101,6 +110,33 @@ the code works.
 
 End with a one-line verdict: would this pass a senior bar? Keep it tight — \
 Markdown, no preamble."""
+
+_SOLVE_SYSTEM = """You are a staff-level engineer writing the reference solution to \
+an interview-style Java drill — the answer that would clear a strong senior/staff \
+bar in a live coding round.
+
+Because the prompt is deliberately underspecified, FIRST state the design \
+decisions you're committing to (case sensitivity, tie-breaking, null/empty \
+handling, edge-case returns, and the return types the interface left open) in a \
+short `// Design Decisions:` comment block at the top of the class.
+
+Then write the full implementation, holding a senior bar:
+- Pick the right data structures; pre-aggregate on write when the prompt implies \
+reads must stay fast (don't rescan on read).
+- Return defensive copies / unmodifiable views — never expose internal mutable \
+collections.
+- Use modern idiomatic Java (records for value types, standard-library methods \
+over hand-rolled loops) and clear naming.
+- Guard/validate inputs per your stated decisions; keep methods small.
+
+Also provide a JUnit 5 test class that pins down the behaviour INCLUDING the \
+edge cases your design decisions call out.
+
+Output format (Markdown), in this exact order and nothing else:
+1. A `### Design notes` section: 3-6 bullets on the key senior-level choices and \
+any trade-off worth naming aloud in an interview.
+2. A ```java fenced block with the complete `Drill<N>.java`.
+3. A ```java fenced block with the complete `Drill<N>Test.java`."""
 
 
 def _client() -> anthropic.Anthropic:
@@ -220,6 +256,33 @@ def review_drill(number: int) -> str:
     return feedback
 
 
+def solve_drill(number: int) -> str:
+    """Generate a senior/staff-level reference solution for drill ``number`` from
+    its prompt + interface (does NOT read the operator's attempt). Stores it on
+    the record as ``solution`` and returns the Markdown text."""
+    drills = load_drills()
+    record = next((d for d in drills if int(d.get("number", 0)) == int(number)), None)
+    if not record:
+        raise ValueError(f"Drill {number} not found in the store.")
+
+    iface = "\n".join(f"- {s}" for s in record.get("interface", []))
+    user = (
+        f"## Drill {number}: {record.get('title','')}\n\n"
+        f"## Prompt\n{record.get('prompt','')}\n\n"
+        f"## Interface given (return types intentionally omitted)\n{iface}\n\n"
+        f"Write the reference solution as class `Drill{number}` "
+        f"(test class `Drill{number}Test`).")
+
+    solution = _call_claude(_SOLVE_SYSTEM, user).strip()
+
+    record["solution"] = {"at": now_utc(), "text": solution}
+    save_drills(drills)
+    _append_log({"event_type": "drill_solved", "entity_type": "drill",
+                 "entity_id": str(number), "entity_name": record.get("title", ""),
+                 "detail": f"Generated reference solution for Drill {number}."})
+    return solution
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate / review code drills.")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -229,6 +292,9 @@ def main() -> None:
 
     r = sub.add_parser("review", help="Review a manual attempt.")
     r.add_argument("--number", type=int, required=True)
+
+    s = sub.add_parser("solve", help="Generate the reference (correct) solution.")
+    s.add_argument("--number", type=int, required=True)
 
     args = parser.parse_args()
     try:
@@ -240,6 +306,10 @@ def main() -> None:
             fb = review_drill(args.number)
             print(fb)
             print(f"REVIEWED: {args.number}")
+        elif args.cmd == "solve":
+            sol = solve_drill(args.number)
+            print(sol)
+            print(f"SOLVED: {args.number}")
     except Exception as e:  # noqa: BLE001
         print(f"ERROR: {e}")
         sys.exit(1)
