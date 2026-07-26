@@ -302,15 +302,31 @@ def upsert_company(record: dict) -> tuple[str, bool]:
     Returns (company_id, created) where created=True if new record.
     """
     companies = load_json(COMPANY_REGISTRY_PATH)
+    # Match on company_id BEFORE name. A --company-id refresh carries the
+    # existing id, and research legitimately returns a different name form
+    # for the same entity ("Yelp" → "Yelp Inc.", "Citi" → "Citigroup Inc.").
+    # A name-only match missed those and appended a second row under the SAME
+    # company_id, breaking the primary-key invariant: next() lookups then hit
+    # the stale stub while dict-comprehension lookups hit the new row.
     existing_idx = next(
         (i for i, c in enumerate(companies)
-         if c["name"].lower() == record["name"].lower()),
+         if c.get("company_id") == record.get("company_id")),
         None
     )
+    if existing_idx is None:
+        existing_idx = next(
+            (i for i, c in enumerate(companies)
+             if c["name"].lower() == record["name"].lower()),
+            None
+        )
     if existing_idx is not None:
         record["company_id"]      = companies[existing_idx]["company_id"]
         record["record_created"]  = companies[existing_idx]["record_created"]
         record["confirmed_clean"] = companies[existing_idx].get("confirmed_clean", False)
+        # Keep the established name: ingest.get_or_stub_company joins postings
+        # to companies by name, and jobs denormalize it as company_name. Letting
+        # research rename the entity would orphan both.
+        record["name"]            = companies[existing_idx]["name"]
         companies[existing_idx]   = record
         save_json(COMPANY_REGISTRY_PATH, companies)
         return record["company_id"], False
