@@ -1041,10 +1041,21 @@ for advisory fields (including `gov_defense_flag` → `"none"` and
 when updating.
 
 #### `upsert_company(record: dict) -> tuple[str, bool]`
-Case-insensitive name-matched upsert into `company_registry.json`. If a
-match exists, preserves `company_id`, `record_created`, and
-`confirmed_clean` from the old row. Returns `(company_id, created)`
-where `created=True` only on insert.
+Upsert into `company_registry.json`, matching on `company_id` first and
+falling back to a case-insensitive `name` match. If a match exists,
+preserves `company_id`, `record_created`, `confirmed_clean`, **and
+`name`** from the old row. Returns `(company_id, created)` where
+`created=True` only on insert.
+
+The id-first order matters: a `--company-id` refresh carries the existing
+id, but research often returns a different name form for the same entity
+("Yelp" → "Yelp Inc.", "Citi" → "Citigroup Inc."). Matching on name alone
+missed those and appended a *second* row under the same `company_id`,
+breaking the primary key — `next()`-style lookups then read the stale stub
+while dict-comprehension lookups (`serve.load_companies_by_id`) read the
+new row. Preserving `name` is the matching half of the fix:
+`ingest.get_or_stub_company` joins postings to companies by name and jobs
+denormalize it as `company_name`, so a rename would orphan both.
 
 #### `main() -> None`
 CLI driver. Mutually exclusive: `--name NAME` (research new or refresh by

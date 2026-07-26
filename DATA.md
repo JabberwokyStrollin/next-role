@@ -175,15 +175,15 @@ advisory.
 **Lifecycle.**
 
 - **Stubs** are created by `ingest.get_or_stub_company` when a JD names an unknown company — neutral defaults, `stub: true` flag, no API call.
-- **Full records** are produced by `research_company.research_company` (Tier-1 Haiku + Tier-2 web search) and merged via `build_registry_record` + `upsert_company`. Name-matched upsert preserves `company_id`, `record_created`, and `confirmed_clean` from any prior stub or record.
+- **Full records** are produced by `research_company.research_company` (Tier-1 Haiku + Tier-2 web search) and merged via `build_registry_record` + `upsert_company`. The upsert matches on `company_id` first, then falls back to a case-insensitive `name` match, and preserves `company_id`, `record_created`, `confirmed_clean`, and `name` from any prior stub or record.
 - **Stub-clear** happens in `run.py:research_top_stubs` after a successful research call — pops the `stub` key off the record.
 
 ### Schema
 
 | Field | Type | Role | Notes |
 |---|---|---|---|
-| `company_id` | UUID v4 | identity | Primary key. |
-| `name` | string | identity | Canonical name. Case-insensitive uniqueness enforced by `upsert_company`. |
+| `company_id` | UUID v4 | identity | Primary key. Unique — `upsert_company` matches on it before `name`, so a research pass that renames the entity updates the existing row instead of appending a second one under the same id. |
+| `name` | string | identity | Canonical name. Case-insensitive uniqueness enforced by `upsert_company`, which also **preserves** the established name across a refresh — `ingest.get_or_stub_company` joins postings by name and jobs denormalize it as `company_name`, so research is not allowed to rename a company already in the pipeline. |
 | `industry` | string | metadata | Free text; `"unknown"` is a valid value for stubs. |
 | `size_tier` | `"startup"` / `"mid"` / `"large"` / `"enterprise"` | metadata | Rough employee scale. |
 | `country_hq` | ISO country code string / `""` | metadata | Empty for stubs. |
