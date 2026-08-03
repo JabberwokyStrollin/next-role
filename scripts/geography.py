@@ -15,6 +15,7 @@ config) so that:
 stays in config.py (it's a scoring concern).
 """
 
+import re
 import sys
 
 # ─── Target geographies (the US toggle) ──────────────────────────────────────
@@ -50,7 +51,40 @@ _CA_LOCATION_TOKENS: tuple[str, ...] = (
 )
 _US_LOCATION_TOKENS: tuple[str, ...] = (
     "united states", " usa", " us,", " us ", " us:", "(us)", "u.s.",
-    "remote, us", "remote (us)", "us remote", "us-remote", "california",
+    "remote, us", "remote (us)", "us remote", "us-remote",
+)
+
+# Spelled-out US state names. Distinct from the two-letter codes below: ATS
+# boards very often write the name with no country ("Florida", "Remote - New
+# York", "Remote: New York City") and never a "City, XX" pair, so the anchored
+# code check can't see them. Before this list existed only "california" was a
+# token, so every other state fell through to OTHER — which then took the
+# OTHER → CA cover-letter fallback in serve.py / run.py and stamped the Canadian
+# work-permit paragraph onto US roles, besides skipping the US sponsorship floor
+# in composite_score and the US no-sponsorship-discard exemption at ingest.
+#
+# Matched with (?<![a-z])name(?![a-z]) rather than as a bare substring so short
+# names don't hit inside longer words ("maine" in "Germaine"). Two accepted
+# trade-offs: "georgia" resolves the US state, not the country (US listings for
+# Atlanta vastly outnumber Tbilisi ones in this pipeline); and "indiana" now
+# resolves US before _FOREIGN_LOCATION_TOKENS' "india" substring can reject it,
+# which is a latent bug this happens to fix.
+_US_STATE_NAMES: frozenset[str] = frozenset({
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+    "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
+    "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine",
+    "maryland", "massachusetts", "michigan", "minnesota", "mississippi",
+    "missouri", "montana", "nebraska", "nevada", "new hampshire", "new jersey",
+    "new mexico", "new york", "north carolina", "north dakota", "ohio",
+    "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina",
+    "south dakota", "tennessee", "texas", "utah", "vermont", "virginia",
+    "washington", "west virginia", "wisconsin", "wyoming",
+    "district of columbia",
+})
+_US_STATE_NAME_RE = re.compile(
+    r"(?<![a-z])("
+    + "|".join(sorted((re.escape(s) for s in _US_STATE_NAMES), key=len, reverse=True))
+    + r")(?![a-z])"
 )
 
 # Two-letter region codes, matched only in an anchored "City, XX" / "(XX)" form
@@ -89,14 +123,19 @@ def derive_country(location: str) -> str:
     "OTHER"``. SSOT — IE/CA are matched before US so a combined posting
     resolves to the sponsorship-bearing country. Bare "us" is never a substring
     token (it would match "houston"); region codes are matched only in an
-    anchored "City, XX" form. "CA" resolves to California (US) — Canada is
-    detected first by name / Canadian city / province code (ON, BC, …)."""
+    anchored "City, XX" form, but spelled-out US state names are matched on a
+    word boundary anywhere ("Remote - New York"). "CA" resolves to California
+    (US) — Canada is detected first by name / Canadian city / province code
+    (ON, BC, …), so a combined "Remote - Canada; Remote - New York" is still
+    CA."""
     loc = f" {(location or '').lower()} "
     if any(t in loc for t in _IE_LOCATION_TOKENS):
         return "IE"
     if any(t in loc for t in _CA_LOCATION_TOKENS) or _has_region_code(loc, _CA_PROVINCE_CODES):
         return "CA"
-    if any(t in loc for t in _US_LOCATION_TOKENS) or _has_region_code(loc, _US_STATE_CODES):
+    if (any(t in loc for t in _US_LOCATION_TOKENS)
+            or _has_region_code(loc, _US_STATE_CODES)
+            or _US_STATE_NAME_RE.search(loc)):
         return "US"
     return "OTHER"
 
