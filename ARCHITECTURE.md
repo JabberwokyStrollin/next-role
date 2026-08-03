@@ -509,6 +509,7 @@ concern); `US_SPONSORSHIP_SCORE` stays in `config.py` (a scoring concern).
 | `TARGET_COUNTRIES` | **SSOT** for active target geographies (currently `{"CA","IE","US"}`; remove `"US"` to disable US remote-only roles). Read by `config.composite_score` and `location_passes`. |
 | `_IE_/_CA_/_US_LOCATION_TOKENS` | Space-padded location substrings for `derive_country`. IE/CA before US; no bare `"us"`. Canada isn't detected by bare `"CA"` (collides with California). |
 | `_CA_PROVINCE_CODES` / `_US_STATE_CODES` | Two-letter codes matched only in an anchored "City, XX" form by `_has_region_code`. US states omit `in`/`de`/`co` (country-code collisions). |
+| `_US_STATE_NAMES` / `_US_STATE_NAME_RE` | All 50 spelled-out US state names + `district of columbia`, matched on a word boundary anywhere in the location. Needed because ATS boards write the name with no country and no "City, XX" pair ("Florida", "Remote - New York"), which the code check can't see. `georgia` resolves the US state, not the country; `indiana` now resolves US before `_FOREIGN_LOCATION_TOKENS`' `india` substring can reject it. |
 | `REMOTE_ONLY_SOURCES` | Boards where every listing is remote (`remoteok`, `remotive`). |
 | `_REMOTE_LOCATION_TOKENS` | Substrings denoting remote (`remote`, `anywhere`, `worldwide`, `distributed`). |
 | `_FLEXIBLE_LOCATION_TOKENS` | `worldwide`/`anywhere`/`global`/`americas`/… — an OTHER role with one passes; checked before the denylist. |
@@ -522,6 +523,20 @@ match; IE/CA before US so a combined "Remote, Canada/US" resolves to the
 sponsorship-bearing country. Canada is matched by name / Canadian city /
 **province code** ("London, ON" → CA), so bare `"CA"` resolves to **California
 (US)** ("San Francisco, CA" → US, "Toronto, CA" → CA).
+
+US detection has three inputs: `_US_LOCATION_TOKENS` (country forms),
+`_US_STATE_CODES` via the anchored `_has_region_code`, and `_US_STATE_NAME_RE`
+(spelled-out state names, word-boundary matched anywhere). The third exists
+because a US-only listing frequently names just the state — `"Florida; Remote -
+Massachusetts; Remote - New York"` — with no country and no "City, XX" pair.
+Until it was added, only `"california"` was a state name token, so such rows
+resolved to **OTHER** and inherited three wrong behaviors: the `OTHER → CA`
+cover-letter fallback in `serve.py` / `run.py` stamped the **Canadian
+work-permit paragraph onto US roles**, `composite_score` skipped the
+`US_SPONSORSHIP_SCORE` floor (ranking US roles on the company's own sponsorship
+score), and `ingest.ingest_job` skipped the US exemption from the
+no-sponsorship discard. IE/CA are still matched first, so `"Remote - Canada;
+Remote - New York"` remains CA.
 
 #### `_has_region_code(padded_loc, codes) -> bool`
 `True` if the padded lowercased location holds one of `codes` in an anchored

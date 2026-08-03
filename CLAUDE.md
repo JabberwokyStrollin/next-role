@@ -153,12 +153,26 @@ behavior is byte-identical). Country is **derived on the fly** from `location`
 via `derive_country` (→ `CA`/`IE`/`US`/`OTHER`) —
 no stored field. `derive_country` matches IE/CA before US so a combined
 "Remote, Canada/US" posting resolves to the sponsorship-bearing country, and
-never uses a bare `"us"` substring (would match "houston"). Region codes (CA
-provinces `ON`/`BC`/…, US states) are matched only in an anchored "City, XX" form
-(`_has_region_code`, US states omitting the `in`/`de`/`co` country-code
+never uses a bare `"us"` substring (would match "houston"). Two-letter region
+*codes* (CA provinces `ON`/`BC`/…, US **state codes**) are matched only in an
+anchored "City, XX" form
+(`_has_region_code`, US state codes omitting the `in`/`de`/`co` country-code
 collisions); Canada is detected first by name / Canadian city / **province
 code** ("London, ON" → CA), so the bare `"CA"` code resolves to **California
 (US)**, not Canada.
+
+Spelled-out **US state names** are separately matched on a word boundary
+anywhere in the location (`_US_STATE_NAMES` / `_US_STATE_NAME_RE`) — codes alone
+aren't enough, because US listings routinely name only the state with no country
+and no "City, XX" pair ("Florida", "Remote - New York"). **Keep this list
+complete when touching US detection.** While `"california"` was the only state
+name token, every other state resolved to `OTHER`, and OTHER is *not* a harmless
+default — it silently inverts three US behaviors at once: the `OTHER → CA`
+cover-letter fallback stamps the **Canadian work-permit paragraph onto a US
+role**, `composite_score` skips the `US_SPONSORSHIP_SCORE` floor, and
+`ingest.ingest_job` skips the US exemption from the no-sponsorship discard. A
+gap in US detection therefore reads as a cover-letter bug, a ranking bug, and a
+false-discard bug simultaneously.
 
 1. **The US sponsorship floor lives ONLY in `composite_score`.** For a
    US-derived role (and only when `"US" in TARGET_COUNTRIES`), the canonical
