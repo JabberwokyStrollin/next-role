@@ -62,6 +62,8 @@ from config import (  # noqa: E402
     INBOX_SCAN_WINDOW_DAYS,
     MANUAL_CODE_DRILLS_DIR,
     EDITOR_CMD,
+    NODE_MISSING_MSG,
+    resolve_node,
     REJECTION_REASONS,
     GOV_SCREEN_INTERVIEW_QUESTIONS,
     GOV_SCREEN_FLAG_PENALTY_PCT,
@@ -5113,10 +5115,13 @@ class Handler(BaseHTTPRequestHandler):
             params = parse_qs(raw)
             job_id = params.get("job_id", [""])[0].strip()
 
+            node_bin = resolve_node()
             if not job_id:
                 set_cl_flash("warn", "Generate CL failed — missing job_id.")
+            elif not node_bin:
+                set_cl_flash("warn", NODE_MISSING_MSG)
             else:
-                cmd = ["node", str(SCRIPTS / "generate_cl.js"), "--job-id", job_id]
+                cmd = [node_bin, str(SCRIPTS / "generate_cl.js"), "--job-id", job_id]
                 # Pass --country from the Python SSOT (config.derive_country) so
                 # the locked visa paragraph is applied. Don't rely on
                 # generate_cl.js's own JS location derivation — it doesn't know

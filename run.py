@@ -52,6 +52,8 @@ from config import (  # noqa: E402
     JOB_PIPELINE_PATH,
     PRE_RESEARCH_MAX,
     RESEARCH_QUEUE_MIN_SCORE,
+    NODE_MISSING_MSG,
+    resolve_node,
     company_block_reason,
     composite_score,
     composite_score_pre_research,
@@ -87,8 +89,12 @@ def run_python(script: str, *args) -> int:
 
 
 def run_node(script: str, *args) -> int:
-    """Run a Node.js script in scripts/."""
-    cmd = ["node", str(SCRIPTS / script), *args]
+    """Run a Node.js script in scripts/. Returns 1 if Node can't be found."""
+    node_bin = resolve_node()
+    if not node_bin:
+        print(f"  {NODE_MISSING_MSG}")
+        return 1
+    cmd = [node_bin, str(SCRIPTS / script), *args]
     result = subprocess.run(cmd, cwd=ROOT)
     return result.returncode
 

@@ -95,6 +95,8 @@ file.
 | `RESUME_ENTRY_SLUGS` | `dict[str, str]` | Slug → human-readable label registry for the resume entries `answer_questions.py` can cite. SSOT — both the prompt and the UI chip picker read from here. |
 | `OUTPUT_DIR` | `Path` | `<ROOT>/output` — generated `.docx` cover letters. Auto-created. |
 | `ANTHROPIC_API_KEY` | `str` | Read from environment; module-level `EnvironmentError` if unset. |
+| `_NODE_FALLBACK_DIRS` | `tuple[Path, ...]` | Standard Windows Node install dirs, searched by `resolve_node` when PATH lookup fails. |
+| `NODE_MISSING_MSG` | `str` | **SSOT** operator-facing message when Node can't be found — used by both `serve.py` and `run.py`. |
 | `CLAUDE_MODEL` | `str` | Sonnet 4.5 model ID — used for JD scoring. |
 | `CLAUDE_MODEL_FAST` | `str` | Haiku 4.5 model ID — used for company research (~10× cheaper). |
 | `CL_MODEL` | `str` | Sonnet 4.6 model ID — used for cover letters (`generate_cl.js`) and answer-questions (`answer_questions.py`). |
@@ -161,6 +163,22 @@ weight per scoring profile.
 - **Property `pre_research_multiplier -> float`** — `pre_research_weight / native_max`. Same shape, for the pre-research composite.
 
 ### Functions
+
+#### `resolve_node() -> str | None`
+**SSOT** for locating the `node` executable. Returns an absolute path, or
+`None` if Node can't be found (callers should then surface
+`NODE_MISSING_MSG`). Tries `shutil.which("node")` first, then each dir in
+`_NODE_FALLBACK_DIRS`.
+
+Why this exists instead of the literal string `"node"`: a bare `"node"` in
+a `subprocess` call is resolved against the PATH **of the calling process**,
+which is inherited at launch and can be much narrower than the machine
+PATH. A `serve.py` started from an automation shell was observed with a
+2-entry PATH that omitted `C:\Program Files\nodejs`, so every cover-letter
+generation failed with a bare `[WinError 2] The system cannot find the file
+specified` — an error naming neither Node nor PATH. Python shell-outs were
+unaffected because they use `sys.executable`, which is already absolute.
+Consumed by `serve.py`'s `POST /today/cl/generate` and `run.py:run_node`.
 
 #### `_load_stack_keywords(path: Path) -> tuple[dict, int]`
 Internal loader called once at module import. Reads the stack-keyword YAML
@@ -1089,7 +1107,10 @@ Spawns `python scripts/<script> <args>` with the current interpreter,
 returning the exit code. Output streams to the parent terminal.
 
 #### `run_node(script: str, *args) -> int`
-Spawns `node scripts/<script> <args>`. Same contract.
+Spawns `node scripts/<script> <args>`. Same contract, except it resolves the
+interpreter via `config.resolve_node()` rather than relying on a bare
+`"node"` PATH lookup — if Node can't be found it prints
+`config.NODE_MISSING_MSG` and returns `1` instead of raising `WinError 2`.
 
 #### `ingest_url(url: str, posted: str = None, dry_run: bool = False) -> bool`
 Shells out to `scripts/ingest.py --url <url> [--posted <date>]`. Returns
@@ -1231,7 +1252,7 @@ calling `linkedin_fetch._fetch_jd_text`.
 #### `POST /today/linkedin/discard_failing` — drop every staged row with `_prefilter_pass=False`.
 #### `POST /today/linkedin/fetchjd` — on-demand JD fetch for a single staged row.
 #### `POST /today/linkedin/discard` — drop one staged row by `staging_id`.
-#### `POST /today/cl/generate` — shell out to `generate_cl.js --job-id`.
+#### `POST /today/cl/generate` — shell out to `generate_cl.js --job-id`. Resolves the interpreter via `config.resolve_node()` (not a bare `"node"`); flashes `config.NODE_MISSING_MSG` if Node isn't found. Passes `--country` from the Python SSOT (`derive_country`) so the locked visa paragraph matches.
 #### `POST /today/comp/estimate` — shell out to `comp_estimate.py --job-id`.
 #### `POST /today/company/research` — shell out to `research_company.py --company-id`; strip the stub flag on success and flash the result. Used by the "Research now" button on the stub banner in `render_company_card` and the stub badge in `render_cl_row`. Honors `return_to` so the user lands back on `/job/<id>` (or the cover-letters apply queue).
 #### `POST /today/cl/open` — open generated `.docx` in the OS default app.

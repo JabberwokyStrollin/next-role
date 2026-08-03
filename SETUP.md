@@ -8,8 +8,20 @@ daily operation.
 ## Prerequisites
 
 - Python 3.11+
-- Node.js 18+
+- Node.js 18+ — must be resolvable from the environment **`serve.py` was
+  launched in**, not just your interactive shell (see the troubleshooting
+  note below)
 - An [Anthropic API key](https://console.anthropic.com/)
+
+> **Cover letters fail with "Node.js not found"?** A process inherits its
+> PATH at launch and never sees later changes, so a `serve.py` started from
+> an automation shell, a scheduled task, or a session predating the Node
+> install can end up with a PATH that omits `C:\Program Files\nodejs` even
+> though `node --version` works fine in your terminal. `config.resolve_node`
+> falls back to the standard install dirs, but the clean fix is to restart
+> the server from a shell where `node --version` works. To confirm what the
+> running server actually inherited, restart it rather than trusting your
+> own shell's PATH.
 
 ---
 
