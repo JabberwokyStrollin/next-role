@@ -7,6 +7,7 @@ constants, and environment loading.
 import os
 import sys
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import date, datetime, timezone
@@ -193,6 +194,57 @@ if not ANTHROPIC_API_KEY:
         "ANTHROPIC_API_KEY environment variable is not set.\n"
         "Run: $env:ANTHROPIC_API_KEY = 'sk-ant-...'"
     )
+
+# ─── Node executable resolution (SSOT for every `node` shell-out) ────────────
+
+# generate_cl.js is the only Node script, but it's launched from two places
+# (serve.py's /today/cl/generate and run.py:run_node). Both must resolve the
+# interpreter the same way, so the lookup lives here.
+#
+# Why this isn't just the string "node": a bare "node" is resolved against the
+# PATH *of the serve.py process*, which is inherited at launch and can be far
+# narrower than the machine PATH — a server started from an automation shell
+# was seen with a 2-entry PATH that omitted C:\Program Files\nodejs, so every
+# cover letter failed with a bare "[WinError 2] The system cannot find the file
+# specified" that named neither node nor PATH. Python shell-outs were unaffected
+# because they use sys.executable (already absolute).
+
+_NODE_FALLBACK_DIRS = (
+    Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "nodejs",
+    Path(os.environ.get("ProgramW6432", r"C:\Program Files")) / "nodejs",
+    Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "nodejs",
+    Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "nodejs",
+)
+
+
+def resolve_node() -> str | None:
+    """Absolute path to the `node` executable, or None if it can't be found.
+
+    Tries PATH first (shutil.which), then the standard Windows install dirs so
+    a truncated inherited PATH doesn't break cover-letter generation. Callers
+    should treat None as "Node isn't installed" and surface NODE_MISSING_MSG.
+    """
+    found = shutil.which("node")
+    if found:
+        return found
+    for d in _NODE_FALLBACK_DIRS:
+        if not str(d).strip() or str(d).startswith(os.sep + os.sep):
+            continue
+        for exe in ("node.exe", "node"):
+            cand = d / exe
+            try:
+                if cand.is_file():
+                    return str(cand)
+            except OSError:
+                continue
+    return None
+
+
+NODE_MISSING_MSG = (
+    "Node.js not found — cannot run generate_cl.js. Checked PATH and the "
+    "standard install dirs. Install Node, or restart serve.py from a shell "
+    "where `node --version` works (the server inherits PATH at launch)."
+)
 
 # ─── Models ───────────────────────────────────────────────────────────────────
 
