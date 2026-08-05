@@ -54,8 +54,10 @@ from config import (
     now_utc,
     save_json,
 )
-# Reuse the IMAP credential loader so the two mailbox tools never diverge.
-from linkedin_fetch import get_creds
+# Reuse the IMAP credential loader and socket timeout so the two mailbox tools
+# never diverge. IMAP_TIMEOUT_SECONDS is defined there, next to get_creds, and
+# re-exported here — so inbox_scan.IMAP_TIMEOUT_SECONDS still resolves.
+from linkedin_fetch import IMAP_TIMEOUT_SECONDS, get_creds
 
 ROOT          = Path(__file__).parent.parent
 DATA_DIR      = ROOT / "data"
@@ -78,15 +80,6 @@ HEADER_BATCH_SIZE = 100
 
 # Leading sequence number of an untagged FETCH response line: b'22546 (BODY[...'
 _FETCH_SEQ_RE = re.compile(rb"^\s*(\d+)\s+\(")
-
-# Socket timeout (seconds) for the IMAP connection. Without one, a stalled TCP
-# connect or a mid-scan server stall blocks forever and the only thing that ends
-# the scan is serve.py's 300s subprocess kill — which reports "Inbox scan timed
-# out after 300s" with no clue whether the mailbox was slow or the network hung.
-# This bounds a single blocking socket operation, not the whole scan, so it can
-# be well under the 300s cap: the largest individual fetch is a ~100-message
-# header batch (~2s) and data keeps flowing throughout.
-IMAP_TIMEOUT_SECONDS = 60
 
 # Company-name tokens too generic to match on (dropped from the match phrase).
 _GENERIC_CO_TOKENS = {

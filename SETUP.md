@@ -258,9 +258,10 @@ a few seconds, because the processed-ID list means only genuinely new mail is
 downloaded. `serve.py` allows the scan 300s before reporting a timeout.
 
 If the mail server stalls or is unreachable, the scan gives up on a single
-socket operation after `inbox_scan.IMAP_TIMEOUT_SECONDS` (60) and reports
+socket operation after `linkedin_fetch.IMAP_TIMEOUT_SECONDS` (60) and reports
 `ERROR: could not connect to <host>` — so a network problem reads as a network
-problem rather than as a 300s timeout.
+problem rather than as a 300s timeout. The same timeout covers the LinkedIn
+email fetch (`scripts/linkedin_fetch.py`), which shares the constant.
 
 ---
 

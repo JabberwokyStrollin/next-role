@@ -1673,6 +1673,7 @@ instead.
 | `DEFAULT_SENDERS` | `["jobalerts-noreply@linkedin.com"]` — written to `email_config.json` if it doesn't exist. |
 | `MIN_JD_LENGTH` | 200 — mirrors `serve.py` so a JD fetch that yields less is treated as failure. |
 | `JD_FETCH_HEADERS` | Chrome user-agent for outbound JD fetches. |
+| `IMAP_TIMEOUT_SECONDS` | `60` — **canonical socket timeout for every IMAP connection in the project.** Defined here next to `get_creds` and imported by `inbox_scan.py` alongside it, so the two mailbox tools can't diverge. Bounds a **single** blocking socket operation, not a whole run, so it stays well under `serve.py`'s per-action subprocess caps. Without it a stalled connect or a mid-run server hang blocks forever and only the subprocess kill ends the run — reporting a bare "timed out" that can't distinguish a slow mailbox from a dead network. |
 
 ### Functions
 
@@ -1694,8 +1695,8 @@ instead.
 
 #### IMAP fetch
 - `get_creds() -> tuple[str, str, str]` — read all three env vars or exit 2 with a helpful message.
-- `fetch_via_imap(dry_run: bool = False) -> int` — main flow. Returns the number of new staged jobs.
-- `reset_seen_state() -> tuple[int, int, int]` — clear local dedup state, clear staged-jobs list, remove `\Seen` on the server for every previously-tracked Message-ID. Returns `(n_local_cleared, n_staged_cleared, n_server_unflagged)`. Preserves `\Seen` on LinkedIn messages the user read outside the fetch flow.
+- `fetch_via_imap(dry_run: bool = False) -> int` — main flow. Returns the number of new staged jobs. Connects with `timeout=IMAP_TIMEOUT_SECONDS`; an unreachable or stalled server is **fatal** here (prints `ERROR: could not connect to <host>`, exits 2) because there's nothing partial worth reporting.
+- `reset_seen_state() -> tuple[int, int, int]` — clear local dedup state, clear staged-jobs list, remove `\Seen` on the server for every previously-tracked Message-ID. Returns `(n_local_cleared, n_staged_cleared, n_server_unflagged)`. Preserves `\Seen` on LinkedIn messages the user read outside the fetch flow. A failed connect is **not** fatal here (unlike `fetch_via_imap`): the local files are already cleared, so it returns the local counts with `n_server_unflagged=0` — same shape as a login failure.
 - `rehydrate_staged() -> tuple[int, int]` — re-run `_normalize_linkedin_url` over existing staged rows after a parser upgrade. Returns `(n_normalized, n_total)`.
 - `fetch_from_sample(path: Path, dry_run: bool = False) -> int` — parse a local `.eml` file as if it had been fetched. For testing without an IMAP server.
 
@@ -1704,6 +1705,11 @@ Argparse: `--dry-run`, `--sample EML_PATH`, `--reset`, `--rehydrate`.
 Prints machine-readable last lines for `serve.py` to parse:
 `FETCHED: N`, `RESET: local=N staged=N server=N`, `REHYDRATE:
 normalized=N total=N`, or `ERROR: <message>`.
+
+Both IMAP paths (`--reset` and the default fetch) run through a local
+`_imap_guard` helper that catches a socket stall or dropped connection
+*mid-run* (`TimeoutError` / `OSError` / `imaplib.IMAP4.abort`) and reports it on
+the `ERROR:` line rather than dying with a traceback `serve.py` can't parse.
 
 ---
 
@@ -1753,7 +1759,7 @@ subprocess 300s. Two properties keep it inside that:
 |---|---|
 | `INBOX_MATCHES`, `INBOX_STATE` | `data/inbox_matches.json` (staged matches) and `data/inbox_scan_state.json` (own dedup state). |
 | `HEADER_BATCH_SIZE` | `100` — messages per batched header `FETCH`. See the round-trip budget above. |
-| `IMAP_TIMEOUT_SECONDS` | `60` — socket timeout for the IMAP connection, bounding a **single** blocking socket operation (not the whole scan), so it sits well under `serve.py`'s 300s cap. Without it a stalled connect or server hang could only be ended by the subprocess kill, which reports a bare "timed out after 300s". |
+| `IMAP_TIMEOUT_SECONDS` | **Imported from `linkedin_fetch.py`** (not defined here), alongside `get_creds`, so both mailbox tools share one timeout — see that module's table for the rationale. `60`s bounds a single blocking socket operation, well under `serve.py`'s 300s scan cap. |
 | `_FETCH_SEQ_RE` | Matches the leading sequence number of an untagged `FETCH` response line, to pair each returned literal with its message. |
 | `TERMINAL_STATUSES` | `frozenset({"rejected", "offer", "withdrawn"})` — applications a reply can no longer change; excluded from matching. Every other status (incl. `ghosted`) is "open". |
 | `_GENERIC_CO_TOKENS` | Company-name tokens too generic to match on (`inc`, `llc`, `technologies`, …); dropped from the match phrase. |

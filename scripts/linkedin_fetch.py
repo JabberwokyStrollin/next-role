@@ -356,6 +356,16 @@ def _fetch_jd_text(url: str) -> tuple[str, bool, str]:
 
 # ── IMAP fetch ────────────────────────────────────────────────────────────────
 
+# Socket timeout (seconds) for every IMAP connection in the project — this
+# module's fetch/reset and, imported alongside get_creds, inbox_scan.py's scan.
+# Without one, a stalled TCP connect or a mid-run server stall blocks forever:
+# serve.py's subprocess kill is then the only thing that ends the run, and it
+# reports a bare "timed out", giving the operator no way to tell a slow mailbox
+# from a dead network. Bounds a single blocking socket operation, not the whole
+# run, so it stays well under serve.py's per-action subprocess caps.
+IMAP_TIMEOUT_SECONDS = 60
+
+
 def get_creds() -> tuple[str, str, str]:
     host = os.environ.get("NEXTROLE_IMAP_HOST", "").strip()
     user = os.environ.get("NEXTROLE_IMAP_USER", "").strip()
@@ -391,7 +401,11 @@ def fetch_via_imap(dry_run: bool = False) -> int:
     staged_urls = {s.get("apply_url")       for s in staged if s.get("apply_url")}
 
     print(f"Connecting to {host} as {user}...")
-    M = imaplib.IMAP4_SSL(host)
+    try:
+        M = imaplib.IMAP4_SSL(host, timeout=IMAP_TIMEOUT_SECONDS)
+    except (TimeoutError, OSError) as e:
+        print(f"ERROR: could not connect to {host}: {e}")
+        sys.exit(2)
     try:
         M.login(user, pw)
     except imaplib.IMAP4.error as e:
@@ -498,7 +512,14 @@ def reset_seen_state() -> tuple[int, int, int]:
 
     host, user, pw = get_creds()
     print(f"Connecting to {host} to unflag {len(seen_ids)} message(s)...")
-    M = imaplib.IMAP4_SSL(host)
+    # Unreachable server is NOT fatal here, unlike in fetch_via_imap: the local
+    # state files are already deleted above, so we report the local reset that
+    # did happen and a server-unflag count of 0, same as a login failure.
+    try:
+        M = imaplib.IMAP4_SSL(host, timeout=IMAP_TIMEOUT_SECONDS)
+    except (TimeoutError, OSError) as e:
+        print(f"ERROR: could not connect to {host} during reset: {e}")
+        return n_local, n_staged, 0
     try:
         M.login(user, pw)
     except imaplib.IMAP4.error as e:
@@ -623,8 +644,18 @@ def main() -> None:
                              "reset + IMAP re-fetch. Does not auto-fetch JDs.")
     args = parser.parse_args()
 
+    # A socket stall partway through either IMAP path trips IMAP_TIMEOUT_SECONDS
+    # (or the server drops us). Report it on the machine-readable ERROR line
+    # serve.py surfaces instead of dying with a traceback.
+    def _imap_guard(fn, label):
+        try:
+            return fn()
+        except (TimeoutError, OSError, imaplib.IMAP4.abort) as e:
+            print(f"ERROR: IMAP connection failed during {label}: {e}")
+            sys.exit(2)
+
     if args.reset:
-        n_local, n_staged, n_server = reset_seen_state()
+        n_local, n_staged, n_server = _imap_guard(reset_seen_state, "reset")
         print(
             f"Cleared {n_local} local Message-ID(s); "
             f"cleared {n_staged} staged row(s); "
@@ -642,7 +673,7 @@ def main() -> None:
     if args.sample:
         fetch_from_sample(Path(args.sample), dry_run=args.dry_run)
     else:
-        fetch_via_imap(dry_run=args.dry_run)
+        _imap_guard(lambda: fetch_via_imap(dry_run=args.dry_run), "fetch")
 
 
 if __name__ == "__main__":
