@@ -1724,15 +1724,36 @@ status here (the operator applies each match from the UI).
 
 **Read-flag safety.** Unlike `linkedin_fetch.py`, this scanner **never marks
 messages `\Seen`** — every fetch uses `BODY.PEEK` and it issues no `STORE`. It
-keeps its own processed-Message-ID list in `data/inbox_scan_state.json`, so the
-scan is independent of the server-side read flag: reading mail in your own
-client neither hides matches from the scanner nor is changed by it.
+keeps its own processed-Message-ID list in `data/inbox_scan_state.json` (every
+message whose body it examined — see the round-trip budget below), so the scan
+is independent of the server-side read flag: reading mail in your own client
+neither hides matches from the scanner nor is changed by it.
+
+**IMAP round-trip budget.** The scan is network-bound, and `serve.py` gives the
+subprocess 300s. Two properties keep it inside that:
+
+1. **Headers are fetched in batches of `HEADER_BATCH_SIZE`**, not one message at
+   a time. Every message in the window needs a header fetch (the Message-ID
+   dedup key isn't knowable before it), and on Gmail a round trip is ~0.4s — so
+   per-message fetching cost ~170s for a routine 400-message window and, with
+   the body fetches on top, overran the 300s timeout. Batched, the header phase
+   is ~4s.
+2. **A message is recorded as processed once its body has been examined**,
+   whatever the classification. Company names appear in job-alert subjects, so
+   ~40% of a window clears the header-level company match and gets a full body
+   download (~0.35s each, transfer-bound — batching does not help). Recording
+   only *matches* would re-download all of them on every scan; recording every
+   examined message makes a re-scan ~3s. Message content is immutable, so a
+   no-signal message cannot become a match later; `--reset` re-examines
+   everything if the classifier changes.
 
 ### Module-level constants
 
 | Name | Purpose |
 |---|---|
 | `INBOX_MATCHES`, `INBOX_STATE` | `data/inbox_matches.json` (staged matches) and `data/inbox_scan_state.json` (own dedup state). |
+| `HEADER_BATCH_SIZE` | `100` — messages per batched header `FETCH`. See the round-trip budget above. |
+| `_FETCH_SEQ_RE` | Matches the leading sequence number of an untagged `FETCH` response line, to pair each returned literal with its message. |
 | `TERMINAL_STATUSES` | `frozenset({"rejected", "offer", "withdrawn"})` — applications a reply can no longer change; excluded from matching. Every other status (incl. `ghosted`) is "open". |
 | `_GENERIC_CO_TOKENS` | Company-name tokens too generic to match on (`inc`, `llc`, `technologies`, …); dropped from the match phrase. |
 
@@ -1750,7 +1771,8 @@ client neither hides matches from the scanner nor is changed by it.
 - `_message_key(mid, from_header, subject, received) -> str` — stable dedup key (Message-ID, else a content digest).
 - `build_match(...) -> dict` — assemble one staged-match record (see DATA.md `inbox_matches.json`).
 - `_since_date(window_days) -> str` — IMAP `SINCE` token (DD-Mon-YYYY).
-- `scan_via_imap(window_days, dry_run=False) -> int` — main flow: `SINCE` search, header-peek + cheap company match, then body-peek + classify, stage new matches. Returns count staged.
+- `_fetch_header_batch(M, seq_nums) -> dict[bytes, bytes]` — one `BODY.PEEK[HEADER.FIELDS (...)]` `FETCH` for up to `HEADER_BATCH_SIZE` messages; returns `{sequence_number: raw_header_bytes}`. Messages the server omits are absent and get skipped by the caller.
+- `scan_via_imap(window_days, dry_run=False) -> int` — main flow: `SINCE` search, batched header-peek + cheap company match, then per-message body-peek + classify, stage new matches. Every message whose body is examined joins the processed-ID set (not just matches), and that set is saved whenever `dry_run` is false — even with zero matches. Returns count staged.
 - `scan_from_sample(path, dry_run=False) -> int` — classify a local `.eml` against open applications. For testing without IMAP.
 - `reset_state() -> tuple[int, int]` — clear staged matches + processed-id state.
 

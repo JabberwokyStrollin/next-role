@@ -57,7 +57,7 @@ JSONL logs have no foreign keys to the rest — they're parallel.
 | `email_state.json` | JSON object | Cross-run `seen_message_ids` for IMAP dedup | `linkedin_fetch.py` | `linkedin_fetch.py` |
 | `email_staged.json` | JSON array | Parsed LinkedIn alert jobs awaiting per-row ingest | `linkedin_fetch.py`, `prefilter_staged.py`, `cleanup_staged_jd.py`, `serve.py` | `serve.py` `/today` |
 | `inbox_matches.json` | JSON array | Staged rejection / interview / offer email matches awaiting one-click review | `inbox_scan.py`, `serve.py` (apply/dismiss) | `serve.py` `/today` |
-| `inbox_scan_state.json` | JSON object | Cross-run `processed_message_ids` for the inbox scanner's own dedup | `inbox_scan.py` | `inbox_scan.py` |
+| `inbox_scan_state.json` | JSON object | Cross-run `processed_message_ids` (every message examined, matched or not) for the inbox scanner's own dedup | `inbox_scan.py` | `inbox_scan.py` |
 | `drills.json` | JSON array | Claude-generated code drills (prompt, partial interface, status, review feedback) for the `/today` Code-drills section | `scripts/drills.py`, `serve.py` (complete) | `serve.py` `/today` |
 | `backups/<date>/` | dir of JSON | Daily local snapshots of the `data/*.json` files (recovery from a stray delete / corrupt write) | `scripts/backup_data.py` (via `serve.py` `/today`) | manual recovery |
 | `crawl_log.jsonl` | JSONL | Per-run crawl summaries (funnel breakdown) | `crawl.py` | manual inspection |
@@ -887,21 +887,27 @@ rejection after any live contact as an interview failure).
 ## `data/inbox_scan_state.json`
 
 **Role.** The inbox scanner's own cross-run dedup state — the `Message-ID`s
-(or synthesized keys) of every message it has already staged. Kept separate
-from the server-side `\Seen` flag on purpose: `inbox_scan.py` never marks mail
-read, so this file is the only "already handled" signal, and reading a message
-in your own client doesn't affect it.
+(or synthesized keys) of every message whose body it has **examined**, whether
+or not that produced a match. Kept separate from the server-side `\Seen` flag on
+purpose: `inbox_scan.py` never marks mail read, so this file is the only
+"already handled" signal, and reading a message in your own client doesn't
+affect it.
+
+Recording examined-but-unmatched messages (not just staged matches) is what
+keeps a re-scan cheap: the body download is the scan's dominant cost, and a
+message's content can't change, so a no-signal message can never become a match
+later. See `ARCHITECTURE.md` → `inbox_scan.py` "IMAP round-trip budget".
 
 **Lifecycle.**
 
-- **Updated** by `inbox_scan.add_processed_ids` after staging matches.
-- **Cleared** by `inbox_scan.py --reset` (alongside `inbox_matches.json`).
+- **Updated** by `inbox_scan.add_processed_ids` at the end of a non-`--dry-run` scan — including a scan that staged **zero** matches.
+- **Cleared** by `inbox_scan.py --reset` (alongside `inbox_matches.json`). This is the way to re-examine old mail after the classifier changes.
 
 ### Schema
 
 | Field | Type | Notes |
 |---|---|---|
-| `processed_message_ids` | list[string] | Sorted list of Message-IDs / `nomid:<digest>` keys already staged. |
+| `processed_message_ids` | list[string] | Sorted list of Message-IDs / `nomid:<digest>` keys already examined (staged **or** classified as no-signal). |
 
 ### Example
 

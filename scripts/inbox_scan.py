@@ -11,8 +11,9 @@ surface for one-click review — nothing mutates application status here.
 
 Read-flag safety. Unlike linkedin_fetch.py, this scanner NEVER marks messages
 \\Seen: every fetch uses BODY.PEEK, and it issues no STORE. It keeps its own
-processed-Message-ID list in data/inbox_scan_state.json, so reading mail in
-your own client neither hides matches from us nor is changed by us.
+processed-Message-ID list in data/inbox_scan_state.json — every message whose
+body it examined, matched or not — so reading mail in your own client neither
+hides matches from us nor is changed by us, and a re-scan does no repeat work.
 
 Credentials via the same env vars as linkedin_fetch.py:
     NEXTROLE_IMAP_HOST          (e.g. imap.gmail.com)
@@ -66,6 +67,17 @@ INBOX_STATE   = DATA_DIR / "inbox_scan_state.json"
 # (applied / recruiter_screen / interview / ghosted) is "open": a real reply to
 # a ghosted application resurrects it, so ghosted stays in scope.
 TERMINAL_STATUSES = frozenset({"rejected", "offer", "withdrawn"})
+
+# Messages per header FETCH. The scan needs the headers of every message in the
+# window (the Message-ID dedup key is only knowable after fetching), but one
+# FETCH per message is one network round trip per message: a routine 400-message
+# 14-day window cost ~170s on Gmail, which — plus body fetches and login —
+# overran serve.py's 300s subprocess timeout and surfaced as "Inbox scan timed
+# out after 300s". Batched, the same window is a few round trips (~4s).
+HEADER_BATCH_SIZE = 100
+
+# Leading sequence number of an untagged FETCH response line: b'22546 (BODY[...'
+_FETCH_SEQ_RE = re.compile(rb"^\s*(\d+)\s+\(")
 
 # Company-name tokens too generic to match on (dropped from the match phrase).
 _GENERIC_CO_TOKENS = {
@@ -279,6 +291,30 @@ def _since_date(window_days: int) -> str:
     return dt.strftime("%d-%b-%Y")
 
 
+def _fetch_header_batch(M: imaplib.IMAP4, seq_nums: list[bytes]) -> dict[bytes, bytes]:
+    """Peek the match-relevant headers of many messages in one FETCH round trip.
+
+    Returns ``{sequence_number: raw_header_bytes}``. Messages the server omits
+    are simply absent — the caller skips them, exactly as it skipped a per-message
+    fetch that came back non-OK. ``BODY.PEEK`` keeps the \\Seen guarantee."""
+    if not seq_nums:
+        return {}
+    typ, resp = M.fetch(
+        b",".join(seq_nums), "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT MESSAGE-ID DATE)])")
+    if typ != "OK" or not resp:
+        return {}
+    out: dict[bytes, bytes] = {}
+    for item in resp:
+        # Each message is a (prefix, literal) tuple; the b')' terminators between
+        # them are plain bytes and carry no payload.
+        if not isinstance(item, tuple) or len(item) < 2 or not item[1]:
+            continue
+        m = _FETCH_SEQ_RE.match(item[0] or b"")
+        if m:
+            out[m.group(1)] = item[1]
+    return out
+
+
 def scan_via_imap(window_days: int, dry_run: bool = False) -> int:
     """Scan INBOX for rejection/interview replies to open applications.
     Returns the count of new matches staged."""
@@ -316,59 +352,74 @@ def scan_via_imap(window_days: int, dry_run: bool = False) -> int:
     new_matches: list[dict] = []
     new_processed: set[str] = set()
 
-    for uid in uids:
-        # Headers first — BODY.PEEK never sets \Seen.
-        typ, hdr_data = M.fetch(
-            uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT MESSAGE-ID DATE)])")
-        if typ != "OK" or not hdr_data or not hdr_data[0]:
-            continue
-        hmsg     = email.message_from_bytes(hdr_data[0][1])
-        from_hdr = _decode_header(hmsg.get("From"))
-        subject  = _decode_header(hmsg.get("Subject"))
-        mid      = (hmsg.get("Message-ID") or "").strip()
-        received = _received_date(hmsg)
-        key      = _message_key(mid, from_hdr, subject, received)
+    # Headers in batches — BODY.PEEK never sets \Seen. Bodies stay per-message:
+    # batching them saves little (they're transfer-bound, ~0.35s either way);
+    # what keeps them cheap is not re-examining them on the next scan.
+    for start in range(0, len(uids), HEADER_BATCH_SIZE):
+        batch   = uids[start:start + HEADER_BATCH_SIZE]
+        headers = _fetch_header_batch(M, batch)
 
-        if key in seen_keys:
-            continue
+        for uid in batch:
+            raw_hdr = headers.get(uid)
+            if not raw_hdr:
+                continue
+            hmsg     = email.message_from_bytes(raw_hdr)
+            from_hdr = _decode_header(hmsg.get("From"))
+            subject  = _decode_header(hmsg.get("Subject"))
+            mid      = (hmsg.get("Message-ID") or "").strip()
+            received = _received_date(hmsg)
+            key      = _message_key(mid, from_hdr, subject, received)
 
-        # Cheap company match on headers before pulling the full body.
-        header_candidates = [
-            a for a in open_apps
-            if company_matches(a.get("company_name", ""), from_hdr, subject)
-        ]
-        if not header_candidates:
-            continue
+            if key in seen_keys:
+                continue
 
-        typ, body_data = M.fetch(uid, "(BODY.PEEK[])")
-        if typ != "OK" or not body_data or not body_data[0]:
-            continue
-        fmsg = email.message_from_bytes(body_data[0][1])
-        body = _extract_text(fmsg)
+            # Cheap company match on headers before pulling the full body.
+            header_candidates = [
+                a for a in open_apps
+                if company_matches(a.get("company_name", ""), from_hdr, subject)
+            ]
+            if not header_candidates:
+                continue
 
-        app = match_application(header_candidates, from_hdr, subject, body)
-        if not app:
-            continue
+            typ, body_data = M.fetch(uid, "(BODY.PEEK[])")
+            if typ != "OK" or not body_data or not body_data[0]:
+                continue
+            fmsg = email.message_from_bytes(body_data[0][1])
+            body = _extract_text(fmsg)
 
-        status, reason, evidence = classify_inbox_email(subject, body)
-        if not status:
-            continue  # matched a company but no rejection/interview signal
+            # The body is downloaded and classified — record the message as
+            # processed whatever the verdict. Message content is immutable, so a
+            # no-signal message can never become a match later, and re-examining
+            # it means re-downloading the body on every future scan (the bulk of
+            # the scan's wall-clock: company names appear in job-alert subjects,
+            # so ~40% of a window reaches this point). `--reset` re-examines
+            # everything if the classifier changes.
+            new_processed.add(key)
+            seen_keys.add(key)
 
-        new_matches.append(
-            build_match(app, from_hdr, subject, received, status, reason, evidence, key))
-        new_processed.add(key)
-        seen_keys.add(key)
-        print(f"    match: {app.get('company_name')} — {status}"
-              f"{('/' + reason) if reason else ''} · {subject[:60]}")
+            app = match_application(header_candidates, from_hdr, subject, body)
+            if not app:
+                continue
+
+            status, reason, evidence = classify_inbox_email(subject, body)
+            if not status:
+                continue  # matched a company but no rejection/interview signal
+
+            new_matches.append(
+                build_match(app, from_hdr, subject, received, status, reason, evidence, key))
+            print(f"    match: {app.get('company_name')} — {status}"
+                  f"{('/' + reason) if reason else ''} · {subject[:60]}")
 
     try:
         M.logout()
     except Exception:
         pass
 
-    if new_matches and not dry_run:
-        matches.extend(new_matches)
-        save_matches(matches)
+    if not dry_run:
+        if new_matches:
+            matches.extend(new_matches)
+            save_matches(matches)
+        # Written even with zero matches — that's what keeps the next scan cheap.
         add_processed_ids(new_processed)
 
     print(f"SCANNED: {len(new_matches)}")

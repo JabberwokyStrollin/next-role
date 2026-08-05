@@ -262,6 +262,13 @@ read** (every fetch uses `BODY.PEEK`) and keeps its own dedup state, so
 reading a message in your own mail client neither hides it from the
 scanner nor is affected by the scan.
 
+The scan is network-bound, and the first run over a busy mailbox is the slow
+one — roughly 90s for a 400-message window, because it downloads the body of
+every message whose sender/subject names a company you have an open
+application with. Later runs are a few seconds: the dedup state records each
+message it examined, so only new mail is downloaded. (`--reset` clears that,
+so the next scan is a slow one again.)
+
 ```bash
 python scripts/inbox_scan.py                 # scan + stage matches
 python scripts/inbox_scan.py --dry-run       # classify only, write nothing
