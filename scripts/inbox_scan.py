@@ -79,6 +79,15 @@ HEADER_BATCH_SIZE = 100
 # Leading sequence number of an untagged FETCH response line: b'22546 (BODY[...'
 _FETCH_SEQ_RE = re.compile(rb"^\s*(\d+)\s+\(")
 
+# Socket timeout (seconds) for the IMAP connection. Without one, a stalled TCP
+# connect or a mid-scan server stall blocks forever and the only thing that ends
+# the scan is serve.py's 300s subprocess kill — which reports "Inbox scan timed
+# out after 300s" with no clue whether the mailbox was slow or the network hung.
+# This bounds a single blocking socket operation, not the whole scan, so it can
+# be well under the 300s cap: the largest individual fetch is a ~100-message
+# header batch (~2s) and data keeps flowing throughout.
+IMAP_TIMEOUT_SECONDS = 60
+
 # Company-name tokens too generic to match on (dropped from the match phrase).
 _GENERIC_CO_TOKENS = {
     "inc", "llc", "ltd", "limited", "corp", "co", "company", "technologies",
@@ -331,7 +340,11 @@ def scan_via_imap(window_days: int, dry_run: bool = False) -> int:
 
     host, user, pw = get_creds()
     print(f"Connecting to {host} as {user}...")
-    M = imaplib.IMAP4_SSL(host)
+    try:
+        M = imaplib.IMAP4_SSL(host, timeout=IMAP_TIMEOUT_SECONDS)
+    except (TimeoutError, OSError) as e:
+        print(f"ERROR: could not connect to {host}: {e}")
+        sys.exit(2)
     try:
         M.login(user, pw)
     except imaplib.IMAP4.error as e:
@@ -499,7 +512,16 @@ def main() -> None:
     if args.sample:
         scan_from_sample(Path(args.sample), dry_run=args.dry_run)
     else:
-        scan_via_imap(args.window_days, dry_run=args.dry_run)
+        try:
+            scan_via_imap(args.window_days, dry_run=args.dry_run)
+        except (TimeoutError, OSError, imaplib.IMAP4.abort) as e:
+            # A stall partway through the scan trips IMAP_TIMEOUT_SECONDS (or the
+            # server drops us). Report it on the machine-readable ERROR line
+            # serve.py surfaces instead of dying with a traceback. This run's
+            # progress is dropped — matches and processed ids are only written
+            # once the scan completes — so the next scan simply redoes it.
+            print(f"ERROR: IMAP connection failed mid-scan: {e}")
+            sys.exit(2)
 
 
 if __name__ == "__main__":

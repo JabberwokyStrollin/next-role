@@ -1753,6 +1753,7 @@ subprocess 300s. Two properties keep it inside that:
 |---|---|
 | `INBOX_MATCHES`, `INBOX_STATE` | `data/inbox_matches.json` (staged matches) and `data/inbox_scan_state.json` (own dedup state). |
 | `HEADER_BATCH_SIZE` | `100` — messages per batched header `FETCH`. See the round-trip budget above. |
+| `IMAP_TIMEOUT_SECONDS` | `60` — socket timeout for the IMAP connection, bounding a **single** blocking socket operation (not the whole scan), so it sits well under `serve.py`'s 300s cap. Without it a stalled connect or server hang could only be ended by the subprocess kill, which reports a bare "timed out after 300s". |
 | `_FETCH_SEQ_RE` | Matches the leading sequence number of an untagged `FETCH` response line, to pair each returned literal with its message. |
 | `TERMINAL_STATUSES` | `frozenset({"rejected", "offer", "withdrawn"})` — applications a reply can no longer change; excluded from matching. Every other status (incl. `ghosted`) is "open". |
 | `_GENERIC_CO_TOKENS` | Company-name tokens too generic to match on (`inc`, `llc`, `technologies`, …); dropped from the match phrase. |
@@ -1781,6 +1782,12 @@ Argparse: `--dry-run`, `--window-days N` (default `INBOX_SCAN_WINDOW_DAYS`),
 `--sample EML_PATH`, `--reset`. Prints a machine-readable last line for
 `serve.py` to parse: `SCANNED: N`, `RESET: matches=N processed=N`, or
 `ERROR: <message>`.
+
+Wraps `scan_via_imap` in a `(TimeoutError, OSError, imaplib.IMAP4.abort)`
+handler so a socket stall partway through the scan (or the server dropping the
+connection) exits `2` with an `ERROR:` line rather than a traceback. That run's
+progress is dropped — matches and processed ids are written only once the scan
+completes — so the next scan redoes it.
 
 ---
 

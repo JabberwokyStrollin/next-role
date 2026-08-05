@@ -257,6 +257,11 @@ with. On a ~400-message 14-day window that's roughly 90s; subsequent scans are
 a few seconds, because the processed-ID list means only genuinely new mail is
 downloaded. `serve.py` allows the scan 300s before reporting a timeout.
 
+If the mail server stalls or is unreachable, the scan gives up on a single
+socket operation after `inbox_scan.IMAP_TIMEOUT_SECONDS` (60) and reports
+`ERROR: could not connect to <host>` — so a network problem reads as a network
+problem rather than as a 300s timeout.
+
 ---
 
 ## 6. (Optional) Crawl configuration
