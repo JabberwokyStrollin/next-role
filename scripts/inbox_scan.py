@@ -41,7 +41,7 @@ import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from email.header import decode_header, make_header
-from email.utils import parsedate_to_datetime
+from email.utils import parseaddr, parsedate_to_datetime
 from pathlib import Path
 
 from bs4 import BeautifulSoup
@@ -276,6 +276,11 @@ def build_match(app: dict, from_header: str, subject: str, received: str,
         "title":            app.get("title"),
         "app_status":       app.get("status"),
         "from_addr":        from_header[:200],
+        # Display name, so a needs_reply row can read "David Mullen — Genesys"
+        # instead of an address. Falls back to the address when there's no
+        # display name.
+        "from_name":        (parseaddr(from_header)[0]
+                             or parseaddr(from_header)[1] or from_header)[:120],
         "subject":          subject[:200],
         "received":         received,
         "email_status":     email_status,
@@ -407,7 +412,7 @@ def scan_via_imap(window_days: int, dry_run: bool = False) -> int:
             if not app:
                 continue
 
-            status, reason, evidence = classify_inbox_email(subject, body)
+            status, reason, evidence = classify_inbox_email(subject, body, from_hdr)
             if not status:
                 continue  # matched a company but no rejection/interview signal
 
@@ -444,7 +449,7 @@ def scan_from_sample(path: Path, dry_run: bool = False) -> int:
 
     open_apps = load_open_applications()
     app = match_application(open_apps, from_hdr, subject, body)
-    status, reason, evidence = classify_inbox_email(subject, body)
+    status, reason, evidence = classify_inbox_email(subject, body, from_hdr)
 
     print(f"  from:    {from_hdr[:80]}")
     print(f"  subject: {subject[:80]}")

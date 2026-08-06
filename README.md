@@ -78,6 +78,12 @@ SETUP.md.
    matches them to your open applications, and stages one-click status
    suggestions — you review and Apply/Dismiss each; nothing changes
    automatically. It never marks your mail read (see *Mailbox scan* below).
+   It also flags **Needs reply** — a real person asking a clarifying question
+   ("are you open to relocating to Ireland?", sponsorship, salary, notice
+   period). Those sort to the top of the staged list with an amber badge and no
+   Apply button, because the action is to *answer the email*, not to log a
+   status. Automated acknowledgements can't trigger it: the sender has to be a
+   person, not `no-reply@` / `careers@` / `talent@`.
 2. **Crawl** — kick off the two-lane crawler in the background and
    watch its tail update live.
 3. **LinkedIn ingest** — pull job-alert emails via IMAP, pre-filter

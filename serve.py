@@ -1254,6 +1254,10 @@ STYLE = """
   .btn-status-undo { margin-left: auto; background: #fdf6f6; color: #8a3a3a;
                      border-color: rgba(138,58,58,0.22); }
   .btn-status-undo:hover { background: #f7e9e9; }
+  /* A pending human question is the one inbox row that needs action from the
+     operator rather than a click-to-log, so it reads warmer than the rest. */
+  .inbox-needs-reply { background: #fff4e0 !important; color: #8a5300 !important;
+                       border: 0.5px solid rgba(138,83,0,0.25); }
   .crawl-status   { display: flex; align-items: center; gap: 10px;
                     flex-wrap: wrap; margin-bottom: 8px; }
   .crawl-badge    { font-size: 11px; padding: 3px 9px; border-radius: 4px;
@@ -3498,12 +3502,21 @@ def render_inbox_matches_block(apps: list[dict]) -> str:
     if not live:
         return "".join(parts)
 
+    # Needs-reply rows first: they're the only ones waiting on the operator to
+    # write something, and a question buried under a dozen click-to-log
+    # rejections is exactly how one gets missed.
+    live.sort(key=lambda m: 0 if m.get("email_status") == "needs_reply" else 1)
+    n_reply = sum(1 for m in live if m.get("email_status") == "needs_reply")
+
     rows = "".join(
         render_inbox_match_row(m, (app_by_id.get(m.get("application_id")) or {}).get("status"))
         for m in live)
+    reply_note = (f' <strong>{n_reply}</strong> need a reply from you.'
+                  if n_reply else '')
     parts.append(
         f'<div class="notice notice-info" style="margin-bottom:8px">'
         f'<strong>{len(live)}</strong> inbox match(es) detected — review and apply.'
+        f'{reply_note}'
         f'</div>'
         f'<div class="app-list">{rows}</div>'
     )
@@ -3523,11 +3536,21 @@ def render_inbox_match_row(m: dict, current_status: str | None = None) -> str:
     # Resolve the email signal against the application's live status.
     status, reason = inbox_match_suggestion(m, current_status)
     action   = inbox_suggestion_action(status, reason)
-    if status == "rejected":
+    # needs_reply resolves to no status on purpose — a recruiter's question is
+    # engagement, not a screen. It gets its own label and badge so it doesn't
+    # render as a generic "Update" with no button and read like a dead row.
+    if m.get("email_status") == "needs_reply":
+        sug_label = "Needs reply"
+        sug_cls   = "pf-badge inbox-needs-reply"
+    elif status == "rejected":
         sug_label = REJECTION_REASONS.get(reason or "", "Rejection")
+        sug_cls   = f"app-status-{status}"
     else:
         sug_label = _INBOX_SUGGESTION_LABELS.get(status or "", "Update")
-    sug_cls = f"app-status-{status}" if status else "pf-badge"
+        sug_cls   = f"app-status-{status}" if status else "pf-badge"
+    # A question is from a person, so show who — "David Mullen" beats an address.
+    if m.get("email_status") == "needs_reply" and m.get("from_name"):
+        from_a = esc(m.get("from_name"))[:70]
 
     apply_btn = ""
     if action:
