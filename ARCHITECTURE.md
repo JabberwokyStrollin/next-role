@@ -997,9 +997,20 @@ Polls `https://api.lever.co/v0/postings/<slug>?mode=json`. Prefers Lever's
 the result. `date_posted` is `createdAt` (Unix millis).
 
 #### `fetch_ashby(slug: str, company: str) -> list[dict]`
-Polls Ashby's job-board JSON endpoint. Same output schema. Falls back to
-constructing a job URL from the slug + posting ID if `jobPostingUrl` is
+Polls Ashby's **public posting API**
+(`api.ashbyhq.com/posting-api/job-board/<slug>`). Same output schema. Prefers
+`descriptionPlain` over converting `descriptionHtml`, and falls back to
+constructing a job URL from the slug + posting ID if `jobUrl` / `applyUrl` are
 absent.
+
+> The older `jobs.ashbyhq.com/api/non-admin/organization/job-board?organizationHostedJobsPageName=`
+> endpoint now 404s for every slug, so Ashby boards silently fetched **zero**
+> jobs — indistinguishable from an empty board in the crawl output. The field
+> names differ too (`location` not `locationName`, `jobUrl` not
+> `jobPostingUrl`, `publishedAt` not `publishedDate`).
+> `discover_boards_from_careers.validate_ats_slug` hits the same endpoint and
+> checks the `jobs` key — **keep the two in step**, or newly discovered Ashby
+> boards will fail validation and never be added.
 
 #### `_categorize_reason(reason: str) -> str`
 Maps the `pre_filter` reason string to a stable funnel category
@@ -2546,7 +2557,9 @@ but misses legal-name / rebrand cases (e.g. DoorDash's `doordashusa`).
 
 #### `validate_ats_slug(ats: str, slug: str) -> bool`
 Hits the appropriate ATS public API and returns `True` only if the
-response has at least one job. Skips known-unsupported ATSes.
+response has at least one job. Skips known-unsupported ATSes. The Ashby URL
+and response key must match `crawl.fetch_ashby` — see the warning in that
+function's entry.
 
 #### `_log(record: dict) -> None`
 Appends a JSON line to `BOARD_DISCOVERY_LOG`. Best-effort; never raises.
