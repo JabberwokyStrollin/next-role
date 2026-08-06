@@ -613,10 +613,17 @@ import re as _re
 # it at the head ("Vice President, Data Engineering"), which must still be
 # excluded — so anchoring to a preceding separator is what distinguishes them.
 _BANKING_RANK_RE: _re.Pattern = _re.compile(
-    r"\s*[-–—,|(/]\s*"                                   # separator before the rank
+    r"\s*[-–—,|/(]\s*"                                   # separator before the rank
     r"(?:assistant\s+|associate\s+|senior\s+|sr\.?\s+|executive\s+|group\s+)?"
-    r"vice\s+president\b"
-    r"|\s*[-–—,|(/]\s*(?:avp|svp|evp)\b",                # abbreviated forms
+    # Spelled out or abbreviated. Bare "vp" is included, but only in this
+    # suffix position — an executive title puts it at the head ("VP of
+    # Engineering"), where the required preceding separator can't match.
+    r"(?:vice\s+president|avp|svp|evp|vp)"
+    # Anchored to the end, tolerating a closing paren: banks append the rank
+    # last ("… - Assistant Vice President", "… (VP)"). Anchoring keeps the bare
+    # "vp" alternative from biting mid-title, e.g. "… - VP Platform Tooling",
+    # where the words after it are part of the actual role.
+    r"\s*\)?\s*$",
     _re.I,
 )
 
