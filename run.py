@@ -57,6 +57,7 @@ from config import (  # noqa: E402
     company_block_reason,
     composite_score,
     composite_score_pre_research,
+    apply_queue_order,
     apply_rank_score,
     derive_country,
     gov_screen_block_reason,
@@ -333,12 +334,14 @@ def generate_cover_letters(top_n: int = 5, auto: bool = False) -> None:
         if gov_screen_block_reason(job, company):
             gov_excluded += 1
             continue
-        # Rank by the gov-screen-adjusted score (flag → -GOV_SCREEN_FLAG_PENALTY_PCT%).
-        score   = apply_rank_score(job, company)
-        scored.append((score, job))
-    scored.sort(key=lambda x: x[0], reverse=True)
+        scored.append(job)
 
-    candidates = scored[:top_n]
+    # Order via the apply-queue SSOT — same shaping the /today queue uses, so
+    # the CLI and the web surface can't diverge. Ranked by the gov-screen-adjusted
+    # score, then country quotas bubble the day's target mix to the head.
+    ordered    = apply_queue_order(scored, co_by_id)
+    candidates = [(apply_rank_score(j, co_by_id.get(j.get("company_id"))), j)
+                  for j in ordered[:top_n]]
     if not candidates:
         print("\nNo jobs ready for cover letter generation.")
         return
