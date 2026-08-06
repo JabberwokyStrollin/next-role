@@ -53,6 +53,8 @@ Two cross-cutting rules govern most of the code and are referenced throughout:
 - [`scripts/rescore_all.py`](#scriptsrescore_allpy) — bulk re-score under a new rubric
 - [`scripts/scan_no_sponsorship.py`](#scriptsscan_no_sponsorshippy) — retroactive no-sponsorship sweep
 - [`scripts/scan_foreign_locations.py`](#scriptsscan_foreign_locationspy) — retroactive foreign-pinned-location sweep
+- [`scripts/scan_duplicate_postings.py`](#scriptsscan_duplicate_postingspy) — collapse the same role posted per-office
+- [`scripts/scan_company_overflow.py`](#scriptsscan_company_overflowpy) — per-company pipeline inventory cap
 - [`scripts/resync_tracker_country.py`](#scriptsresync_tracker_countrypy) — re-derive stored `country` on logged applications
 - [`scripts/scan_stale_jobs.py`](#scriptsscan_stale_jobspy) — expire jobs sitting un-applied past `PIPELINE_EXPIRY_DAYS`
 - [`scripts/cleanup_staged_jd.py`](#scriptscleanup_staged_jdpy) — clear similar-jobs noise from staged rows
@@ -133,6 +135,10 @@ file.
 | `_GOV_SCREEN_MATRIX` | `dict` | Part 3 combination matrix: `{flag: {exposure: (result, emit_questions)}}`. Consumed by `gov_screen_result`. |
 | `WORK_MODELS` | `tuple[str, ...]` | Valid `work_model` / `job_type` values: `remote`, `hybrid`, `onsite`, `unstated`. Consumed by `score_jd` (validation) and `classify_work_model`. |
 | `US_ACCEPTED_WORK_MODELS` | `frozenset[str]` | **The work-model policy knob.** Which models a US role may have; default `{"remote", "unstated"}` — a *confirmed* office requirement is rejected, but a JD that simply doesn't say is admitted for manual triage. Narrow to `{"remote"}` for confirmed-remote only, or add `"hybrid"` to accept a commute. US-only; CA/IE are never gated on work model. Read by `work_model_discard_reason`. |
+| `APPLY_QUEUE_COUNTRY_QUOTAS` | `dict[str,int] \| None` | Per-country daily target mix for the apply queue (`{"CA":4,"IE":4,"US":4}`). `None` restores pure `apply_rank_score` ordering with no code change. Read by `apply_queue_order`. |
+| `APPLY_QUEUE_MAX_PER_COMPANY` | `int` | Max roles one company may hold **within the bubbled block** (2). Without it a company with deep inventory fills a whole country's quota. Ignored when quotas are `None`. |
+| `DAILY_APPLICATION_GOAL` / `DAILY_APPLICATION_GOAL_DEFAULT` | `int` | The goal is **derived** — `sum(quotas.values())` when quotas are set, else the default (10) — so target and queue shape can't drift. |
+| `MAX_ACTIVE_JOBS_PER_COMPANY` | `int` | Stored-inventory ceiling per company (20). Distinct from the apply throttle below: bounds active ROWS, not in-flight APPLICATIONS. Enforced by `scan_company_overflow.py`. |
 | `MAX_ACTIVE_APPS_PER_COMPANY` | `int` | Apply-time throttle — hide a company once N in-flight apps exist (3). |
 | `IN_FLIGHT_STATUSES` | `frozenset[str]` | What "in-flight" means for the throttle: `applied`, `recruiter_screen`, `interview`. `ghosted` is intentionally excluded so dead apps free the slot. |
 | `_SENIORITY_BUCKETS` | `list[(str, Pattern, int)]` | Ordered (bucket, regex, cap) — first match wins. Target is **Senior** (A/25); Staff, Lead, Architect and plain unprefixed engineer titles share B/20; Principal, VP, Junior are D/0. Used by `title_seniority_cap`. |
@@ -540,10 +546,34 @@ else `1.0` (`fail` is handled by exclusion, not penalty). Consumed by
 #### `apply_rank_score(job, company) -> int`
 Apply-time ranking value = `composite_score(job, company)` × the gov penalty
 factor. A thin wrapper over the canonical composite (not a parallel/partial
-composite) plus a documented policy factor. Used **only** at the two apply-time
-sort sites (`serve.render_cover_letters_body`, `run.generate_cover_letters`);
+composite) plus a documented policy factor. Consumed by `apply_queue_order`
+(below), which is what the two apply surfaces actually call;
 `composite_score` stays the displayed score everywhere else, and `metrics.py`
 is unaffected.
+
+#### `apply_queue_order(jobs, co_by_id) -> list[dict]`
+**SSOT for apply-surface ordering.** Reorders `jobs` — never filters, never
+truncates. Called by `serve.render_cover_letters_body` and
+`run.generate_cover_letters`; neither may sort by `apply_rank_score` itself, or
+the shaping would apply to one surface and not the other.
+
+With `APPLY_QUEUE_COUNTRY_QUOTAS` set, the top N of each country (ranked by
+`apply_rank_score`, at most `APPLY_QUEUE_MAX_PER_COMPANY` from any one company)
+are **bubbled to the head**; everything else follows beneath in pure rank order.
+Both halves stay rank-ordered because the ranked list is traversed in order.
+
+With quotas `None` the result is exactly
+`sorted(jobs, key=apply_rank_score, reverse=True)` — the pre-quota behavior,
+restored by config alone. Keep that path intact.
+
+Filtering is **not** its job: `company_block_reason` and
+`gov_screen_block_reason` are applied by the surfaces before the call.
+
+The bubbled block can be **shorter** than `sum(quotas.values())` — a country
+with few eligible roles, or too few distinct companies to satisfy
+`APPLY_QUEUE_MAX_PER_COMPANY`, simply contributes fewer. Nothing is dropped when
+that happens; the tail follows immediately in rank order, so the queue is always
+complete.
 
 #### `gov_screen_block_reason(job, company) -> str | None`
 Apply-time exclusion predicate parallel to `company_block_reason`: returns a
@@ -1066,7 +1096,7 @@ Main entry. Returns the number of jobs ingested.
   - `verbose` — print pre-filter decision (pass/fail + reason) for every listing.
   - `source` — restrict to one of `remoteok`/`remotive`/`greenhouse`/`lever`/`ashby`. Default is all.
   - `limit` — cap ingest count after pre-filter.
-- **Side effects:** appends to `crawl_log.jsonl`, may grow `target_boards.json` via `auto_add_board`, calls `ingest_job` for each passing candidate, and (non-dry-run only) runs `scan_foreign_locations.archive_foreign_pinned(apply=True)` then `scan_stale_jobs.archive_stale_jobs(apply=True)` as best-effort self-cleaning sweeps — the first a no-op unless the foreign denylist expanded or a stray foreign row slipped in; the second archives any un-applied row that has crossed `PIPELINE_EXPIRY_DAYS` since the last crawl.
+- **Side effects:** appends to `crawl_log.jsonl`, may grow `target_boards.json` via `auto_add_board`, calls `ingest_job` for each passing candidate, and (non-dry-run only) runs `scan_foreign_locations.archive_foreign_pinned(apply=True)`, then `scan_stale_jobs.archive_stale_jobs(apply=True)`, then `scan_duplicate_postings.archive_duplicate_postings(apply=True)`, then `scan_company_overflow.archive_company_overflow(apply=True)` as best-effort self-cleaning sweeps (dedup runs before the cap so the cap counts real roles, not copies) — the first a no-op unless the foreign denylist expanded or a stray foreign row slipped in; the second archives any un-applied row that has crossed `PIPELINE_EXPIRY_DAYS` since the last crawl.
 
 #### `main() -> None`
 CLI shim around `crawl()`. Flags: `--dry-run`, `--verbose`, `--source NAME`, `--limit N`.
@@ -2418,6 +2448,121 @@ auto-sweep.
 #### `main() -> int`
 Argparse `--apply` / `--include-applied`. Previews via
 `archive_foreign_pinned(apply=False, verbose=True)`, then archives on `--apply`.
+
+---
+
+## `scripts/scan_duplicate_postings.py`
+
+**Role.** Collapses the same role posted many times — employers routinely list
+one opening once per office — keeping the best copy and archiving the rest.
+Default is dry-run; `--apply` archives; `--include-ready` also sweeps
+`cover_letter_ready`. Runs automatically (apply mode) at the end of every real
+crawl, **before** `scan_company_overflow` so the inventory cap counts real roles
+rather than copies.
+
+`ingest.check_duplicate` matches on `apply_url`, and each city listing has its
+own URL, so it never catches these: Databricks' "Sr. Forward Deployed Engineer
+(FDE) - Communications" occupied 14 active rows. 188 of ~1,260 active rows (15%)
+were redundant this way.
+
+Mostly cosmetic until the apply queue gained country quotas — now it costs
+slots. With `APPLY_QUEUE_MAX_PER_COMPANY` at 2, two copies of one role can take
+both of a company's places in a country's allocation, and archiving a dead
+posting can bubble up *the same posting again*.
+
+**The dedup key includes derived country.** Two copies in one country are
+redundant; copies in different countries are different opportunities. Camunda
+posts one backend role in both County Galway (IE) and Denmark, NB (CA) —
+collapsing those would delete a whole country option from the quota.
+Country-aware keying removes 188 rows where a naive company+title key removes
+246.
+
+### Module-level constants
+
+| Name | Purpose |
+|---|---|
+| `ARCHIVE_REASON` | `"duplicate posting (kept best of {n})"` — formatted with the group size. |
+| `_NORM_RE` | Collapses runs of non-alphanumerics for title normalization. |
+| `_DEFAULT_STATUSES` | `{active}` — the statuses swept unless `--include-ready`. |
+
+### Functions
+
+#### `normalize_title(title) -> str`
+Lowercase, non-alphanumeric runs collapsed to one space, trimmed. Deliberately
+does **not** strip a banking rank: "… - AVP" and "… - Vice President" are
+different pay bands at one bank, so merging them would discard a distinct
+posting. (Contrast `config.strip_banking_rank`, which stops that suffix
+distorting the *seniority* read — a different question from identity.)
+
+#### `duplicate_key(job) -> tuple`
+`(company_id, normalize_title(title), derive_country(location))`.
+
+#### `find_duplicates(jobs, statuses, co_by_id) -> list[dict]`
+Every member of a duplicate group except its best. Ranked by `composite_score`,
+tie-broken by most recent `date_posted` then `job_id`, so repeated runs make the
+same choice.
+
+#### `archive_duplicate_postings(apply=True, include_ready=False, verbose=False) -> int`
+Archives the redundant copies in place; returns the count archived (or that
+*would* be, when `apply=False`). Writes a `.bak` backup + `job_archived` log
+entries only when there's something to archive. Applied rows are never touched.
+
+#### `main() -> int`
+Argparse `--apply` / `--include-ready`. Previews with per-company counts, then
+archives on `--apply`.
+
+---
+
+## `scripts/scan_company_overflow.py`
+
+**Role.** Caps how many **active rows** any one company holds in the pipeline,
+keeping its best by composite and archiving the overflow. Default is dry-run;
+`--apply` archives; `--cap N` overrides `MAX_ACTIVE_JOBS_PER_COMPANY`;
+`--include-ready` also sweeps `cover_letter_ready`. Also runs automatically
+(apply mode) at the end of every real crawl, **last** of the three sweeps, so it
+sees the rows that crawl just added.
+
+Exists because a widened gate can dump one company's whole board in at once —
+a single run added 228 Databricks rows, leaving that company holding 19% of
+every active row. Steady-state intake is a handful per company per crawl, so
+this is a **stock** problem, not a flow problem: bound the standing inventory
+rather than block intake.
+
+**Not a company throttle.** `config.company_block_reason` /
+`MAX_ACTIVE_APPS_PER_COMPANY` remain the only rule for whether a company can be
+*applied to*. This bounds stored inventory; that bounds in-flight applications.
+See the two-limits table in `CLAUDE.md`'s Company-filter SSOT.
+
+**Why no age rule.** "Older / lower fit" is one ordering, not two: velocity (10)
+and freshness (8) are already 18 of the composite's 130 points, so a stale
+posting sinks by itself. An explicit age rule would double-count time and could
+let a fresh weak posting evict an older strong one. Cycling falls out of
+re-running: as top rows are applied to or expire, slots free and the next
+crawl's arrivals take them.
+
+### Module-level constants
+
+| Name | Purpose |
+|---|---|
+| `ARCHIVE_REASON` | `"company inventory cap (kept top {cap} by composite)"` — formatted with the active cap, written to `archived_reason` + the log detail. |
+| `_DEFAULT_STATUSES` | `{active}` — the statuses swept unless `--include-ready`. |
+
+### Functions
+
+#### `find_overflow(jobs, statuses, cap, co_by_id) -> list[dict]`
+Groups in-scope rows by company, ranks each group by `composite_score`, and
+returns everything past `cap`. A company at or under the cap contributes
+nothing.
+
+#### `archive_company_overflow(apply=True, cap=None, include_ready=False, verbose=False) -> int`
+Archives the overflow in place; returns the count archived (or that *would* be,
+when `apply=False`). Writes a `.bak` backup + `job_archived` log entries **only
+when there's something to archive**, so a no-op call touches nothing. Shared by
+the CLI and the crawl's end-of-run auto-sweep.
+
+#### `main() -> int`
+Argparse `--apply` / `--cap` / `--include-ready`. Previews with per-company
+counts, then archives on `--apply`.
 
 ---
 

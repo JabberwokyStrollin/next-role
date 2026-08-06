@@ -627,6 +627,31 @@ def crawl(
         except Exception as e:
             print(f"  [warn] stale-pipeline sweep skipped: {e}")
 
+        # Self-cleaning sweep: collapse the same role posted once per office
+        # (same company + title + country), keeping the best copy. check_duplicate
+        # matches on apply_url and so never catches these. Runs BEFORE the
+        # overflow cap below, so that cap counts real roles rather than copies.
+        try:
+            from scan_duplicate_postings import archive_duplicate_postings  # noqa: WPS433
+            deduped = archive_duplicate_postings(apply=True)
+            if deduped:
+                print(f"  Duplicate-posting sweep: archived {deduped} redundant row(s).")
+        except Exception as e:
+            print(f"  [warn] duplicate-posting sweep skipped: {e}")
+
+        # Self-cleaning sweep: cap how many active rows any one company holds,
+        # keeping its best by composite. Runs LAST so it sees the rows this crawl
+        # just added and the sweeps above have already removed what they will. A
+        # single widened gate can otherwise leave one company holding a fifth of
+        # the pipeline. Best-effort, like the sweeps above.
+        try:
+            from scan_company_overflow import archive_company_overflow  # noqa: WPS433
+            capped = archive_company_overflow(apply=True)
+            if capped:
+                print(f"  Company-overflow sweep: archived {capped} row(s) over cap.")
+        except Exception as e:
+            print(f"  [warn] company-overflow sweep skipped: {e}")
+
     _log_crawl_run({
         "duration_s":        int(time.time() - started_at),
         "dry_run":           dry_run,

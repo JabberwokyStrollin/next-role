@@ -74,6 +74,7 @@ from config import (  # noqa: E402
     derive_country,
     find_duplicate_application,
     gov_screen_result,
+    apply_queue_order,
     apply_rank_score,
     gov_screen_block_reason,
     suggest_status_transition,
@@ -3659,9 +3660,11 @@ def render_cover_letters_body() -> str:
             suppressed += 1
             continue
         eligible.append(j)
-    # Rank by the gov-screen-adjusted score (flag roles take the penalty); the
-    # row still DISPLAYS the pure composite via job_score. SSOT: apply_rank_score.
-    eligible.sort(key=lambda j: apply_rank_score(j, co_by_id.get(j.get("company_id"))), reverse=True)
+    # Order via the apply-queue SSOT: ranked by the gov-screen-adjusted score
+    # (flag roles take the penalty), then country quotas bubble the day's target
+    # mix to the head. The row still DISPLAYS the pure composite via job_score.
+    # SSOT: config.apply_queue_order (do not sort by apply_rank_score here).
+    eligible = apply_queue_order(eligible, co_by_id)
 
     if not eligible:
         parts.append(

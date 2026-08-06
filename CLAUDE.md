@@ -293,6 +293,45 @@ design, because the location field is not where most employers put this.
    confirmed-remote only; add `"hybrid"` to accept a commute. The detection
    layers below it don't change.
 
+## Apply-queue ordering SSOT
+
+There is exactly **one** function that orders apply surfaces:
+`scripts/config.py:apply_queue_order(jobs, co_by_id)`. It **reorders and never
+filters** — removal stays with `company_block_reason` / `gov_screen_block_reason`,
+which the surfaces apply before calling it.
+
+| Concern | Canonical location |
+|---|---|
+| Apply-surface ordering | `scripts/config.py:apply_queue_order()` |
+| Per-country daily target mix | `scripts/config.py:APPLY_QUEUE_COUNTRY_QUOTAS` (`{"CA":4,"IE":4,"US":4}`) |
+| Company spread inside the bubbled block | `scripts/config.py:APPLY_QUEUE_MAX_PER_COMPANY` (2) |
+| Daily goal | `scripts/config.py:DAILY_APPLICATION_GOAL` — **derived** from the quotas |
+
+### Rules
+
+1. **Surfaces must call `apply_queue_order`, never sort by `apply_rank_score`
+   themselves.** `serve.render_cover_letters_body` and
+   `run.generate_cover_letters` both go through it; a local sort would shape one
+   surface and not the other.
+
+2. **Quotas bubble, they don't filter.** The top N per country are moved to the
+   head; everything else follows *beneath, in pure rank order*. Nothing is hidden
+   or truncated, so the full ranking is always still reachable by scrolling.
+
+3. **`APPLY_QUEUE_COUNTRY_QUOTAS = None` restores pure ranking**, byte-identical
+   to the pre-quota behavior, with no code change. Keep that path working — it's
+   the whole reason the shaping is a wrapper rather than a rewrite of
+   `apply_rank_score`.
+
+4. **The per-company cap is what actually diversifies.** Quotas alone don't:
+   one company with deep inventory can fill an entire country's allocation on
+   composite alone. `APPLY_QUEUE_MAX_PER_COMPANY` applies **only** within the
+   bubbled block, never to the tail.
+
+5. **Don't hardcode the daily goal.** `DAILY_APPLICATION_GOAL` is computed from
+   the quotas so the target and the queue shape can't drift; it falls back to
+   `DAILY_APPLICATION_GOAL_DEFAULT` under pure ranking.
+
 ## Company-filter SSOT — single source of truth
 
 There is exactly **one** rule for "should this company be hidden from apply
@@ -304,14 +343,36 @@ the constants `MAX_ACTIVE_APPS_PER_COMPANY` and `IN_FLIGHT_STATUSES`.
 | "Hide this company right now?" predicate | `scripts/config.py:company_block_reason()` | `from config import company_block_reason` |
 | Concurrent-application limit per company | `scripts/config.py:MAX_ACTIVE_APPS_PER_COMPANY` | same import |
 | What "in-flight" means | `scripts/config.py:IN_FLIGHT_STATUSES` (frozenset) | same import |
+| **Stored-inventory** ceiling per company | `scripts/config.py:MAX_ACTIVE_JOBS_PER_COMPANY` (enforced by `scan_company_overflow.py`) | a different axis — see rule 1 |
+
+**Two per-company limits exist and they are not the same thing.** Confusing
+them is the easy mistake:
+
+| | `MAX_ACTIVE_APPS_PER_COMPANY` (3) | `MAX_ACTIVE_JOBS_PER_COMPANY` (20) |
+|---|---|---|
+| Counts | in-flight **applications** | stored **active rows** |
+| Enforced at | apply time, `company_block_reason` | post-ingest sweep, `scan_company_overflow` |
+| Effect | hides a company from apply surfaces | archives its lowest-composite overflow |
+| Reversible | frees when a status flips | archived rows, restorable |
 
 ### Rules
 
 1. **Never reimplement the company-throttle rule.** No "if 3 apps at this
-   company then skip" loop anywhere else. A per-company cap encoded at
-   ingest time (or as a date-based cooldown) blocks good roles from
-   entering the pipeline; only `company_block_reason` at apply time is
-   correct.
+   company then skip" loop anywhere else. A **blind** per-company cap at ingest
+   (first-N-seen, or a date-based cooldown) blocks good roles from entering the
+   pipeline; only `company_block_reason` at apply time is correct for the
+   *application* throttle.
+
+   **Amendment — the inventory cap is a different axis and is allowed.**
+   `scan_company_overflow.py` bounds how many active rows a company *stores*, and
+   it is legitimate precisely because it is **not blind**: it ranks by the full
+   `composite_score` and archives only the tail, so the best roles always
+   survive. It also runs *after* ingest, so nothing is ever prevented from being
+   seen and scored. The original rule's rationale — "blocks good roles from
+   entering" — doesn't apply to a rank-ordered, post-ingest, reversible sweep.
+
+   What remains forbidden: capping at **intake** on a count or a date, which
+   would decide before any signal exists.
 
 2. **Company filtering is intentionally apply-time, not ingest-time.** The
    crawl + ingest layer is permissive (only `ethics_hard_exclude` blocks at

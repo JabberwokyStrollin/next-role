@@ -428,6 +428,8 @@ scripts/
   scan_no_sponsorship.py — retroactive no-sponsorship sweep
   scan_foreign_locations.py — retroactive foreign-pinned-location sweep
   resync_tracker_country.py — re-derive stored country on logged applications
+  scan_duplicate_postings.py — collapse the same role posted once per office
+  scan_company_overflow.py — cap active rows per company (keeps top N by composite)
   scan_stale_jobs.py    — expire jobs sitting un-applied past PIPELINE_EXPIRY_DAYS
   cleanup_staged_jd.py  — clear similar-jobs noise from staged rows
   backfill_target_boards.py — seed target_boards.json from existing jobs

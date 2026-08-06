@@ -418,12 +418,38 @@ REJECTION_REASONS: dict[str, str] = {
     "ghosted_timeout":  "Auto-rejected (ghosted)",
 }
 
+# ─── Apply-queue shaping (ordering only — never filtering) ───────────────────
+#
+# Target mix is a fixed number of applications per country per day. Setting
+# quotas "bubbles up" the top N of each country to the head of the apply queue;
+# everything else follows underneath in pure rank order. Nothing is hidden or
+# removed — this reorders, it never filters. Filtering stays with
+# company_block_reason / gov_screen_block_reason.
+#
+# Set to None to get pure `apply_rank_score` ordering back — byte-identical to
+# the behavior before quotas existed, no code change needed.
+APPLY_QUEUE_COUNTRY_QUOTAS: dict[str, int] | None = {"CA": 4, "IE": 4, "US": 4}
+
+# Within the bubbled-up block only, how many roles one company may hold. Without
+# this a single company with deep inventory takes an entire country's quota —
+# Databricks alone held 19% of the active pipeline and would have filled all
+# four CA slots on composite alone, which is the opposite of giving smaller
+# companies a look. Ignored entirely when quotas are None.
+APPLY_QUEUE_MAX_PER_COMPANY: int = 2
+
 # Daily application goal. The /today "Cover letters & apply" section auto-earns
 # its green checkmark once this many applications have been logged *today*
 # (counted by application_tracker.date_applied == today()). The count resets
-# every day because it is derived, never stored. Tune here — serve.py reads the
-# constant, never hardcodes the number.
-DAILY_APPLICATION_GOAL = 10
+# every day because it is derived, never stored. serve.py reads the constant,
+# never hardcodes the number.
+#
+# Derived from the quotas when they're set, so the goal and the queue shape
+# can't drift apart; falls back to a flat number under pure ranking.
+DAILY_APPLICATION_GOAL_DEFAULT = 10
+DAILY_APPLICATION_GOAL = (
+    sum(APPLY_QUEUE_COUNTRY_QUOTAS.values())
+    if APPLY_QUEUE_COUNTRY_QUOTAS else DAILY_APPLICATION_GOAL_DEFAULT
+)
 
 # Daily code-drill goal. The /today "Code drills" section auto-earns its green
 # checkmark once this many drills are marked complete *today* (counted by
@@ -1365,6 +1391,46 @@ def apply_rank_score(job: dict, company: dict | None) -> int:
     return int(composite_score(job, company) * gov_screen_penalty_factor(job, company))
 
 
+def apply_queue_order(jobs: list[dict], co_by_id: dict) -> list[dict]:
+    """**SSOT for apply-surface ordering.** Returns ``jobs`` reordered — never
+    filtered, never truncated. Consumed by ``serve.render_cover_letters_body``
+    and ``run.generate_cover_letters``; those two must not sort by
+    ``apply_rank_score`` themselves, or the shaping applies to one surface only.
+
+    With ``APPLY_QUEUE_COUNTRY_QUOTAS`` set, the top N of each country (by
+    ``apply_rank_score``, and at most ``APPLY_QUEUE_MAX_PER_COMPANY`` from any
+    one company) are bubbled to the head of the queue; everything else follows
+    beneath in pure rank order. The pure ranking is therefore still intact
+    underneath — this changes what you see *first*, not what you can see.
+
+    With quotas ``None`` the result is exactly ``sorted(jobs, key=apply_rank_score,
+    reverse=True)`` — the pre-quota behavior, restored by config alone."""
+    ranked = sorted(
+        jobs,
+        key=lambda j: apply_rank_score(j, co_by_id.get(j.get("company_id"))),
+        reverse=True,
+    )
+    if not APPLY_QUEUE_COUNTRY_QUOTAS:
+        return ranked
+
+    remaining = dict(APPLY_QUEUE_COUNTRY_QUOTAS)
+    per_company: dict = {}
+    bubbled: list[dict] = []
+    rest: list[dict] = []
+    for job in ranked:
+        country = derive_country(job.get("location") or "")
+        cid     = job.get("company_id")
+        taken   = per_company.get(cid, 0)
+        if remaining.get(country, 0) > 0 and taken < APPLY_QUEUE_MAX_PER_COMPANY:
+            remaining[country] -= 1
+            per_company[cid] = taken + 1
+            bubbled.append(job)
+        else:
+            rest.append(job)
+    # Both halves stay in rank order because `ranked` is traversed in order.
+    return bubbled + rest
+
+
 def gov_screen_block_reason(job: dict, company: dict | None) -> str | None:
     """Return a short reason if a role must be hidden from apply surfaces due
     to the gov-screen (result == `fail`, i.e. tier_a / defense entanglement),
@@ -1460,6 +1526,15 @@ def composite_score_pre_research(job: dict) -> int:
 # (Separate from ``ethics_hard_exclude`` at ingest time, which is an absolute
 # "never work here" kill switch.)
 # ──────────────────────────────────────────────────────────────────────────-
+
+# Pipeline inventory ceiling per company. Distinct from the apply-time throttle
+# below: this bounds how many ACTIVE ROWS one company may hold, not how many
+# in-flight APPLICATIONS. Enforced by scan_company_overflow.py, which keeps the
+# top N by composite and archives the rest — so it prunes "older / lower fit"
+# together, since velocity + freshness are already 18 of the composite's 130
+# points. Archived, never deleted, and re-evaluated every crawl: as a company's
+# strong roles expire, its slots refill.
+MAX_ACTIVE_JOBS_PER_COMPANY: int = 20
 
 MAX_ACTIVE_APPS_PER_COMPANY: int = 3
 

@@ -119,7 +119,7 @@ status transitions, and the `/today` apply queue all read from this file.
 | `notes` | string | ✅ | Always `""` at ingest. Surfaces don't write to it yet. |
 | `scored_at` | ISO datetime | optional | Set by `score_jd.update_job_record` and `rescore_all.py`. Absent on rows ingested before that field was added. |
 | `archived_at` | ISO datetime | optional | Set by `scan_no_sponsorship.py`, `scan_foreign_locations.py`, `scan_stale_jobs.py`, and `/today/cl/archive`. |
-| `archived_reason` | string | optional | Set alongside `archived_at`. E.g. `"JD says no sponsorship"`, `"foreign-pinned remote (not an eligible geography)"`, `"stale_pipeline"` (un-applied past `PIPELINE_EXPIRY_DAYS` since `date_found`). |
+| `archived_reason` | string | optional | Set alongside `archived_at`. E.g. `"JD says no sponsorship"`, `"foreign-pinned remote (not an eligible geography)"`, `"stale_pipeline"` (un-applied past `PIPELINE_EXPIRY_DAYS` since `date_found`), `"duplicate posting (kept best of N)"` (same company + title + country posted once per office, `scan_duplicate_postings.py`), `"company inventory cap (kept top N by composite)"` (per-company overflow, `scan_company_overflow.py` — the company held more than `MAX_ACTIVE_JOBS_PER_COMPANY` active rows and this one ranked below the cutoff). |
 
 ### Cross-references
 
