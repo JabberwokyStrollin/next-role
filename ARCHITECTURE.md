@@ -1674,6 +1674,7 @@ instead.
 | `DEFAULT_SENDERS` | `["jobalerts-noreply@linkedin.com"]` — written to `email_config.json` if it doesn't exist. |
 | `MIN_JD_LENGTH` | 200 — mirrors `serve.py` so a JD fetch that yields less is treated as failure. |
 | `JD_FETCH_HEADERS` | Chrome user-agent for outbound JD fetches. |
+| `IMAP_TIMEOUT_SECONDS` | `60` — **canonical socket timeout for every IMAP connection in the project.** Defined here next to `get_creds` and imported by `inbox_scan.py` alongside it, so the two mailbox tools can't diverge. Bounds a **single** blocking socket operation, not a whole run, so it stays well under `serve.py`'s per-action subprocess caps. Without it a stalled connect or a mid-run server hang blocks forever and only the subprocess kill ends the run — reporting a bare "timed out" that can't distinguish a slow mailbox from a dead network. |
 
 ### Functions
 
@@ -1695,8 +1696,8 @@ instead.
 
 #### IMAP fetch
 - `get_creds() -> tuple[str, str, str]` — read all three env vars or exit 2 with a helpful message.
-- `fetch_via_imap(dry_run: bool = False) -> int` — main flow. Returns the number of new staged jobs.
-- `reset_seen_state() -> tuple[int, int, int]` — clear local dedup state, clear staged-jobs list, remove `\Seen` on the server for every previously-tracked Message-ID. Returns `(n_local_cleared, n_staged_cleared, n_server_unflagged)`. Preserves `\Seen` on LinkedIn messages the user read outside the fetch flow.
+- `fetch_via_imap(dry_run: bool = False) -> int` — main flow. Returns the number of new staged jobs. Connects with `timeout=IMAP_TIMEOUT_SECONDS`; an unreachable or stalled server is **fatal** here (prints `ERROR: could not connect to <host>`, exits 2) because there's nothing partial worth reporting.
+- `reset_seen_state() -> tuple[int, int, int]` — clear local dedup state, clear staged-jobs list, remove `\Seen` on the server for every previously-tracked Message-ID. Returns `(n_local_cleared, n_staged_cleared, n_server_unflagged)`. Preserves `\Seen` on LinkedIn messages the user read outside the fetch flow. A failed connect is **not** fatal here (unlike `fetch_via_imap`): the local files are already cleared, so it returns the local counts with `n_server_unflagged=0` — same shape as a login failure.
 - `rehydrate_staged() -> tuple[int, int]` — re-run `_normalize_linkedin_url` over existing staged rows after a parser upgrade. Returns `(n_normalized, n_total)`.
 - `fetch_from_sample(path: Path, dry_run: bool = False) -> int` — parse a local `.eml` file as if it had been fetched. For testing without an IMAP server.
 
@@ -1705,6 +1706,11 @@ Argparse: `--dry-run`, `--sample EML_PATH`, `--reset`, `--rehydrate`.
 Prints machine-readable last lines for `serve.py` to parse:
 `FETCHED: N`, `RESET: local=N staged=N server=N`, `REHYDRATE:
 normalized=N total=N`, or `ERROR: <message>`.
+
+Both IMAP paths (`--reset` and the default fetch) run through a local
+`_imap_guard` helper that catches a socket stall or dropped connection
+*mid-run* (`TimeoutError` / `OSError` / `imaplib.IMAP4.abort`) and reports it on
+the `ERROR:` line rather than dying with a traceback `serve.py` can't parse.
 
 ---
 
@@ -1725,15 +1731,37 @@ status here (the operator applies each match from the UI).
 
 **Read-flag safety.** Unlike `linkedin_fetch.py`, this scanner **never marks
 messages `\Seen`** — every fetch uses `BODY.PEEK` and it issues no `STORE`. It
-keeps its own processed-Message-ID list in `data/inbox_scan_state.json`, so the
-scan is independent of the server-side read flag: reading mail in your own
-client neither hides matches from the scanner nor is changed by it.
+keeps its own processed-Message-ID list in `data/inbox_scan_state.json` (every
+message whose body it examined — see the round-trip budget below), so the scan
+is independent of the server-side read flag: reading mail in your own client
+neither hides matches from the scanner nor is changed by it.
+
+**IMAP round-trip budget.** The scan is network-bound, and `serve.py` gives the
+subprocess 300s. Two properties keep it inside that:
+
+1. **Headers are fetched in batches of `HEADER_BATCH_SIZE`**, not one message at
+   a time. Every message in the window needs a header fetch (the Message-ID
+   dedup key isn't knowable before it), and on Gmail a round trip is ~0.4s — so
+   per-message fetching cost ~170s for a routine 400-message window and, with
+   the body fetches on top, overran the 300s timeout. Batched, the header phase
+   is ~4s.
+2. **A message is recorded as processed once its body has been examined**,
+   whatever the classification. Company names appear in job-alert subjects, so
+   ~40% of a window clears the header-level company match and gets a full body
+   download (~0.35s each, transfer-bound — batching does not help). Recording
+   only *matches* would re-download all of them on every scan; recording every
+   examined message makes a re-scan ~3s. Message content is immutable, so a
+   no-signal message cannot become a match later; `--reset` re-examines
+   everything if the classifier changes.
 
 ### Module-level constants
 
 | Name | Purpose |
 |---|---|
 | `INBOX_MATCHES`, `INBOX_STATE` | `data/inbox_matches.json` (staged matches) and `data/inbox_scan_state.json` (own dedup state). |
+| `HEADER_BATCH_SIZE` | `100` — messages per batched header `FETCH`. See the round-trip budget above. |
+| `IMAP_TIMEOUT_SECONDS` | **Imported from `linkedin_fetch.py`** (not defined here), alongside `get_creds`, so both mailbox tools share one timeout — see that module's table for the rationale. `60`s bounds a single blocking socket operation, well under `serve.py`'s 300s scan cap. |
+| `_FETCH_SEQ_RE` | Matches the leading sequence number of an untagged `FETCH` response line, to pair each returned literal with its message. |
 | `TERMINAL_STATUSES` | `frozenset({"rejected", "offer", "withdrawn"})` — applications a reply can no longer change; excluded from matching. Every other status (incl. `ghosted`) is "open". |
 | `_GENERIC_CO_TOKENS` | Company-name tokens too generic to match on (`inc`, `llc`, `technologies`, …); dropped from the match phrase. |
 
@@ -1751,7 +1779,8 @@ client neither hides matches from the scanner nor is changed by it.
 - `_message_key(mid, from_header, subject, received) -> str` — stable dedup key (Message-ID, else a content digest).
 - `build_match(...) -> dict` — assemble one staged-match record (see DATA.md `inbox_matches.json`).
 - `_since_date(window_days) -> str` — IMAP `SINCE` token (DD-Mon-YYYY).
-- `scan_via_imap(window_days, dry_run=False) -> int` — main flow: `SINCE` search, header-peek + cheap company match, then body-peek + classify, stage new matches. Returns count staged.
+- `_fetch_header_batch(M, seq_nums) -> dict[bytes, bytes]` — one `BODY.PEEK[HEADER.FIELDS (...)]` `FETCH` for up to `HEADER_BATCH_SIZE` messages; returns `{sequence_number: raw_header_bytes}`. Messages the server omits are absent and get skipped by the caller.
+- `scan_via_imap(window_days, dry_run=False) -> int` — main flow: `SINCE` search, batched header-peek + cheap company match, then per-message body-peek + classify, stage new matches. Every message whose body is examined joins the processed-ID set (not just matches), and that set is saved whenever `dry_run` is false — even with zero matches. Returns count staged.
 - `scan_from_sample(path, dry_run=False) -> int` — classify a local `.eml` against open applications. For testing without IMAP.
 - `reset_state() -> tuple[int, int]` — clear staged matches + processed-id state.
 
@@ -1760,6 +1789,12 @@ Argparse: `--dry-run`, `--window-days N` (default `INBOX_SCAN_WINDOW_DAYS`),
 `--sample EML_PATH`, `--reset`. Prints a machine-readable last line for
 `serve.py` to parse: `SCANNED: N`, `RESET: matches=N processed=N`, or
 `ERROR: <message>`.
+
+Wraps `scan_via_imap` in a `(TimeoutError, OSError, imaplib.IMAP4.abort)`
+handler so a socket stall partway through the scan (or the server dropping the
+connection) exits `2` with an `ERROR:` line rather than a traceback. That run's
+progress is dropped — matches and processed ids are written only once the scan
+completes — so the next scan redoes it.
 
 ---
 

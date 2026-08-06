@@ -246,8 +246,22 @@ The sender allowlist applies to **LinkedIn ingest only** — the mailbox scan
 (`inbox_scan.py`) ignores it and instead matches every recent inbox message
 against your open applications by company name / sender domain. The scan tracks
 its own processed-Message-ID list in `data/inbox_scan_state.json` (never the
-server `\Seen` flag); `python scripts/inbox_scan.py --reset` clears it along
-with the staged matches.
+server `\Seen` flag) — every message whose body it read, matched or not, so a
+re-scan skips work it has already done; `python scripts/inbox_scan.py --reset`
+clears it along with the staged matches.
+
+**Expect the first scan of a busy mailbox to take a while.** It reads the
+headers of every INBOX message in the look-back window, then downloads the body
+of each one whose sender/subject names a company you have an open application
+with. On a ~400-message 14-day window that's roughly 90s; subsequent scans are
+a few seconds, because the processed-ID list means only genuinely new mail is
+downloaded. `serve.py` allows the scan 300s before reporting a timeout.
+
+If the mail server stalls or is unreachable, the scan gives up on a single
+socket operation after `linkedin_fetch.IMAP_TIMEOUT_SECONDS` (60) and reports
+`ERROR: could not connect to <host>` — so a network problem reads as a network
+problem rather than as a 300s timeout. The same timeout covers the LinkedIn
+email fetch (`scripts/linkedin_fetch.py`), which shares the constant.
 
 ---
 
