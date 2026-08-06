@@ -74,7 +74,9 @@ def pre_filter_relaxed(title: str, location: str, jd_text: str, cfg: dict) -> tu
     so rows without a JD body don't all get rejected for missing stack keywords
     that should appear in the JD, not the title.
     """
-    t = title.lower()
+    # Banking rank suffix stripped first — same reason as crawl.pre_filter.
+    from config import strip_banking_rank  # defer (heavy import)
+    t = strip_banking_rank(title).lower()
     l = location.lower()
 
     if not any(kw in t for kw in cfg["seniority_titles"]):

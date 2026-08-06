@@ -571,13 +571,67 @@ from geography import (  # noqa: E402
 # "Senior" or "Principal" alone, since substring matches are first-wins.
 import re as _re
 
+# ─── Banking rank suffixes ───────────────────────────────────────────────────
+#
+# Banks append an internal corporate rank to an ordinary engineering title:
+# "Sr Software Developer - Assistant Vice President", "Full Stack Java Developer
+# – Assistant Vice President". The rank describes pay band and signing authority,
+# NOT the job — it's a Senior engineering role.
+#
+# Untreated this fails twice over: "vice president" is in the YAML title_exclude
+# (so the pre-filter rejects the row outright) and matched bucket D (so any row
+# that got in anyway had its seniority zeroed). The operator was hand-ingesting
+# these to work around it.
+#
+# The rank is only ever a SUFFIX, after a separator. A real executive role puts
+# it at the head ("Vice President, Data Engineering"), which must still be
+# excluded — so anchoring to a preceding separator is what distinguishes them.
+_BANKING_RANK_RE: _re.Pattern = _re.compile(
+    r"\s*[-–—,|(/]\s*"                                   # separator before the rank
+    r"(?:assistant\s+|associate\s+|senior\s+|sr\.?\s+|executive\s+|group\s+)?"
+    r"vice\s+president\b"
+    r"|\s*[-–—,|(/]\s*(?:avp|svp|evp)\b",                # abbreviated forms
+    _re.I,
+)
+
+
+def strip_banking_rank(title: str) -> str:
+    """Remove a trailing banking corporate rank from a job title.
+
+    ``"Sr Software Developer - Assistant Vice President"`` → ``"Sr Software
+    Developer"``. Leaves an executive title alone, because there the rank is the
+    head noun rather than a suffix: ``"Vice President, Data Engineering"`` is
+    returned unchanged and still hits the VP exclusion.
+
+    SSOT for this normalization. Applied by ``title_seniority_cap`` and by both
+    pre-filters (before the exclude + seniority checks) so one rule covers
+    ranking and intake."""
+    t = (title or "").strip()
+    if not t:
+        return t
+    stripped = _BANKING_RANK_RE.sub("", t).strip()
+    # Refuse to strip the title down to nothing (a bare "Vice President" row):
+    # returning "" would make it look like an unclassifiable title instead of
+    # the executive role it is.
+    return stripped.rstrip(" -–—,|(/") if stripped else t
+
+# Target is **Senior**. Staff sits one step above and plain (unprefixed)
+# engineering titles one step below; both are real but slightly weaker fits, so
+# they share a single adjacent bucket rather than getting their own tiers.
+#
+# Senior became the target after a Staff-level interview ended on insufficient
+# team-leadership experience — the gap at Staff is scope, not stack. Principal
+# is now out of range entirely (also removed from the YAML seniority allowlist
+# and added to title_exclude, so these no longer ingest); the D entry here is
+# defense-in-depth for a manual paste, which bypasses both pre-filters.
 _SENIORITY_BUCKETS: list[tuple[str, _re.Pattern, int]] = [
-    # Bucket D — score 0 (two steps away from Staff). Listed first so they
-    # beat the broader Senior/Principal patterns that follow.
+    # Bucket D — out of range (cap 0). Listed first so they beat the broader
+    # Senior / Staff patterns below ("Senior Principal" must not read as Senior).
     ("D", _re.compile(r"\bdistinguished\b",                _re.I), 0),
     ("D", _re.compile(r"\bfellow\b",                       _re.I), 0),
-    ("D", _re.compile(r"\bsenior\s+principal\b",           _re.I), 0),
-    ("D", _re.compile(r"\bsr\.?\s+principal\b",            _re.I), 0),
+    ("D", _re.compile(r"\bprincipal\b",                    _re.I), 0),
+    # A bank rank suffix is stripped before matching, so a surviving VP/SVP here
+    # is a genuine executive title.
     ("D", _re.compile(r"\bvp\b",                           _re.I), 0),
     ("D", _re.compile(r"\bvice\s+president\b",             _re.I), 0),
     ("D", _re.compile(r"\bjunior\b",                       _re.I), 0),
@@ -586,35 +640,48 @@ _SENIORITY_BUCKETS: list[tuple[str, _re.Pattern, int]] = [
     ("D", _re.compile(r"\bentry[-\s]level\b",              _re.I), 0),
     ("D", _re.compile(r"\bassociate\s+(software\s+)?engineer\b", _re.I), 0),
 
-    # Bucket A — at target (no cap). Senior Staff stays here despite the word
-    # "Senior" because it's senior to Staff, not below it.
-    ("A", _re.compile(r"\bsenior\s+staff\b",               _re.I), 25),
-    ("A", _re.compile(r"\bstaff\b",                        _re.I), 25),
-    ("A", _re.compile(r"\bsr\.?\s+staff\b",                _re.I), 25),
-    ("A", _re.compile(r"\blead\s+(engineer|developer)\b",  _re.I), 25),
-    ("A", _re.compile(r"\btech\s+lead\b",                  _re.I), 25),
-    ("A", _re.compile(r"\barchitecte?\b",                  _re.I), 25),
+    # "Senior Staff" is senior TO Staff, not a Senior role — it must be matched
+    # before bucket A's bare \bsenior\b, which would otherwise read it as target.
+    ("B", _re.compile(r"\bsenior\s+staff\b",               _re.I), 20),
+    ("B", _re.compile(r"\bsr\.?\s+staff\b",                _re.I), 20),
 
-    # Bucket B — one step below target (cap 15).
-    ("B", _re.compile(r"\bsenior\b",                       _re.I), 15),
-    ("B", _re.compile(r"\bsr\.?\s",                        _re.I), 15),
+    # Bucket A — at target (no cap): Senior.
+    ("A", _re.compile(r"\bsenior\b",                       _re.I), 25),
+    ("A", _re.compile(r"\bsr\.?[\s.]",                     _re.I), 25),
 
-    # Bucket C — one step above target (cap 15).
-    ("C", _re.compile(r"\bprincipal\b",                    _re.I), 15),
+    # Bucket B — one step off in either direction (cap 20). Above: Staff, Lead,
+    # Tech Lead, Architect.
+    ("B", _re.compile(r"\bstaff\b",                        _re.I), 20),
+    ("B", _re.compile(r"\blead\s+(engineer|developer)\b",  _re.I), 20),
+    ("B", _re.compile(r"\btech\s+lead\b",                  _re.I), 20),
+    ("B", _re.compile(r"\barchitecte?\b",                  _re.I), 20),
+    # Below: plain, unprefixed engineering titles ("Software Engineer",
+    # "Software Engineer III", "Backend Engineer, Data"). Reached only when no
+    # Senior/Staff/Principal word matched above, so these really are unprefixed.
+    ("B", _re.compile(r"\b(software|backend|back[-\s]end|data|platform|systems?)"
+                      r"\s+(engineer|developer)\b",        _re.I), 20),
+    ("B", _re.compile(r"\bengineer\s+(?:i{1,3}|[123])\b",  _re.I), 20),
 ]
 
 
 def title_seniority_cap(title: str) -> tuple[str, int]:
     """
     Classify a job title and return (bucket_letter, max_seniority_score).
-    Defaults to ('A', 25) if no bucket matches — better to under-cap than
-    silently zero an unfamiliar title.
+
+    A banking rank suffix is stripped first (``strip_banking_rank``), so
+    "Sr Software Developer - Assistant Vice President" is classified on
+    "Sr Software Developer" and lands at target instead of being zeroed as a VP.
+
+    Defaults to ('B', 20) when nothing matches. An unrecognized title is far
+    more likely to be an unprefixed engineering role than a Senior one, and the
+    old ('A', 25) default silently granted target credit to anything the
+    patterns missed.
     """
-    t = (title or "").strip()
+    t = strip_banking_rank(title)
     for bucket, pat, cap in _SENIORITY_BUCKETS:
         if pat.search(t):
             return bucket, cap
-    return "A", 25
+    return "B", 20
 
 
 def apply_title_cap(raw_seniority: int, title: str) -> int:
