@@ -559,6 +559,7 @@ from geography import (  # noqa: E402
     derive_country,
     is_remote_role,
     names_foreign_location,
+    names_office_requirement,
     location_passes,
 )
 
@@ -1157,6 +1158,77 @@ def classify_role_exposure(title: str, claude_exposure: str | None = None) -> st
     if claude_exposure in ROLE_EXPOSURES:
         return claude_exposure
     return "insulated"
+
+
+# ─── Work model (remote / hybrid / onsite) — SSOT ────────────────────────────
+#
+# Same division of labor as the gov screen: Claude describes (score_jd returns a
+# `work_model` read of the JD body), Python judges (the two functions below own
+# which models are acceptable). Never move the accept/reject decision into the
+# rubric — it's policy, not judgment.
+#
+# Why this exists at all: the US branch of `location_passes` is a cheap
+# string-only pre-screen that rejects roles whose JD names an office
+# requirement. It is deliberately high-recall and low-precision, so roles the
+# JD never describes still reach ingest. This is the accurate second pass, and
+# it costs nothing extra — `work_model` rides along on the scoring call that
+# ingest already makes.
+WORK_MODELS: tuple[str, ...] = ("remote", "hybrid", "onsite", "unstated")
+
+# The tunable knob. Which work models are acceptable for a US-derived role —
+# the operator is a US citizen, so US roles need no sponsorship, but they are a
+# remote-only stop-gap, so a CONFIRMED office requirement is rejected.
+#
+# 'unstated' is accepted by default, and that is the whole point of this
+# mechanism. Measured across 14 real boards, ~43% of the US roles the old
+# allowlist dropped say nothing at all about work model, and a sampled quarter
+# of those turned out to be remote-eligible. Rejecting 'unstated' would discard
+# them again and reduce this to the allowlist it replaced — just with a Claude
+# call spent first. The operator triages the ambiguous ones from `job_type`.
+#
+# Narrow to {"remote"} to admit only confirmed-remote US roles; widen to include
+# "hybrid" to accept a commute. CA / IE roles are NEVER gated on work model (the
+# operator would relocate for those), so this applies to the US branch only.
+US_ACCEPTED_WORK_MODELS: frozenset[str] = frozenset({"remote", "unstated"})
+
+
+def classify_work_model(location: str,
+                        source: str | None = None,
+                        claude_work_model: str | None = None) -> str:
+    """Resolve a role's work model to a value in ``WORK_MODELS``.
+
+    A remote marker in the location string wins outright — ``is_remote_role`` is
+    the existing SSOT for that signal and it's stated by the employer in a
+    structured field, so it beats a JD-body reading. Otherwise fall back to
+    Claude's judgment, defaulting to 'unstated' when absent or invalid.
+
+    'unstated' is deliberately its OWN value rather than being folded into
+    'onsite': the two are treated differently by ``work_model_discard_reason``,
+    and collapsing them would silently re-create the allowlist behavior this
+    replaced (939 US roles dropped, only ~43% of them actually office-bound)."""
+    if is_remote_role(location, source):
+        return "remote"
+    if claude_work_model in WORK_MODELS:
+        return claude_work_model
+    return "unstated"
+
+
+def work_model_discard_reason(location: str, work_model: str) -> str | None:
+    """Return a short reason if a role must be discarded at ingest for its work
+    model, else None. US-only: a US role whose resolved work model isn't in
+    ``US_ACCEPTED_WORK_MODELS`` can't be taken. CA / IE / OTHER always return
+    None — those are relocation targets, so an office requirement is fine.
+
+    Parallel to ``detect_no_sponsorship``: an ingest-time hard discard, not an
+    apply-time throttle. Unlike that one it necessarily runs AFTER the Claude
+    call, because the work model is one of that call's outputs — the cheap
+    string pre-screen in ``location_passes`` is what keeps the wasted spend
+    down."""
+    if derive_country(location) != "US" or "US" not in TARGET_COUNTRIES:
+        return None
+    if work_model in US_ACCEPTED_WORK_MODELS:
+        return None
+    return f"US role is {work_model}; accepted: {'/'.join(sorted(US_ACCEPTED_WORK_MODELS))}"
 
 
 def reconcile_gov_defense_flag(company: dict | None) -> str:

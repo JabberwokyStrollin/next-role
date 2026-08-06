@@ -342,14 +342,33 @@ maintained profile.)
 
 What US being enabled turns on (all keyed off `config.derive_country(location)`):
 
-- **Remote-only intake.** Only remote US roles ingest; onsite/hybrid US is
-  discarded by `config.location_passes` (applied in both pre-filters and at
-  ingest). The remote check (`config.is_remote_role`) is **source-aware**: a
-  region-only US location ("USA", "United States") counts as remote when it
-  came from a remote-only board (RemoteOK / Remotive), but an ATS-board US role
-  needs an explicit remote marker. With US off, US roles are excluded entirely.
-  (Note: most crawl volume is the niche stack at Staff level, so geography is
-  rarely the binding filter — `title_seniority` and `stack` drop the bulk.)
+- **Non-office intake, in two stages.** US roles ingest unless they're
+  office-bound. With US off, US roles are excluded entirely.
+
+  1. **Cheap string pre-screen** (`config.location_passes`, in both pre-filters
+     and at ingest). A remote marker in the *location* passes immediately —
+     this check (`config.is_remote_role`) is **source-aware**, so a region-only
+     "USA" counts as remote from a remote-only board (RemoteOK / Remotive) but
+     not from an ATS board. Otherwise the **JD body** decides: the role is kept
+     unless `geography.names_office_requirement` finds an explicit requirement
+     ("three days a week in the office", "hybrid working model", "based in our
+     Seattle office"). This is tuned for recall — it rejects the obvious cases
+     for free and lets ambiguous ones through.
+  2. **Accurate pass at ingest.** Claude returns a `work_model`
+     (`remote`/`hybrid`/`onsite`/`unstated`) on the JD-scoring call it already
+     makes, and `config.work_model_discard_reason` drops US roles whose model
+     isn't in `US_ACCEPTED_WORK_MODELS` (default `{"remote", "unstated"}` — a
+     *confirmed* office requirement is rejected; a JD that simply doesn't say is
+     kept for you to triage). Narrow it to `{"remote"}` for confirmed-remote
+     only, or add `"hybrid"` if you'd accept a commute. The resolved value is
+     stored as the job's `job_type`, so you can see which are unconfirmed.
+
+  Why two stages: requiring an explicit remote marker in the location field
+  dropped ~939 US roles across 14 real boards, and only ~43% of those actually
+  stated an office requirement — most postings simply don't put the work model
+  in that field. (Note: most crawl volume is the niche stack at Staff level, so
+  geography is rarely the binding filter — `title_seniority` and `stack` drop
+  the bulk.)
 - **No-sponsorship JDs kept.** The ingest-time `detect_no_sponsorship` discard
   is skipped for US roles (you're a US citizen), so "we do not sponsor"
   boilerplate no longer throws the posting away. CA/IE still honor it.

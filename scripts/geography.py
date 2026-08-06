@@ -164,6 +164,72 @@ def is_remote_role(location: str, source: str | None = None) -> bool:
     return any(t in loc for t in _REMOTE_LOCATION_TOKENS)
 
 
+# ─── Office-requirement detection (JD text, not location) ─────────────────────
+#
+# The US gate used to require an EXPLICIT remote marker in the location string.
+# Measured against 14 real Greenhouse boards, that allowlist dropped 939 US
+# title-passing roles, of which only ~43% actually state an office requirement:
+# 14% say remote in the JD body while the location string doesn't, and 43% say
+# nothing at all. An allowlist on a field most companies don't use for work model
+# therefore reads "unstated" as "onsite".
+#
+# So the gate is INVERTED for the US branch: admit unless the JD names an office
+# requirement. This is a cheap, string-only pre-screen whose job is to reject the
+# obvious ~43% for free, keeping the ingest-time Claude spend down. It is NOT the
+# accurate answer — ``score_jd`` returns a ``work_model`` judgment and
+# ``config.classify_work_model`` owns the policy. Absence of a match here means
+# "no office evidence found", never "confirmed remote".
+#
+# Recall matters more than precision: a missed pattern admits a role that costs
+# one scoring call, while a false positive silently drops a good role. Patterns
+# below are drawn from observed JD phrasing (Brex, Lyft, MongoDB, Block).
+_OFFICE_NOISE_RE = re.compile(
+    # Recruiting-process and travel uses of "onsite" that say nothing about the
+    # work model. Stripped BEFORE matching so they can't trip the patterns.
+    r"on-?site interview\w*"
+    r"|onsite loop"
+    r"|customer (?:site|sites|onsite|locations?)"
+    r"|travel to (?:customer|client|user)\w*",
+    re.I,
+)
+
+_OFFICE_REQUIREMENT_RE = re.compile(
+    r"this (?:role|position) (?:will be|is|must be) (?:based|located)(?: in| out of| at)"
+    r"|(?:based|located|sit) (?:in|out of|at) (?:our|the) [^.]{0,40}office"
+    r"|in[- ]office[^.]{0,40}(?:schedule|per week|days|requirement|expectation|role|policy)"
+    # "hybrid working model" was a real miss of an earlier draft — allow the
+    # participle, and treat a bare "hybrid role/position" as office evidence too.
+    r"|hybrid(?: work(?:ing)?)? (?:environment|schedule|model|policy|approach|arrangement|role|position|setup)"
+    # Office-days clauses. Both the count style ("3 days" / "three days") and
+    # both clause orders occur in the wild — "3 days per week in the office" and
+    # "three coordinated days in the office per week" — so match on
+    # <count> … days … office rather than assuming an order. The intervening
+    # [^.] can't cross a sentence boundary.
+    r"|(?:\d+|one|two|three|four|five)\s+(?:[a-z]+\s+){0,2}days?\b[^.]{0,45}office"
+    r"|(?:expected|required|expectation) to (?:work|be)(?: on-?site| in the office| in office| at our office)"
+    r"|must (?:live|reside|be (?:located|based)) (?:in|within|near)"
+    r"|commut(?:able|ing) distance"
+    r"|(?:relocate|relocation) to (?:our|the)"
+    r"|on-?site (?:\d+|five|four|three|two) days",
+    re.I,
+)
+
+
+def names_office_requirement(jd_text: str) -> str | None:
+    """Return the matched snippet if the JD states an in-office / hybrid
+    requirement, else None. Pure string logic — pre-filter-safe (no Claude).
+
+    Used only by the US branch of ``location_passes``, as the free pre-screen
+    described in the banner above. A None result means "no office evidence in the
+    text", NOT "this role is remote" — the authoritative call is Claude's
+    ``work_model`` resolved through ``config.classify_work_model`` at ingest."""
+    if not jd_text:
+        return None
+    cleaned = _OFFICE_NOISE_RE.sub(" ", jd_text)
+    m = _OFFICE_REQUIREMENT_RE.search(cleaned)
+    return m.group(0).strip()[:80] if m else None
+
+
 # ─── Foreign-pinned rejection ─────────────────────────────────────────────────
 #
 # Location-flexible tokens: an OTHER-classified remote role carrying one of
@@ -215,14 +281,19 @@ def names_foreign_location(location: str) -> bool:
 
 def location_passes(location: str,
                     enabled_countries: frozenset[str] | None = None,
-                    source: str | None = None) -> bool:
+                    source: str | None = None,
+                    jd_text: str | None = None) -> bool:
     """Pre-filter-safe geography gate (pure string logic — never calls a
     composite, so it's safe to import from ``crawl.pre_filter`` /
     ``prefilter_staged.pre_filter_relaxed``). Removes rows the operator can't
     take:
-      - **US**: kept only if US is enabled AND the role is remote
-        (``is_remote_role``; source-aware — a region-only "USA" counts as remote
-        from a remote-only board, but an ATS US role needs an explicit marker).
+      - **US**: kept only if US is enabled AND the role is not office-bound.
+        A remote marker in the location passes immediately (``is_remote_role``;
+        source-aware — a region-only "USA" counts as remote from a remote-only
+        board). Otherwise the decision moves to the JD body: with ``jd_text``
+        supplied, the role is admitted unless ``names_office_requirement``
+        matches; with no usable ``jd_text``, the stricter "explicit marker
+        required" rule applies, so callers opt in to the wider gate.
       - **CA / IE**: always kept (sponsorship-target markets, incl. Canadian
         province codes like "London, ON").
       - **OTHER**: kept only if NOT pinned to a foreign region
@@ -240,7 +311,18 @@ def location_passes(location: str,
     countries = enabled_countries if enabled_countries is not None else TARGET_COUNTRIES
     country = derive_country(location)
     if country == "US":
-        return "US" in countries and is_remote_role(location, source)
+        if "US" not in countries:
+            return False
+        if is_remote_role(location, source):
+            return True
+        # No remote marker in the location. Fall back to the JD body when the
+        # caller supplied one: admit unless it names an office requirement.
+        # When jd_text is None/blank the caller has no usable body, so we keep
+        # the original strict rule — a caller must opt in to the wider gate by
+        # passing text, and no existing call site widens silently.
+        if not (jd_text or "").strip():
+            return False
+        return names_office_requirement(jd_text) is None
     if country in ("CA", "IE"):
         return True
     return not names_foreign_location(location)

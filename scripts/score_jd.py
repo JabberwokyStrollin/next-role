@@ -9,6 +9,12 @@ Usage:
 Called by ingest.py after mechanical scores are computed. Writes
 seniority_score, domain_fit_score, and score_notes back to the job record.
 Also usable standalone for re-scoring an existing job.
+
+Two advisory judgments ride along on the same call — ``role_exposure`` (gov
+screen) and ``work_model`` (remote/hybrid/onsite). Both are free in token terms:
+the JD is already in the prompt, so they cost output tokens only, not a second
+read. Neither is authoritative on its own; config.classify_role_exposure and
+config.classify_work_model apply the deterministic policy on top.
 """
 
 import argparse
@@ -22,6 +28,7 @@ from config import (
     CLAUDE_MODEL,
     JOB_PIPELINE_PATH,
     SCORING_RUBRIC_PATH,
+    WORK_MODELS,
     apply_title_cap,
     load_json,
     save_json,
@@ -41,10 +48,11 @@ def _load_rubric() -> str:
 def score_jd(jd_text: str, title: str | None = None) -> dict:
     """
     Call Claude with the JD text and return the scoring dict.
-    Returns: {"seniority_score": int, "domain_fit_score": int, "score_notes": str}
+    Returns: {"seniority_score": int, "domain_fit_score": int, "score_notes": str,
+    "role_exposure": str|None, "work_model": str|None}
     Only the two numeric scores are required; ``score_notes`` defaults to "" and
-    ``role_exposure`` to None when the model omits them (display/advisory fields
-    must not break ingest).
+    ``role_exposure`` / ``work_model`` to None when the model omits them
+    (display/advisory fields must not break ingest).
     Raises: ValueError if the response isn't valid JSON or is missing either
     required numeric score.
 
@@ -99,6 +107,16 @@ def score_jd(jd_text: str, title: str | None = None) -> dict:
     # deterministic title rules on top of this raw judgment).
     exp = result.get("role_exposure")
     result["role_exposure"] = exp if exp in ("insulated", "ambiguous", "exposed") else None
+
+    # work_model rides along on this same call — the JD is already in the prompt,
+    # so the marginal cost is a handful of output tokens rather than a second
+    # pass over the text. Same contract as role_exposure: NOT required (a model
+    # miss must not break ingest), and the raw judgment is resolved into a final
+    # value by config.classify_work_model, which layers the deterministic
+    # location check on top. None here means "no usable answer", which that
+    # function maps to "unstated".
+    wm = result.get("work_model")
+    result["work_model"] = wm if wm in WORK_MODELS else None
 
     # Clamp scores to valid ranges
     result["seniority_score"]  = max(0, min(25, int(result["seniority_score"])))

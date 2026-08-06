@@ -196,10 +196,14 @@ false-discard bug simultaneously.
 2. **`config.location_passes` removes rows the operator can't take** — a
    pure-string, pre-filter-safe (no-Claude) **subtractive** gate layered AFTER
    the YAML `location_allow` allowlist. Three cases: **US** rows are removed
-   unless US is enabled AND the role is remote per `config.is_remote_role` (the
-   SSOT remote check, **source-aware**: a region-only US location like "USA"
-   counts as remote from a remote-only board in `REMOTE_ONLY_SOURCES`, but an
-   ATS-board US role needs an explicit remote marker). **CA/IE** always pass.
+   unless US is enabled AND the role isn't office-bound. A remote marker in the
+   location passes immediately per `config.is_remote_role` (the SSOT remote
+   check, **source-aware**: a region-only US location like "USA" counts as
+   remote from a remote-only board in `REMOTE_ONLY_SOURCES`, but an ATS-board US
+   role needs an explicit marker); otherwise the **JD body** decides via
+   `geography.names_office_requirement(jd_text)`. Passing `jd_text=None` keeps
+   the old strict "explicit marker required" rule, so callers opt in and none
+   widens silently. **CA/IE** always pass.
    **OTHER** rows are removed if `names_foreign_location` matches — a remote role
    pinned to a non-target region ("Remote - India", "European Union (Remote)")
    wants a candidate based there, so it's dropped; "Worldwide"/"Americas"/bare
@@ -218,8 +222,53 @@ false-discard bug simultaneously.
    target cities the YAML doesn't enumerate ("Galway", "Montreal", province
    codes) aren't dropped, without duplicating `derive_country`'s knowledge in the
    YAML. `derive_country` is pure-string (no Claude), so it's pre-filter-safe.
-   Then `location_passes` subtracts (US remote-only, foreign-pinned reject).
-   `is_remote_role` is also the SSOT for the stored `job_type`.
+   Then `location_passes` subtracts (US office-bound, foreign-pinned reject).
+
+## Work-model screen (SSOT)
+
+Whether a US role is remote, hybrid, onsite, or simply doesn't say. Two-stage by
+design, because the location field is not where most employers put this.
+
+| Concern | Canonical location |
+|---|---|
+| Valid values | `scripts/config.py:WORK_MODELS` (`remote`/`hybrid`/`onsite`/`unstated`) |
+| Cheap string pre-screen (JD text) | `scripts/geography.py:names_office_requirement` (+ `_OFFICE_REQUIREMENT_RE` / `_OFFICE_NOISE_RE`), consumed only by the US branch of `location_passes` |
+| Accurate classification | Sonnet in `score_jd.py` (rubric "Work model" section), returned on the **existing** scoring call |
+| Resolution (Claude + location shortcut) | `scripts/config.py:classify_work_model` |
+| Policy: which models are acceptable | `scripts/config.py:US_ACCEPTED_WORK_MODELS` (default `{"remote", "unstated"}`) |
+| Ingest discard | `scripts/config.py:work_model_discard_reason`, called in `ingest.ingest_job` after `score_jd` |
+| Stored value | the job's `job_type` field (replaced the old `remote`/`unknown` guess) |
+
+### Rules
+
+1. **Same division of labor as the gov screen.** Claude *describes* what the JD
+   says; Python owns *what to do about it*. Never move the accept/reject
+   decision into the rubric.
+
+2. **The pre-screen is high-recall on purpose.** `names_office_requirement`
+   returning `None` means "no office evidence in the text", **never** "confirmed
+   remote". A missed pattern costs one scoring call; a false positive silently
+   drops a good role. Tune it in that direction.
+
+3. **`unstated` is not `onsite`.** Keep them distinct everywhere. Measured across
+   14 real boards, the old explicit-remote-marker allowlist dropped 939 US
+   title-passing roles and only ~43% of them actually stated an office
+   requirement; ~43% said nothing at all, and a sampled quarter of *those* were
+   remote-eligible. Folding `unstated` into `onsite` — or removing it from
+   `US_ACCEPTED_WORK_MODELS` — silently recreates that allowlist, just with a
+   Claude call spent first.
+
+4. **`work_model` must stay on the existing `score_jd` call.** It is free in
+   token terms only because the JD is already in that prompt. A separate
+   classification call would double the token spend for one enum.
+
+5. **US-only policy.** CA/IE are relocation targets, so an office requirement is
+   irrelevant there — `work_model_discard_reason` returns `None` for them. Don't
+   generalize the gate to all countries.
+
+6. **Tuning:** edit `US_ACCEPTED_WORK_MODELS` only. Narrow to `{"remote"}` for
+   confirmed-remote only; add `"hybrid"` to accept a commute. The detection
+   layers below it don't change.
 
 ## Company-filter SSOT — single source of truth
 
@@ -278,7 +327,8 @@ the pipeline. Neither is a throttle — both are absolute.
 |---|---|---|
 | `ethics_hard_exclude` on the company record | per-company | checked in `scripts/ingest.py:get_or_stub_company` |
 | JD text explicitly refuses sponsorship | per-JD | `scripts/config.py:detect_no_sponsorship` (+ `_NO_SPONSORSHIP_PATTERNS`); called in `scripts/ingest.py:ingest_job` before scoring. **Skipped for US-derived roles** (`derive_country(location) == "US"`) — the operator is a US citizen, so a US JD's "no sponsorship" boilerplate isn't disqualifying. CA/IE/OTHER still run it. The same skip guards `scan_no_sponsorship.py`. |
-| Location not an enabled target geography | per-JD | `scripts/config.py:location_passes`; called in `scripts/ingest.py:ingest_job` after validation (also in both pre-filters). Discards US roles when US is off / not remote. Not a throttle — a geography gate. |
+| Location not an enabled target geography | per-JD | `scripts/config.py:location_passes`; called in `scripts/ingest.py:ingest_job` after validation (also in both pre-filters). Discards US roles when US is off / the JD names an office requirement. Not a throttle — a geography gate. |
+| US role's work model not accepted | per-JD | `scripts/config.py:work_model_discard_reason` (+ `US_ACCEPTED_WORK_MODELS`); called in `scripts/ingest.py:ingest_job` **after** `score_jd`. The only gate that runs post-Claude, because the work model is one of that call's outputs. US-only — CA/IE are relocation targets, so an office requirement is fine there. |
 
 `ethics_hard_exclude` is set by company research. The Haiku model returns
 its own judgment on the field; on top of that, deterministic rules can

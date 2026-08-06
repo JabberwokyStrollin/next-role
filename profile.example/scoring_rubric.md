@@ -41,10 +41,31 @@ government/defense screen to gauge personal assignment risk. One of:
 Judge from the JD body; the pipeline also applies deterministic title rules on
 top of your answer, so when unsure default to insulated.
 
+## Work model
+Classify where the work is physically performed, from the JD body. One of:
+- remote: the role can be performed from home anywhere in the posted country or
+  region. Includes "fully remote", "remote-first", "distributed team", and
+  phrasings like "can be based out of our X office or remotely in <region>"
+  where remote is a genuine option rather than an exception.
+- hybrid: a split — a required number of office days per week, "hybrid working
+  model", or "based in our X office" combined with work-from-home flexibility.
+- onsite: full-time in an office or on site, including roles requiring
+  relocation to, or residence within commuting distance of, a named location.
+- unstated: the JD genuinely does not say where the work happens. Do NOT infer
+  from the location field, from an office address in the footer, or from the
+  company being well known — only from what the body actually states.
+
+Report what the JD says; the pipeline owns the decision about which work models
+are acceptable. Distinguish `unstated` from `onsite` carefully: they are treated
+very differently downstream, and guessing `onsite` when the JD is simply silent
+discards good roles. Perks like "X weeks of work from anywhere per year" are
+benefits, not the work model — they do not make a role remote.
+
 ## Required JSON output format
 {
   "seniority_score": <integer 0-25>,
   "domain_fit_score": <integer 0-20>,
   "score_notes": "<2-3 sentence string>",
-  "role_exposure": "<insulated|exposed|ambiguous>"
+  "role_exposure": "<insulated|exposed|ambiguous>",
+  "work_model": "<remote|hybrid|onsite|unstated>"
 }
