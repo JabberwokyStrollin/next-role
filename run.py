@@ -55,6 +55,7 @@ from config import (  # noqa: E402
     NODE_MISSING_MSG,
     resolve_node,
     company_block_reason,
+    already_applied_block_reason,
     composite_score,
     composite_score_pre_research,
     apply_queue_order,
@@ -324,6 +325,7 @@ def generate_cover_letters(top_n: int = 5, auto: bool = False) -> None:
     scored     = []
     suppressed = 0
     gov_excluded = 0
+    already_applied = 0
     for job in raw_eligible:
         company = co_by_id.get(job.get("company_id"))
         if company_block_reason(job.get("company_id"), apps):
@@ -333,6 +335,11 @@ def generate_cover_letters(top_n: int = 5, auto: bool = False) -> None:
         # surfaces, same handling as company_block_reason. SSOT: config.
         if gov_screen_block_reason(job, company):
             gov_excluded += 1
+            continue
+        # Already applied to this role under a different listing — employers
+        # re-list the same opening under fresh URLs. SSOT: config.
+        if already_applied_block_reason(job, apps):
+            already_applied += 1
             continue
         scored.append(job)
 
@@ -349,6 +356,8 @@ def generate_cover_letters(top_n: int = 5, auto: bool = False) -> None:
     print(f"\n── Cover letter candidates (top {top_n}, ≤{MAX_ACTIVE_APPS_PER_COMPANY} active apps/co) ──────────")
     if suppressed:
         print(f"  ({suppressed} suppressed: company already at {MAX_ACTIVE_APPS_PER_COMPANY} active applications)")
+    if already_applied:
+        print(f"  ({already_applied} hidden: already applied to that role under another listing)")
     if gov_excluded:
         print(f"  ({gov_excluded} excluded: gov/defense entanglement)")
     for i, (score, job) in enumerate(candidates, 1):

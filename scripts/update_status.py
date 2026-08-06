@@ -193,6 +193,56 @@ def cmd_status(args):
         print(f"Response date set: {today()}")
 
 
+def cmd_revert(args):
+    """Undo a mis-clicked "Mark Applied": delete the application and return the
+    job to the pipeline.
+
+    This is a genuine undo, not a status transition. `withdrawn` was being used
+    for this because no undo existed, which corrupted three things at once: the
+    application counted toward metrics, `find_duplicate_application` badged the
+    role as already-applied, and — worst — the job row stayed at
+    `pipeline_status="applied"` forever, so a role that was never applied to
+    vanished from every surface.
+
+    The tracker is reconstructable from `process_log.json`, so deleting the row
+    is safe as long as the deletion itself is logged — which it is, below.
+    """
+    apps = load_json(APPLICATION_TRACKER_PATH)
+    app  = next((a for a in apps if a["application_id"] == args.app_id), None)
+    if not app:
+        print(f"Error: application ID {args.app_id} not found.")
+        sys.exit(1)
+
+    remaining = [a for a in apps if a["application_id"] != args.app_id]
+    save_json(APPLICATION_TRACKER_PATH, remaining)
+
+    # Return the job to the pipeline. Only touch a row still parked at
+    # "applied" — if it was archived or re-applied since, leave that alone.
+    jobs      = load_json(JOB_PIPELINE_PATH)
+    restored  = False
+    for j in jobs:
+        if j.get("job_id") == app.get("job_id") and j.get("pipeline_status") == "applied":
+            j["pipeline_status"] = "active"
+            restored = True
+    if restored:
+        save_json(JOB_PIPELINE_PATH, jobs)
+
+    append_log({
+        "event_type":  "application_reverted",
+        "entity_type": "application",
+        "entity_id":   app["application_id"],
+        "entity_name": f"{app['company_name']} — {app['title']}",
+        "source_url":  app.get("apply_url"),
+        "detail":      (f"Application reverted (not actually applied); "
+                        f"was status={app.get('status')}, applied {app.get('date_applied')}. "
+                        f"Job {'returned to active' if restored else 'row left as-is'}."),
+    })
+
+    print(f"Reverted: {app['company_name']} — {app['title']}")
+    print(f"  Application record deleted (was {app.get('status')}).")
+    print(f"  Job {'returned to the pipeline as active.' if restored else 'row not at applied — left unchanged.'}")
+
+
 def cmd_list(args):
     """List all applications with current status."""
     apps = load_json(APPLICATION_TRACKER_PATH)
@@ -258,6 +308,12 @@ def main():
                       help="Structured rejection reason (only with --status rejected)")
     st_p.add_argument("--notes",   metavar="TEXT", help="Optional notes")
 
+    # revert subcommand — undo a mis-clicked "Mark Applied"
+    rv_p = sub.add_parser("revert",
+                          help="Undo a mis-clicked application: delete it and "
+                               "return the job to the pipeline")
+    rv_p.add_argument("--app-id", required=True, metavar="UUID")
+
     # list subcommand
     sub.add_parser("list", help="List all applications")
 
@@ -267,6 +323,8 @@ def main():
         cmd_log(args)
     elif args.command == "status":
         cmd_status(args)
+    elif args.command == "revert":
+        cmd_revert(args)
     elif args.command == "list":
         cmd_list(args)
 

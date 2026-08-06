@@ -74,6 +74,7 @@ from config import (  # noqa: E402
     derive_country,
     find_duplicate_application,
     gov_screen_result,
+    already_applied_block_reason,
     apply_queue_order,
     apply_rank_score,
     gov_screen_block_reason,
@@ -1248,6 +1249,11 @@ STYLE = """
                  color: #333; border: 0.5px solid rgba(0,0,0,0.12);
                  border-radius: 4px; cursor: pointer; font-family: inherit; }
   .btn-status:hover { background: #e8e8e6; }
+  /* Undo is destructive-ish (deletes the application row), so it reads apart
+     from the status transitions next to it rather than blending in. */
+  .btn-status-undo { margin-left: auto; background: #fdf6f6; color: #8a3a3a;
+                     border-color: rgba(138,58,58,0.22); }
+  .btn-status-undo:hover { background: #f7e9e9; }
   .crawl-status   { display: flex; align-items: center; gap: 10px;
                     flex-wrap: wrap; margin-bottom: 8px; }
   .crawl-badge    { font-size: 11px; padding: 3px 9px; border-radius: 4px;
@@ -3583,6 +3589,8 @@ def render_app_row(app: dict) -> str:
         <button class="btn-status" type="submit" name="action" value="rejected_interview_failed">Rejected (interview failed)</button>
         <button class="btn-status" type="submit" name="action" value="offer">Offer</button>
         <button class="btn-status" type="submit" name="action" value="withdrawn">Withdrawn</button>
+        <button class="btn-status btn-status-undo" type="submit" name="action" value="revert"
+                title="Mis-clicked Mark Applied? Deletes this application and returns the job to the pipeline.">Not applied (undo)</button>
       </form>
     </div>
     """
@@ -3648,8 +3656,9 @@ def render_cover_letters_body() -> str:
     # the company). The rule lives in config.company_block_reason — do not
     # reimplement it here. See SCORING/COMPANY-FILTER SSOT banners in
     # scripts/config.py.
-    eligible   = []
-    suppressed = 0
+    eligible     = []
+    suppressed   = 0
+    sup_applied  = 0
     for j in raw_eligible:
         if company_block_reason(j.get("company_id"), apps):
             suppressed += 1
@@ -3658,6 +3667,13 @@ def render_cover_letters_body() -> str:
         # apply-time handling as the company throttle. SSOT: config.
         if gov_screen_block_reason(j, co_by_id.get(j.get("company_id"))):
             suppressed += 1
+            continue
+        # Already applied to this role under some other listing. Counted apart
+        # from the throttle because it's the one an operator most often wants
+        # to inspect — employers re-list the same opening under fresh URLs, and
+        # a re-post outranks the copy that was applied to. SSOT: config.
+        if already_applied_block_reason(j, apps):
+            sup_applied += 1
             continue
         eligible.append(j)
     # Order via the apply-queue SSOT: ranked by the gov-screen-adjusted score
@@ -3681,13 +3697,19 @@ def render_cover_letters_body() -> str:
     n_new   = len(eligible) - n_ready
     suppressed_html = (
         f' · <span class="staged-count">{suppressed} suppressed '
-        f'(≥{MAX_ACTIVE_APPS_PER_COMPANY} active apps at company)</span>'
+        f'(≥{MAX_ACTIVE_APPS_PER_COMPANY} active apps at company / gov screen)</span>'
         if suppressed else ''
+    )
+    applied_html = (
+        f' · <span class="staged-count">{sup_applied} hidden '
+        f'(already applied to that role)</span>'
+        if sup_applied else ''
     )
     parts.append(
         '<div class="staged-summary">'
         f'<span class="staged-count">{n_new} need CL · {n_ready} CL ready to apply · {len(eligible)} eligible</span>'
         f'{suppressed_html}'
+        f'{applied_html}'
         '</div>'
     )
 
@@ -5421,7 +5443,18 @@ class Handler(BaseHTTPRequestHandler):
             app_id = params.get("app_id", [""])[0].strip()
             action = params.get("action", [""])[0].strip()
 
-            if app_id and action in STATUS_ACTION_MAP:
+            # "revert" is an undo, not a status transition: it deletes the
+            # application and returns the job to the pipeline. Handled before
+            # STATUS_ACTION_MAP because it deliberately isn't in it.
+            if app_id and action == "revert":
+                subprocess.run(
+                    [sys.executable, str(SCRIPTS / "update_status.py"),
+                     "revert", "--app-id", app_id],
+                    cwd=ROOT,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    encoding="utf-8", errors="replace",
+                )
+            elif app_id and action in STATUS_ACTION_MAP:
                 status, reason = STATUS_ACTION_MAP[action]
                 cmd = [
                     sys.executable, str(SCRIPTS / "update_status.py"),

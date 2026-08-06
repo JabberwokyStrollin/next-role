@@ -1431,6 +1431,31 @@ def apply_queue_order(jobs: list[dict], co_by_id: dict) -> list[dict]:
     return bubbled + rest
 
 
+def already_applied_block_reason(job: dict, apps: list[dict]) -> str | None:
+    """Return a short reason if this role has already been applied to, else None.
+
+    Employers re-list the same opening repeatedly under fresh URLs — NetApp
+    re-posted one role 43 times over three weeks — so a role you already applied
+    to keeps reappearing as a brand-new row. Worse, freshness and velocity are 18
+    of the composite's 130 points, so each re-post ranks *higher* than the copy
+    you applied to, and with country quotas it consumes a scarce daily slot.
+
+    Matching is by ``find_duplicate_application`` (same company + normalized
+    title, any listing), which already ignores
+    ``DUPLICATE_CHECK_IGNORED_STATUSES`` — so a mis-clicked "Mark Applied" that
+    was reverted or withdrawn does NOT suppress the role.
+
+    Apply-time only, parallel to ``company_block_reason`` and
+    ``gov_screen_block_reason``: the job stays in the pipeline and on
+    ``/job/<id>``, it's just kept out of the apply queue. Surfaces count it in
+    their suppressed tally rather than hiding it silently."""
+    dupe = find_duplicate_application(job.get("company_id"), job.get("title", ""), apps)
+    if not dupe:
+        return None
+    return (f"already applied {dupe.get('date_applied')} "
+            f"(status: {dupe.get('status')})")
+
+
 def gov_screen_block_reason(job: dict, company: dict | None) -> str | None:
     """Return a short reason if a role must be hidden from apply surfaces due
     to the gov-screen (result == `fail`, i.e. tier_a / defense entanglement),
@@ -1648,6 +1673,18 @@ def normalize_role_title(title: str) -> str:
     return _re.sub(r"\s+", " ", t).strip()
 
 
+# Application statuses that do NOT count as "you already applied to this role"
+# for the duplicate check. `withdrawn` is here because in this operator's
+# workflow it has only ever meant "I mis-clicked Mark Applied" — there was no
+# undo until `update_status.py revert` existed, so withdraw was the workaround.
+# Counting those as real applications badged never-applied roles as duplicates.
+#
+# A genuine withdrawal (applied, then pulled out) would arguably belong in the
+# check — if that starts happening, use `revert` for mis-clicks and drop
+# `withdrawn` from this set rather than reintroducing the conflation.
+DUPLICATE_CHECK_IGNORED_STATUSES: frozenset[str] = frozenset({"withdrawn"})
+
+
 def find_duplicate_application(
     company_id: str | None,
     title: str,
@@ -1657,7 +1694,8 @@ def find_duplicate_application(
     """Return an existing application at the same company whose normalized
     title matches ``title``, or None. Used to warn before logging or queuing a
     second application to effectively the same role. Matches regardless of the
-    prior application's status — a prior rejection is still worth flagging."""
+    prior application's status — a prior rejection is still worth flagging —
+    **except** the statuses in ``DUPLICATE_CHECK_IGNORED_STATUSES``."""
     if not company_id:
         return None
     norm = normalize_role_title(title)
@@ -1665,6 +1703,8 @@ def find_duplicate_application(
         return None
     for a in apps:
         if exclude_app_id and a.get("application_id") == exclude_app_id:
+            continue
+        if a.get("status") in DUPLICATE_CHECK_IGNORED_STATUSES:
             continue
         if a.get("company_id") != company_id:
             continue

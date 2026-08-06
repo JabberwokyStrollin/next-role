@@ -293,6 +293,41 @@ design, because the location field is not where most employers put this.
    confirmed-remote only; add `"hybrid"` to accept a commute. The detection
    layers below it don't change.
 
+## Applied-role suppression (SSOT)
+
+Employers re-list the same opening under fresh URLs — NetApp re-posted one role
+43 times in three weeks. Because velocity + freshness are 18 of the composite's
+130 points, each re-post outranks the copy that was actually applied to, and
+under country quotas it consumes a scarce daily slot.
+
+| Concern | Canonical location |
+|---|---|
+| "Already applied to this role?" | `scripts/config.py:already_applied_block_reason()` |
+| Role identity for the check | `scripts/config.py:find_duplicate_application()` (company + normalized title, any listing) |
+| Statuses that do NOT count as applied | `scripts/config.py:DUPLICATE_CHECK_IGNORED_STATUSES` |
+
+### Rules
+
+1. **Apply-time only**, parallel to `company_block_reason` and
+   `gov_screen_block_reason`. The job stays in the pipeline and on `/job/<id>`;
+   it's only kept out of the apply queue.
+
+2. **Never suppress silently.** Both surfaces count these separately from the
+   company throttle and show the count, because "already applied" is the
+   suppression an operator most often wants to inspect.
+
+3. **`withdrawn` does not mean applied.** In this operator's workflow it has
+   only ever meant a mis-clicked "Mark Applied" — there was no undo before
+   `update_status.py revert`. Suppressing on it hid roles that were never
+   applied to. If genuine withdrawals ever start happening, use `revert` for
+   mis-clicks and drop `withdrawn` from
+   `DUPLICATE_CHECK_IGNORED_STATUSES` — don't re-conflate the two.
+
+4. **`revert` is an undo, not a status.** It deletes the application row and
+   returns the job to `active`; `cmd_status` transitions are for real outcomes.
+   The deletion is safe because it's logged as `application_reverted`, and the
+   tracker is reconstructable from `process_log.json`.
+
 ## Apply-queue ordering SSOT
 
 There is exactly **one** function that orders apply surfaces:
@@ -344,6 +379,8 @@ the constants `MAX_ACTIVE_APPS_PER_COMPANY` and `IN_FLIGHT_STATUSES`.
 | Concurrent-application limit per company | `scripts/config.py:MAX_ACTIVE_APPS_PER_COMPANY` | same import |
 | What "in-flight" means | `scripts/config.py:IN_FLIGHT_STATUSES` (frozenset) | same import |
 | **Stored-inventory** ceiling per company | `scripts/config.py:MAX_ACTIVE_JOBS_PER_COMPANY` (enforced by `scan_company_overflow.py`) | a different axis — see rule 1 |
+| "Already applied to this role?" predicate | `scripts/config.py:already_applied_block_reason()` | `from config import already_applied_block_reason` |
+| Statuses that DON'T count as having applied | `scripts/config.py:DUPLICATE_CHECK_IGNORED_STATUSES` (`{"withdrawn"}`) | same import |
 
 **Two per-company limits exist and they are not the same thing.** Confusing
 them is the easy mistake:
