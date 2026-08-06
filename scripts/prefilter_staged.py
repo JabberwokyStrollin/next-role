@@ -92,10 +92,15 @@ def pre_filter_relaxed(title: str, location: str, jd_text: str, cfg: dict) -> tu
             or derive_country(location) in TARGET_COUNTRIES):
         return False, f"location miss ({location[:40]})"
 
-    # Subtractive geography gate (config SSOT): US remote-only, foreign-pinned
-    # remote rejected. CA/IE always pass.
-    if not location_passes(location):
-        return False, f"location US-gated (off / not remote) ({location[:40]})"
+    # Subtractive geography gate (config SSOT): US office-bound and
+    # foreign-pinned remote rejected. CA/IE always pass.
+    # jd_text is forwarded only when the body is long enough to carry real
+    # evidence — a stub row with no JD yet must not be admitted on the strength
+    # of "we found no office language in 20 characters". MIN_JD_LENGTH already
+    # owns that threshold here, so location_passes stays free of it.
+    if not location_passes(location,
+                           jd_text=jd_text if len(jd_text) >= MIN_JD_LENGTH else None):
+        return False, f"location US-gated (off / office-bound) ({location[:40]})"
 
     if len(jd_text) >= MIN_JD_LENGTH:
         from config import compute_stack_score  # heavy import — defer

@@ -32,7 +32,6 @@ from config import (
     PROCESS_LOG_PATH,
     detect_no_sponsorship,
     derive_country,
-    is_remote_role,
     location_passes,
     load_json,
     save_json,
@@ -42,6 +41,8 @@ from config import (
     compute_velocity_score,
     compute_staleness,
     classify_role_exposure,
+    classify_work_model,
+    work_model_discard_reason,
 )
 from score_jd import score_jd
 from research_company import build_registry_record, upsert_company
@@ -242,9 +243,12 @@ def ingest_job(
     # ── Geography gate ────────────────────────────────────────────────────────
     # Mirror of the crawl/staged pre-filters, repeated here so a manually pasted
     # role is also gated (the manual path bypasses those pre-filters). US roles
-    # are remote-only and only enter when "US" is in TARGET_COUNTRIES; CA / IE /
-    # OTHER are unaffected. See config.location_passes (pure-string, no Claude).
-    if not location_passes(location, source=source):
+    # enter only when "US" is in TARGET_COUNTRIES and the role isn't office-bound;
+    # CA / IE / OTHER are unaffected. See config.location_passes (pure-string, no
+    # Claude). jd_text is passed so the US branch can read the body — validation
+    # above already guarantees a usable one. This is the cheap pre-screen only;
+    # the authoritative work-model call happens after scoring, below.
+    if not location_passes(location, source=source, jd_text=jd_text):
         print(f"  Geography gate: '{location[:40]}' not an enabled target — discarding.")
         append_log({
             "event_type":  "job_discarded",
@@ -316,6 +320,26 @@ def ingest_job(
           f"Domain: {scores['domain_fit_score']}/{COMPONENTS['domain'].native_max}")
     print(f"  Notes: {scores['score_notes']}")
 
+    # ── Work-model discard ────────────────────────────────────────────────────
+    # The accurate second pass behind the cheap string pre-screen in
+    # location_passes. US-only: a US role the operator can't take (office-bound
+    # by default) is discarded here. Necessarily AFTER scoring, because the work
+    # model is one of that call's outputs — unlike detect_no_sponsorship, which
+    # runs before scoring precisely because it can. SSOT: config.
+    work_model = classify_work_model(location, source, scores.get("work_model"))
+    wm_discard = work_model_discard_reason(location, work_model)
+    if wm_discard:
+        print(f"  Work model: {wm_discard} — discarding.")
+        append_log({
+            "event_type":  "job_discarded",
+            "entity_type": "job",
+            "entity_name": f"{company_name} — {title}",
+            "source_url":  apply_url,
+            "detail":      f"Job discarded: {wm_discard}.",
+        })
+        return None
+    print(f"  Work model: {work_model}")
+
     # ── Build job record ──────────────────────────────────────────────────────
     job_id  = str(uuid_lib.uuid4())
     now     = now_utc()
@@ -326,7 +350,11 @@ def ingest_job(
         "title":                title,
         "apply_url":            apply_url,
         "location":             location,
-        "job_type":             "remote" if is_remote_role(location, source) else "unknown",
+        # Resolved work model (remote | hybrid | onsite | unstated), not just the
+        # old remote/unknown guess: classify_work_model keeps the location-marker
+        # shortcut and falls back to Claude's JD reading. Legacy rows written
+        # before this carry "unknown", which is equivalent to "unstated".
+        "job_type":             work_model,
         "jd_text":              jd_text,
         "date_posted":          date_posted,
         "date_found":           now,

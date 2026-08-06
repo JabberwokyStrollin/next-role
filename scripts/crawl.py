@@ -158,9 +158,12 @@ def pre_filter(title: str, location: str, text: str, cfg: dict,
 
     # Subtractive geography gate (config SSOT, not the YAML allowlist): drops
     # US rows the allowlist admits via bare "remote"/"americas" unless "US" is
-    # an enabled target AND the role is remote. CA/IE/OTHER pass through.
-    if not location_passes(location, source=source):
-        return False, f"location US-gated (off / not remote) ({location[:40]})"
+    # an enabled target AND the role isn't office-bound. CA/IE/OTHER pass
+    # through. ``text`` is handed over so the US branch can fall back to the JD
+    # body when the location carries no remote marker — most ATS postings don't
+    # put the work model in the location field. Still pure string logic.
+    if not location_passes(location, source=source, jd_text=text):
+        return False, f"location US-gated (off / office-bound) ({location[:40]})"
 
     # Score the FULL JD (compute_stack_score already strips trailing boilerplate
     # and caps at STACK_SCORE_MAX), not just a prefix — a prefix window silently

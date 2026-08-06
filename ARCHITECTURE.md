@@ -131,6 +131,8 @@ file.
 | `GOV_DEFENSE_FLAGS` / `ROLE_EXPOSURES` | `tuple[str, ...]` | Valid values for `gov_defense_flag` (`none`/`tier_c`/`tier_b`/`tier_a`) and `role_exposure` (`insulated`/`ambiguous`/`exposed`). |
 | `GOV_SCREEN_INTERVIEW_QUESTIONS` | `list[str]` | Role-clarity questions surfaced when the combination matrix emits them. |
 | `_GOV_SCREEN_MATRIX` | `dict` | Part 3 combination matrix: `{flag: {exposure: (result, emit_questions)}}`. Consumed by `gov_screen_result`. |
+| `WORK_MODELS` | `tuple[str, ...]` | Valid `work_model` / `job_type` values: `remote`, `hybrid`, `onsite`, `unstated`. Consumed by `score_jd` (validation) and `classify_work_model`. |
+| `US_ACCEPTED_WORK_MODELS` | `frozenset[str]` | **The work-model policy knob.** Which models a US role may have; default `{"remote", "unstated"}` — a *confirmed* office requirement is rejected, but a JD that simply doesn't say is admitted for manual triage. Narrow to `{"remote"}` for confirmed-remote only, or add `"hybrid"` to accept a commute. US-only; CA/IE are never gated on work model. Read by `work_model_discard_reason`. |
 | `MAX_ACTIVE_APPS_PER_COMPANY` | `int` | Apply-time throttle — hide a company once N in-flight apps exist (3). |
 | `IN_FLIGHT_STATUSES` | `frozenset[str]` | What "in-flight" means for the throttle: `applied`, `recruiter_screen`, `interview`. `ghosted` is intentionally excluded so dead apps free the slot. |
 | `_SENIORITY_BUCKETS` | `list[(str, Pattern, int)]` | Ordered (bucket, regex, cap) — first match wins. Used by `title_seniority_cap`. |
@@ -337,7 +339,8 @@ later round). Kept out of the composite/scoring path — pure status-transition
 policy. Consumed by `serve.py` (`inbox_match_suggestion`).
 
 #### Geography functions (re-exported from `geography.py`)
-`derive_country`, `is_remote_role`, `names_foreign_location`, `location_passes`,
+`derive_country`, `is_remote_role`, `names_foreign_location`,
+`names_office_requirement`, `location_passes`,
 plus `TARGET_COUNTRIES` / `REMOTE_ONLY_SOURCES`, are **defined in
 `scripts/geography.py`** (dependency-free) and re-exported here so
 `from config import derive_country` etc. work unchanged. See the
@@ -458,6 +461,28 @@ deployed / sales / TAM / support, with support gated by
 judgment, defaulting `insulated`. Called by `ingest.py` (which has the title
 `score_jd` doesn't).
 
+#### `classify_work_model(location, source=None, claude_work_model=None) -> str`
+Work-model resolver, returning a value in `WORK_MODELS`
+(`remote` | `hybrid` | `onsite` | `unstated`). A remote marker in the location
+wins outright (`is_remote_role` — the employer stated it in a structured field,
+which beats a body reading); else Claude's `work_model` judgment from the
+`score_jd` call; else `unstated`. Called by `ingest.py`.
+
+`unstated` is deliberately its **own** value rather than being folded into
+`onsite` — see `work_model_discard_reason`, which treats them differently.
+Collapsing them would silently re-create the location allowlist this replaced.
+
+#### `work_model_discard_reason(location, work_model) -> str | None`
+Ingest-time hard discard, parallel to `detect_no_sponsorship`: returns a reason
+when a **US** role's resolved work model isn't in `US_ACCEPTED_WORK_MODELS`,
+else `None`. CA / IE / OTHER always return `None` — those are relocation
+targets, so an office requirement is fine there.
+
+Unlike the other ingest gates this necessarily runs **after** the Claude call,
+because the work model is one of that call's outputs. The cheap string
+pre-screen in `geography.names_office_requirement` is what keeps the wasted
+spend down by rejecting the obviously office-bound for free.
+
 #### `reconcile_gov_defense_flag(company) -> str`
 Resolves a company's `gov_defense_flag`, forcing it to `tier_a` for industry-
 detected defense contractors (`is_defense_contractor`) regardless of the LLM's
@@ -507,7 +532,7 @@ concern); `US_SPONSORSHIP_SCORE` stays in `config.py` (a scoring concern).
 
 | Name | Purpose |
 |---|---|
-| `TARGET_COUNTRIES` | **SSOT** for active target geographies (currently `{"CA","IE","US"}`; remove `"US"` to disable US remote-only roles). Read by `config.composite_score` and `location_passes`. |
+| `TARGET_COUNTRIES` | **SSOT** for active target geographies (currently `{"CA","IE","US"}`; remove `"US"` to disable US roles entirely). Read by `config.composite_score`, `location_passes`, and `work_model_discard_reason`. |
 | `_IE_/_CA_/_US_LOCATION_TOKENS` | Space-padded location substrings for `derive_country`. IE/CA before US; no bare `"us"`. Canada isn't detected by bare `"CA"` (collides with California). |
 | `_CA_PROVINCE_CODES` / `_US_STATE_CODES` | Two-letter codes matched only in an anchored "City, XX" form by `_has_region_code`. US states omit `in`/`de`/`co` (country-code collisions). |
 | `_US_STATE_NAMES` / `_US_STATE_NAME_RE` | All 50 spelled-out US state names + `district of columbia`, matched on a word boundary anywhere in the location. Needed because ATS boards write the name with no country and no "City, XX" pair ("Florida", "Remote - New York"), which the code check can't see. `georgia` resolves the US state, not the country; `indiana` now resolves US before `_FOREIGN_LOCATION_TOKENS`' `india` substring can reject it. |
@@ -547,18 +572,44 @@ names and embedded letters).
 #### `is_remote_role(location, source=None) -> bool`
 `True` if the location text says remote (`_REMOTE_LOCATION_TOKENS`) **or** the
 listing came from a `REMOTE_ONLY_SOURCES` board. Used by `location_passes` and
-`ingest.ingest_job` (the stored `job_type`).
+by `config.classify_work_model` as the location-marker shortcut.
 
 #### `names_foreign_location(location) -> bool`
 `True` if pinned to a non-target region (`_FOREIGN_LOCATION_TOKENS`), with
 `_FLEXIBLE_LOCATION_TOKENS` winning first. Only meaningful for OTHER locations.
 
-#### `location_passes(location, enabled_countries=None, source=None) -> bool`
+#### `names_office_requirement(jd_text) -> str | None`
+Returns the matched snippet if the **JD body** states an in-office / hybrid
+requirement, else `None`. Pure string logic, so it stays pre-filter-safe.
+`_OFFICE_NOISE_RE` strips recruiting-process and travel uses of "onsite"
+("onsite interview", "travel to customer sites") *before* `_OFFICE_REQUIREMENT_RE`
+runs, so they can't trip it.
+
+Deliberately tuned for **recall over precision**: a missed pattern admits a role
+that costs one scoring call, whereas a false positive silently drops a good one.
+A `None` result means "no office evidence in the text", **never** "confirmed
+remote" — the authoritative call is `config.classify_work_model` at ingest.
+
+Exists because the US gate used to require an explicit remote marker in the
+*location* string. Measured across 14 real Greenhouse boards, that allowlist
+dropped 939 US title-passing roles of which only ~43% actually state an office
+requirement; 14% say remote in the JD body while the location doesn't, and 43%
+say nothing at all.
+
+#### `location_passes(location, enabled_countries=None, source=None, jd_text=None) -> bool`
 Pre-filter-safe subtractive gate (no Claude/composite). **US** kept only if
-enabled AND remote; **CA/IE** always kept; **OTHER** kept unless
+enabled AND not office-bound — a location remote marker passes immediately,
+otherwise the JD body decides via `names_office_requirement`; **CA/IE** always
+kept (relocation targets, so work model is irrelevant); **OTHER** kept unless
 `names_foreign_location`. Layered after the YAML `location_allow` allowlist;
 only ever subtracts. Called by `crawl.pre_filter`,
 `prefilter_staged.pre_filter_relaxed`, and `ingest.ingest_job`.
+
+**`jd_text=None` preserves the old strict US rule** (explicit location marker
+required). Callers opt in to the wider gate by passing text, so no existing call
+site widens silently — `prefilter_staged` passes it only when the body clears
+its `MIN_JD_LENGTH`, since "no office language found in 20 characters" is not
+evidence.
 
 #### CLI (`python scripts/geography.py "<location>"`)
 Prints `derive_country(argv[1])`. No API key required — used by
@@ -583,11 +634,19 @@ cap mechanically (see
 `apply_title_cap` in `config.py`) because the model has been observed
 reclassifying Principal titles based on JD scope language.
 
-Also passes through an optional `role_exposure` (gov-screen JD judgment) when
-the model returns a valid value (`insulated`/`ambiguous`/`exposed`), else
-`None` — intentionally **not** required so a model miss can't break ingest.
-`ingest.py` resolves the final value via `config.classify_role_exposure`
-(deterministic title rules over this raw judgment) and stores it on the job.
+Two advisory judgments ride along on this same call, both **free in token terms**
+— the JD is already in the prompt, so they cost output tokens rather than a
+second pass over the text:
+
+| Field | Values | Resolved by |
+|---|---|---|
+| `role_exposure` | `insulated` / `ambiguous` / `exposed` | `config.classify_role_exposure` (deterministic title rules over the raw judgment) |
+| `work_model` | `remote` / `hybrid` / `onsite` / `unstated` (`WORK_MODELS`) | `config.classify_work_model` (location remote-marker shortcut over the raw judgment) |
+
+Both are intentionally **not** required — an invalid or missing value becomes
+`None` so a model miss can't break ingest. Neither is authoritative on its own;
+the rubric tells Claude to *describe* what the JD says, and `config.py` owns the
+policy about what to do with it.
 
 ### Functions
 
@@ -605,7 +664,7 @@ title cap.
   - `jd_text` — raw JD text. Sanitized for surrogate chars before sending.
   - `title` — optional job title. When provided and the cap reduces the score, the function also records `seniority_raw` (the pre-cap value) and `seniority_cap_title` for audit. Pass `None` to skip the cap (e.g. scoring a JD outside the pipeline).
 - **Returns:** `dict` with `seniority_score: int (0..25)`, `domain_fit_score: int (0..20)`, `score_notes: str`. May also include `seniority_raw: int` and `seniority_cap_title: str` if the cap fired.
-- **Raises:** `ValueError` if Claude's response is not parseable JSON or is missing either required numeric score (`seniority_score` / `domain_fit_score`). `score_notes` and `role_exposure` are optional — missing values default to `""` and `None` respectively. Markdown code fences are stripped before parsing.
+- **Raises:** `ValueError` if Claude's response is not parseable JSON or is missing either required numeric score (`seniority_score` / `domain_fit_score`). `score_notes`, `role_exposure`, and `work_model` are optional — missing values default to `""`, `None`, and `None` respectively. Markdown code fences are stripped before parsing.
 
 #### `update_job_record(job_id: str, scores: dict) -> None`
 Loads the pipeline, finds the row matching `job_id`, writes back
@@ -806,10 +865,17 @@ Full per-job pipeline:
 8. Compute mechanical scores (`compute_stack_score`,
    `compute_velocity_score`, `compute_staleness`).
 9. Call `score_jd.score_jd(jd_text)` for seniority + domain (+ raw
-   `role_exposure` judgment).
-10. Assemble the record (UUIDs, ISO timestamps, default flags), resolving
-   `role_exposure` via `config.classify_role_exposure(title, …)`, append to
-   `job_pipeline.json`, save, log `validation_summary`, return the record.
+   `role_exposure` and `work_model` judgments).
+10. Resolve the work model via `config.classify_work_model(location, source, …)`
+   and discard on `config.work_model_discard_reason` — a US role whose model
+   isn't in `US_ACCEPTED_WORK_MODELS` is logged as `job_discarded` and returns
+   `None`. **The only gate that runs after the Claude call**, because the work
+   model is one of its outputs; the pre-filter's `names_office_requirement`
+   screen is what keeps that wasted spend down.
+11. Assemble the record (UUIDs, ISO timestamps, default flags), resolving
+   `role_exposure` via `config.classify_role_exposure(title, …)` and storing the
+   resolved work model as `job_type`, append to `job_pipeline.json`, save, log
+   `validation_summary`, return the record.
 
 - **Parameters:** all required. `source` is a free-text label (`direct_scrape`, `manual`, `remoteok`, `lever`, ...).
 - **Returns:** the persisted job dict, or `None` if discarded at any gate.
@@ -880,10 +946,12 @@ them in the funnel log without parsing free text. `title_exclude` uses
 if the YAML `location_allow` matches **or** `config.derive_country(location)`
 is in `TARGET_COUNTRIES` (so target cities the allowlist doesn't enumerate —
 "Galway", "Montreal", province codes — aren't dropped). It then applies the
-`config.location_passes` subtractive gate (US remote-only + foreign-pinned
+`config.location_passes` subtractive gate (US office-bound + foreign-pinned
 reject; reason prefix `location US-gated …`, so it buckets under `location` in
 the funnel); `source` is forwarded so the remote check is source-aware
-(remote-only boards count region-only US locations as remote).
+(remote-only boards count region-only US locations as remote). `text` is
+forwarded as `jd_text` so the US branch can fall back to the JD body when the
+location carries no remote marker — see `geography.names_office_requirement`.
 
 #### `detect_ats(url: str) -> tuple[str, str] | None`
 Pattern-matches an apply URL against five ATS shapes (Greenhouse hosted
