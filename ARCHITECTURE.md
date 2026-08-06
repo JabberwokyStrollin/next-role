@@ -53,6 +53,7 @@ Two cross-cutting rules govern most of the code and are referenced throughout:
 - [`scripts/rescore_all.py`](#scriptsrescore_allpy) — bulk re-score under a new rubric
 - [`scripts/scan_no_sponsorship.py`](#scriptsscan_no_sponsorshippy) — retroactive no-sponsorship sweep
 - [`scripts/scan_foreign_locations.py`](#scriptsscan_foreign_locationspy) — retroactive foreign-pinned-location sweep
+- [`scripts/resync_tracker_country.py`](#scriptsresync_tracker_countrypy) — re-derive stored `country` on logged applications
 - [`scripts/scan_stale_jobs.py`](#scriptsscan_stale_jobspy) — expire jobs sitting un-applied past `PIPELINE_EXPIRY_DAYS`
 - [`scripts/cleanup_staged_jd.py`](#scriptscleanup_staged_jdpy) — clear similar-jobs noise from staged rows
 - [`scripts/backfill_target_boards.py`](#scriptsbackfill_target_boardspy) — discover ATS boards from existing pipeline
@@ -2267,6 +2268,43 @@ auto-sweep.
 #### `main() -> int`
 Argparse `--apply` / `--include-applied`. Previews via
 `archive_foreign_pinned(apply=False, verbose=True)`, then archives on `--apply`.
+
+---
+
+## `scripts/resync_tracker_country.py`
+
+**Role.** Retroactive sweep for the stored `country` field on
+`application_tracker.json` rows. `update_status.log_application` stamps
+`country = derive_country(location)` at apply time, so the value is correct
+*when written* — but it's a **snapshot**, and `derive_country` keeps getting
+sharper (US state names, Canadian province codes, IE/CA-before-US ordering).
+Each such improvement leaves already-logged rows holding a stale verdict. This
+is the tracker-side parallel of `scan_foreign_locations.py`: run it after
+changing `geography.py`. Default is dry-run; `--apply` writes. On a normal run
+it finds zero.
+
+Nothing currently *reads* the field — `generate_cl.js` re-derives from
+`location` via the `geography.py` subprocess, so a stale value can't mis-stamp a
+work-permit paragraph. It's reporting/analysis surface, where a wrong country
+silently skews any per-geography read of the tracker.
+
+### Functions
+
+#### `find_stale(apps) -> list[tuple[dict, str, str]]`
+Returns `(app, stored, fresh)` for every row whose stored `country` disagrees
+with a fresh `derive_country(location)`. A row with no stored country counts as
+stale.
+
+#### `resync_country(apply=True, verbose=False) -> int`
+Rewrites stale values in place; returns the count corrected (or that *would* be,
+when `apply=False`). Writes a `.bak` backup **only when there's something to
+change**, so a no-op run touches nothing. Emits no process-log entry — it
+corrects a derived cache to match the SSOT rather than changing an
+application's real-world state.
+
+#### `main() -> int`
+Argparse `--apply`. Previews via `resync_country(apply=False, verbose=True)`,
+then writes on `--apply`.
 
 ---
 
