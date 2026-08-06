@@ -87,10 +87,10 @@ def validate_ats_slug(ats: str, slug: str) -> bool:
     elif ats == "lever":
         url = f"https://api.lever.co/v0/postings/{slug}"
     elif ats == "ashby":
-        url = (
-            "https://jobs.ashbyhq.com/api/non-admin/organization/job-board"
-            f"?organizationHostedJobsPageName={slug}"
-        )
+        # Public posting API — the older non-admin/organization endpoint 404s for
+        # every slug now, which made every Ashby board fail validation and never
+        # get added. Must stay in step with crawl.fetch_ashby.
+        url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
     else:
         return False
     try:
@@ -106,7 +106,7 @@ def validate_ats_slug(ats: str, slug: str) -> bool:
         return False
     if ats == "greenhouse":   return bool(data.get("jobs"))
     if ats == "lever":        return isinstance(data, list) and len(data) > 0
-    if ats == "ashby":        return bool(data.get("jobPostings"))
+    if ats == "ashby":        return bool(data.get("jobs"))
     return False
 
 

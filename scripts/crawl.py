@@ -384,28 +384,33 @@ def fetch_lever(slug: str, company: str) -> list[dict]:
 
 
 def fetch_ashby(slug: str, company: str) -> list[dict]:
-    resp = _get(
-        f"https://jobs.ashbyhq.com/api/non-admin/organization/job-board"
-        f"?organizationHostedJobsPageName={slug}"
-    )
+    # Ashby's public posting API. The previous endpoint
+    # (jobs.ashbyhq.com/api/non-admin/organization/job-board?organizationHostedJobsPageName=)
+    # now 404s for every slug, so Ashby boards silently fetched zero jobs —
+    # invisible because an empty board and a dead endpoint look identical in the
+    # crawl output. The field names differ too: `location` (not `locationName`),
+    # `jobUrl` (not `jobPostingUrl`), `publishedAt` (not `publishedDate`).
+    resp = _get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}")
     if not resp:
         return []
     try:
-        raw = resp.json().get("jobPostings", [])
+        raw = resp.json().get("jobs", [])
     except Exception:
         print(f"  [warn] Ashby/{slug}: invalid JSON")
         return []
 
     out = []
     for item in raw:
+        # descriptionPlain is already text; fall back to converting the HTML.
+        jd = item.get("descriptionPlain") or html_to_text(item.get("descriptionHtml", ""))
         out.append({
             "title":       item.get("title", ""),
             "company":     company,
-            "location":    item.get("locationName", item.get("location", "")),
-            "apply_url":   item.get("jobPostingUrl",
-                           f"https://jobs.ashbyhq.com/{slug}/{item.get('id','')}"),
-            "jd_text":     html_to_text(item.get("descriptionHtml", "")),
-            "date_posted": (item.get("publishedDate") or "")[:10] or None,
+            "location":    item.get("location") or "",
+            "apply_url":   item.get("jobUrl") or item.get("applyUrl")
+                           or f"https://jobs.ashbyhq.com/{slug}/{item.get('id','')}",
+            "jd_text":     jd,
+            "date_posted": (item.get("publishedAt") or "")[:10] or None,
             "source":      "ashby",
         })
     return out

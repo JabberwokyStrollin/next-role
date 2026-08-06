@@ -370,7 +370,8 @@ implementation).
 - **Auto-added** by `crawl.auto_add_board` whenever an aggregator listing's apply URL matches a known ATS pattern — `added_via: "auto_discovery"`.
 - **Auto-added** by `ingest.ingest_job` after a successful ingest — `added_via: "ingest"`.
 - **Batch-added** by `backfill_target_boards.py` over already-ingested jobs — `added_via: "backfill_pipeline"`.
-- **Batch-added** by `discover_boards_from_careers.py` after careers-page scrape — `added_via: "careers_page_scrape"`.
+- **Batch-added** by `discover_boards_from_careers.py` after careers-page scrape — `added_via: "careers_page_scrape"` (older rows also carry `"careers_page_discovery"`).
+- **Curated by hand** for a stack or geography gap — `added_via: "manual_stack_curation"` / `"manual_geo_curation"`. The geography set is the Canadian mid-market cohort (Wealthsimple, 1Password, Cohere, Auvik, D2L, …) added to counter a board list weighted toward US enterprises.
 - Dedup key is `(ats, slug)` — the same slug at a different ATS would coexist (unlikely but allowed).
 
 ### Schema
@@ -381,7 +382,7 @@ implementation).
 | `ats` | `"greenhouse"` / `"lever"` / `"ashby"` / `"workday"` / `"smartrecruiters"` | Workday/SmartRecruiters are recorded but skipped at fetch time. |
 | `slug` | string | Company identifier in the board URL. E.g. `"databricks"` for `boards.greenhouse.io/databricks`. |
 | `added` | `YYYY-MM-DD` | Date the entry was added. |
-| `added_via` | string | Provenance: `"seed"` / `"auto_discovery"` / `"ingest"` / `"backfill_pipeline"` / `"careers_page_scrape"`. |
+| `added_via` | string | Provenance: `"seed"` / `"auto_discovery"` / `"ingest"` / `"backfill_pipeline"` / `"careers_page_scrape"` / `"careers_page_discovery"` / `"manual_stack_curation"` / `"manual_geo_curation"`. |
 
 ### Example
 
