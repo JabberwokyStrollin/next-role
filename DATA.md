@@ -613,6 +613,7 @@ forensics.
 | `job_archived` | `scan_no_sponsorship.py`, `scan_foreign_locations.py`, `scan_stale_jobs.py` (the latter two also via `crawl.crawl`'s end-of-run sweeps; `scan_stale_jobs.py` additionally on every `/today` render via `serve.apply_stale_job_check`) | `"Retroactive archive: JD says no sponsorship (\"...<snippet>...\")."`, `"Retroactive archive: foreign-pinned remote location '...'."`, or `"Expired from pipeline: <n>d un-applied (> <N>d since ingest)."` |
 | `application_logged` | `update_status.cmd_log` | `"Application logged. Method: <m>. Country: <c>. CL v<n>. Score at apply: <s>."` |
 | `application_status_change` | `update_status.cmd_status` | `"Status: <old> → <new>."` |
+| `application_reverted` | `update_status.cmd_revert` | `"Application reverted (not actually applied); was status=…"` — a mis-clicked "Mark Applied" undone: the application row is **deleted** and the job returned to `active`. The tracker is reconstructable from this log, which is what makes the deletion safe. |
 | `cover_letter_generated` | `generate_cl.js` | `"Cover letter v<n> generated → <filename>"` |
 | `comp_estimate_generated` | `comp_estimate.py` | `"base target <CUR> <n>; confidence <HIGH\|MED\|LOW>"` |
 | `application_question_generated` | `answer_questions.generate_answer` | `"class=<motivation\|behavioral> version=<n> chars=<n> tokens_in=<n> tokens_out=<n>"` |

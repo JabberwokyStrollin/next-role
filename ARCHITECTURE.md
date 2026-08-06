@@ -138,6 +138,7 @@ file.
 | `APPLY_QUEUE_COUNTRY_QUOTAS` | `dict[str,int] \| None` | Per-country daily target mix for the apply queue (`{"CA":4,"IE":4,"US":4}`). `None` restores pure `apply_rank_score` ordering with no code change. Read by `apply_queue_order`. |
 | `APPLY_QUEUE_MAX_PER_COMPANY` | `int` | Max roles one company may hold **within the bubbled block** (2). Without it a company with deep inventory fills a whole country's quota. Ignored when quotas are `None`. |
 | `DAILY_APPLICATION_GOAL` / `DAILY_APPLICATION_GOAL_DEFAULT` | `int` | The goal is **derived** — `sum(quotas.values())` when quotas are set, else the default (10) — so target and queue shape can't drift. |
+| `DUPLICATE_CHECK_IGNORED_STATUSES` | `frozenset[str]` | Application statuses that do NOT count as "already applied" (`{"withdrawn"}`). In this operator's workflow `withdrawn` has only meant a mis-clicked Mark Applied — there was no undo before `update_status.py revert`. Read by `find_duplicate_application`. |
 | `MAX_ACTIVE_JOBS_PER_COMPANY` | `int` | Stored-inventory ceiling per company (20). Distinct from the apply throttle below: bounds active ROWS, not in-flight APPLICATIONS. Enforced by `scan_company_overflow.py`. |
 | `MAX_ACTIVE_APPS_PER_COMPANY` | `int` | Apply-time throttle — hide a company once N in-flight apps exist (3). |
 | `IN_FLIGHT_STATUSES` | `frozenset[str]` | What "in-flight" means for the throttle: `applied`, `recruiter_screen`, `interview`. `ghosted` is intentionally excluded so dead apps free the slot. |
@@ -574,6 +575,20 @@ with few eligible roles, or too few distinct companies to satisfy
 `APPLY_QUEUE_MAX_PER_COMPANY`, simply contributes fewer. Nothing is dropped when
 that happens; the tail follows immediately in rank order, so the queue is always
 complete.
+
+#### `already_applied_block_reason(job, apps) -> str | None`
+Returns a reason when this role has already been applied to under **some**
+listing, else `None`. Matching is `find_duplicate_application` (company +
+normalized title), which skips `DUPLICATE_CHECK_IGNORED_STATUSES` — so a
+mis-clicked "Mark Applied" that was reverted or withdrawn does **not** suppress
+the role.
+
+Exists because employers re-list one opening under fresh URLs (NetApp: 43 rows
+for one role in three weeks) and, since velocity + freshness are 18 of the
+composite's 130 points, each re-post *outranks* the copy that was applied to —
+consuming a country quota slot. Apply-time only: the job stays in the pipeline
+and on `/job/<id>`. Both surfaces count it separately from the company throttle
+and display the count.
 
 #### `gov_screen_block_reason(job, company) -> str | None`
 Apply-time exclusion predicate parallel to `company_block_reason`: returns a
@@ -1642,7 +1657,7 @@ Argparse: `--top N` (default 10), `--all` (include archived),
 ## `scripts/update_status.py`
 
 **Role.** Application tracker. Logs new applications, transitions status,
-and lists current applications. No Claude. Mutates
+lists current applications, and reverts a mis-clicked one. No Claude. Mutates
 `data/application_tracker.json` and (when logging a new application)
 flips the corresponding job in `job_pipeline.json` to `applied`.
 
@@ -1678,6 +1693,25 @@ Implements `update_status.py log --job-id UUID [--method M] [--plain-text] [--no
   `composite_score_at_apply` filled from the SSOT `composite_score`.
 - Flips the job's `pipeline_status` to `applied`.
 - Logs an `application_logged` event.
+
+#### `cmd_revert(args) -> None`
+Implements `update_status.py revert --app-id UUID` — an **undo**, not a status
+transition.
+
+- **Deletes** the application record.
+- Returns the job to `active`, but only if it's still parked at `applied` — a
+  since-archived or re-applied row is left alone.
+- Logs an `application_reverted` event. The deletion is safe precisely because
+  of this: the tracker is reconstructable from `process_log.json`.
+
+Exists because `withdrawn` was being used as a stand-in for undo, which
+corrupted three things at once: the application counted toward metrics,
+`find_duplicate_application` badged the role as already-applied, and the job row
+stayed at `pipeline_status="applied"` forever — so a role that was never applied
+to disappeared from every surface. Surfaced in the UI as the **"Not applied
+(undo)"** button on each row of the Status-updates section, routed through
+`POST /today/status` with `action=revert` (handled before `STATUS_ACTION_MAP`,
+which deliberately does not contain it).
 
 #### `cmd_status(args) -> None`
 Implements `update_status.py status --app-id UUID --status NAME [--rejection-reason R] [--notes T]`.
