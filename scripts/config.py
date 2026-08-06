@@ -1011,7 +1011,87 @@ def _first_match_evidence(text: str, patterns: list[_re.Pattern],
     return None
 
 
-def classify_inbox_email(subject: str, body: str) -> tuple[str | None, str | None, str]:
+# ─── "Needs a reply" detection ───────────────────────────────────────────────
+#
+# A recruiter asking a clarifying question — "can you confirm you're open to
+# relocating to Ireland?" — is neither a rejection nor an interview invitation,
+# so it matched none of the four signals above and `inbox_scan` dropped it on
+# the floor. It never reached the staged queue, so a real human waiting on a
+# reply looked identical to silence.
+#
+# Two independent signals must BOTH hold, which is what keeps this off the
+# acknowledgement flood:
+#   1. a human sender — boilerplate comes from no-reply@ / careers@ / talent@
+#   2. the mail actually asks something
+# Keyword matching alone would fire on "Questions? Just reply to this email" in
+# every automated acknowledgement; the sender test excludes those outright.
+_AUTOMATED_SENDER_RE: _re.Pattern = _re.compile(
+    r"(?:^|[<\s])(?:"
+    r"no[-_.]?reply|do[-_.]?not[-_.]?reply|donotreply|noreply"
+    r"|careers?|jobs?|talent|recruit(?:ing|ment)?|hr|people(?:ops)?"
+    r"|notifications?|mailer|postmaster|bounce|automated?|system"
+    r")[-_.a-z0-9]*@",
+    _re.I,
+)
+
+_NEEDS_REPLY_PATTERNS: list[_re.Pattern] = [
+    _re.compile(r"\b(?:can|could|would)\s+you\s+(?:please\s+)?(?:confirm|clarify|let\s+me\s+know|share|tell\s+me)\b", _re.I),
+    _re.compile(r"\bjust\s+(?:to\s+)?(?:confirm|check(?:ing)?|clarify)\b", _re.I),
+    _re.compile(r"\bwant(?:ed)?\s+to\s+(?:confirm|check|clarify|make\s+sure)\b", _re.I),
+    _re.compile(r"\bare\s+you\s+(?:still\s+)?(?:interested|open\s+to|willing|able)\b", _re.I),
+    _re.compile(r"\bwould\s+you\s+be\s+(?:open|willing|able|interested)\b", _re.I),
+    _re.compile(r"\bquick\s+question\b", _re.I),
+    _re.compile(r"\ba\s+(?:few|couple\s+of)\s+questions?\b", _re.I),
+    _re.compile(r"\b(?:confirm|clarify)\s+(?:that|whether|if)\b", _re.I),
+    _re.compile(r"\blet\s+me\s+know\s+(?:if|whether|your)\b", _re.I),
+    _re.compile(r"\b(?:require|need)\s+(?:visa\s+)?sponsorship\b", _re.I),
+    _re.compile(r"\b(?:willing|open)\s+to\s+relocat", _re.I),
+    _re.compile(r"\bwork\s+authoriz(?:ation|ed)\b", _re.I),
+    _re.compile(r"\bsalary\s+expectations?\b", _re.I),
+    _re.compile(r"\bnotice\s+period\b", _re.I),
+]
+
+
+def is_automated_sender(from_header: str) -> bool:
+    """True if the From header looks like an automated mailbox rather than a
+    person. SSOT for the human-sender half of the needs-reply check."""
+    return bool(_AUTOMATED_SENDER_RE.search(from_header or ""))
+
+
+def detect_needs_reply(subject: str, body: str, from_header: str) -> str:
+    """Return the matched snippet if this looks like a human asking a question
+    that wants an answer, else "". Requires a non-automated sender AND a
+    question — see the banner above for why both."""
+    if is_automated_sender(from_header):
+        return ""
+    # Quoted history is stripped BEFORE any matching, not just before the
+    # bare-"?" check: a later message in the thread quotes the original
+    # question, and matching that would re-flag something already answered.
+    prose    = _strip_quoted_reply(body or "")
+    haystack = f"{subject or ''}\n{prose}"
+    ev = _first_match_evidence(haystack, _NEEDS_REPLY_PATTERNS)
+    if ev:
+        return ev
+    # A bare question mark from a human still counts, in the new prose only.
+    if "?" in prose:
+        for line in prose.splitlines():
+            if "?" in line and len(line.strip()) > 12:
+                return line.strip()[:200]
+    return ""
+
+
+def _strip_quoted_reply(body: str) -> str:
+    """Drop quoted history from a reply chain: '>' quotes, and everything after
+    an 'On <date>, <person> wrote:' or '-----Original Message-----' marker."""
+    cut = _re.split(
+        r"\n\s*(?:-{2,}\s*Original Message|On .{0,80}\bwrote:|From:\s)",
+        body or "", maxsplit=1,
+    )[0]
+    return "\n".join(l for l in cut.splitlines() if not l.lstrip().startswith(">"))
+
+
+def classify_inbox_email(subject: str, body: str,
+                         from_header: str = "") -> tuple[str | None, str | None, str]:
     """
     Deterministically classify an inbox email from its subject + body. Returns
     ``(status, reason, evidence)`` where ``status`` is the *email signal*:
@@ -1021,6 +1101,12 @@ def classify_inbox_email(subject: str, body: str) -> tuple[str | None, str | Non
     - ``("offer", None, <snippet>)`` — an offer.
     - ``("interview", None, <snippet>)`` — an advancement signal (recruiter
       screen OR interview invitation).
+    - ``("needs_reply", None, <snippet>)`` — a human asked a question that wants
+      an answer (relocation, sponsorship, salary, availability, a bare "?").
+      Not a status change — see ``suggest_status_transition``, which returns
+      nothing for it. Requires ``from_header``; without one this signal can't
+      fire, because the human-sender half of the test is what keeps it off
+      automated acknowledgements.
     - ``(None, None, "")`` — no signal (includes application-received confirmations).
 
     This is the email's own signal only. The concrete status the operator should
@@ -1047,6 +1133,12 @@ def classify_inbox_email(subject: str, body: str) -> tuple[str | None, str | Non
     ev = _first_match_evidence(haystack, _INTERVIEW_PATTERNS)
     if ev:
         return "interview", None, ev
+
+    # Last, so a rejection or invitation that happens to contain a question is
+    # still classified by its stronger signal.
+    ev = detect_needs_reply(subject, body, from_header)
+    if ev:
+        return "needs_reply", None, ev
 
     return None, None, ""
 
@@ -1089,6 +1181,11 @@ def suggest_status_transition(email_status: str | None, email_reason: str | None
         if current_status == "interview":
             return "interview", None
         return "recruiter_screen", None
+    # needs_reply is deliberately NOT a transition. A recruiter asking whether
+    # you'd relocate is engagement, not a screen — inventing a status change
+    # would both overstate progress and corrupt the funnel metrics. It stages
+    # for the operator to answer; the status moves only when a real signal
+    # arrives.
     return None, None
 
 

@@ -124,6 +124,7 @@ file.
 | `DATA_BACKUP_DIR`, `DATA_BACKUP_RETAIN_DAYS` | Path / int | Daily-snapshot dir (default `data/backups/`; override with `NEXTROLE_BACKUP_DIR` to a path outside the repo so snapshots survive a full `data/` loss) and retention (7). See `scripts/backup_data.py`. |
 | Drill helpers | funcs | `drill_impl_path(n)` / `drill_test_path(n)` (→ `Drill<n>.java` / `Drill<n>Test.java` in the Maven project); `load_drills`/`save_drills`; `next_drill_number()` (max of on-disk `Drill<N>.java` + store numbers, +1); `current_drill()` (highest number); `drills_completed_today()`; `mark_drill_complete(n)`. |
 | `INBOX_SCAN_WINDOW_DAYS` | `int` | Look-back window (14) for `scripts/inbox_scan.py` — INBOX messages received within this many days are scanned for rejection/interview replies, regardless of read state. |
+| `_NEEDS_REPLY_PATTERNS` / `_AUTOMATED_SENDER_RE` | `list[Pattern]` / `Pattern` | Phrase rules for a human asking a question (relocation, sponsorship, salary, notice period, "could you confirm", a bare "?") and the automated-mailbox test (`no-reply@`, `careers@`, `talent@`, …). Consumed via `detect_needs_reply` / `is_automated_sender`. **Both** halves must hold — keyword matching alone fires on "Questions? Just reply to this email" in every automated acknowledgement. |
 | `_POSITION_FILLED_PATTERNS` / `_REJECTION_PATTERNS` / `_OFFER_PATTERNS` / `_INTERVIEW_PATTERNS` | `list[Pattern]` | Deterministic phrase rules for `classify_inbox_email`. Position-filled → rejection reason `position_filled`; general rejection → `generic`; offer → `offer`; advancement (recruiter screen / interview invitation) → signal `interview`. "invite" counts only when followed by an interview/call word (so "invite you to follow us on LinkedIn" is ignored). |
 | `_CONDITIONAL_LEAD_RE` | `Pattern` | Guard used by `_first_match_evidence(..., skip_conditional=True)` to skip rejection phrases embedded in a conditional clause ("If you are not selected …") — application-confirmation boilerplate, not a real rejection. |
 | `_ADVANCE_IN_PROGRESS` | `frozenset` | Statuses (`recruiter_screen`, `interview`) at which a rejection is an interview failure and a further advancement email promotes the screen. Consumed by `suggest_status_transition`. |
@@ -351,14 +352,16 @@ explicit negation token near the word "sponsor". Caller (`ingest.py`) owns
 the discard decision. **Callers skip this for US-derived roles** (the operator
 is a US citizen) — see `ingest.ingest_job` and `scan_no_sponsorship.py`.
 
-#### `classify_inbox_email(subject: str, body: str) -> tuple[str | None, str | None, str]`
+#### `classify_inbox_email(subject: str, body: str, from_header: str = "") -> tuple[str | None, str | None, str]`
 Deterministically classify an inbox email's *own signal*. Returns
 `(status, reason, evidence)`: `("rejected", "position_filled", …)`,
 `("rejected", "generic", …)`, `("offer", None, …)`, `("interview", None, …)`
 (an **advancement** signal — recruiter screen OR interview invitation), or
+`("needs_reply", None, …)`, or
 `(None, None, "")` when no signal is found (including application-received
-confirmations). Order is **rejection → offer → interview** so a rejection that
-mentions "interview"/"offer" isn't mislabeled. This is only what the email says;
+confirmations). Order is **rejection → offer → interview → needs_reply** so a
+rejection that mentions "interview"/"offer" isn't mislabeled, and a rejection or
+invitation containing a question keeps its stronger signal. This is only what the email says;
 the concrete status the operator applies is resolved from the application's
 current status by `suggest_status_transition` (below). Per the "deterministic
 rules in code" principle, the phrase rules live here (the SSOT), never in a
@@ -367,6 +370,27 @@ review, so the rules bias toward recall. `_first_match_evidence(text, patterns,
 skip_conditional=False)` is the private helper returning a context snippet around
 the first matching pattern; `skip_conditional=True` ignores matches inside a
 conditional clause (the "If you are not selected …" confirmation boilerplate).
+
+#### `is_automated_sender(from_header) -> bool` / `detect_needs_reply(subject, body, from_header) -> str`
+The **needs_reply** signal: a human asked something that wants an answer —
+relocation, sponsorship, salary, notice period, "could you confirm", or simply a
+question mark.
+
+Requires **two independent signals**, which is what keeps it off the
+acknowledgement flood: a non-automated sender (`is_automated_sender` rejects
+`no-reply@`, `careers@`, `talent@`, `recruiting@`, …) **and** an actual question.
+Keyword matching alone would fire on "Questions? Just reply to this email",
+which nearly every automated acknowledgement contains.
+
+Quoted history is stripped before any matching (`_strip_quoted_reply` drops `>`
+lines and everything after an "On … wrote:" / "-----Original Message-----"
+marker), so a later message in a thread doesn't re-flag a question already
+answered.
+
+Exists because `inbox_scan` drops any email the classifier returns no signal
+for. A recruiter asking "can you confirm you're open to relocating to Ireland?"
+matched none of the original four signals and was discarded — a real person
+waiting on a reply looked exactly like silence.
 
 #### `suggest_status_transition(email_status, email_reason, current_status) -> tuple[str | None, str | None]`
 The transition SSOT: maps a `classify_inbox_email` signal + the application's

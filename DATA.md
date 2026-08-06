@@ -856,7 +856,8 @@ rejection after any live contact as an interview failure).
 | `from_addr` | string | The email's `From` header (decoded, truncated). |
 | `subject` | string | The email's `Subject` (decoded, truncated). |
 | `received` | ISO date | The email's `Date` header as `YYYY-MM-DD` (`""` if unparseable). |
-| `email_status` | string | The email's own signal: `"rejected"`, `"offer"`, or `"interview"` (advancement — recruiter screen OR interview invitation). Resolved to a concrete `update_status.py` status at surface time by `config.suggest_status_transition`. |
+| `email_status` | string | The email's own signal: `"rejected"`, `"offer"`, `"interview"` (advancement — recruiter screen OR interview invitation), or `"needs_reply"`. Resolved to a concrete `update_status.py` status at surface time by `config.suggest_status_transition` — **except `needs_reply`, which resolves to no status on purpose**: a recruiter's clarifying question is engagement, not a screen, so it stages for the operator to answer and the status moves only when a real signal arrives. |
+| `from_name` | string | Sender display name (falls back to the address), so a `needs_reply` row reads "David Mullen — Genesys" rather than an address. Absent on matches staged before this field existed. |
 | `email_reason` | string \| null | A `REJECTION_REASONS` key (`position_filled` / `generic`) when `email_status="rejected"`; `null` otherwise. |
 | `evidence` | string | Short snippet around the phrase that triggered the classification (operator context). |
 | `detected_at` | ISO datetime | When the scan staged this match. |
