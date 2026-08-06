@@ -301,7 +301,7 @@ applications panel, the `/today` status-updates section, and (via
 | `title` | string | Denormalized. |
 | `apply_url` | URL string | Denormalized. |
 | `location` | string | Denormalized. |
-| `country` | `"CA"` / `"IE"` / `"US"` / `"OTHER"` | From `config.derive_country(location)` (imported by `update_status`). `"US"` only appears for roles ingested while `"US"` was in `TARGET_COUNTRIES` (remote-only US stop-gap). |
+| `country` | `"CA"` / `"IE"` / `"US"` / `"OTHER"` | From `config.derive_country(location)` (imported by `update_status`). `"US"` only appears for roles ingested while `"US"` was in `TARGET_COUNTRIES` (remote-only US stop-gap). **A snapshot taken at log time, not a live value** — improving `derive_country` leaves old rows stale, so re-run `scripts/resync_tracker_country.py` after changing `geography.py`. Nothing reads this field (cover letters re-derive from `location`); it's reporting surface. |
 | `date_applied` | `YYYY-MM-DD` | Today's date at log time. |
 | `application_method` | enum | `greenhouse`, `lever`, `workday`, `builtin`, `linkedin`, `direct`, `other`. |
 | `cover_letter_version` | int | Copied from the job at log time. |

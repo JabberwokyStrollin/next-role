@@ -150,8 +150,14 @@ US roles need none — they're a reluctant **remote-only stop-gap**. The whole
 feature hangs off `geography.TARGET_COUNTRIES` (currently `frozenset({"CA","IE","US"})`;
 remove `"US"` to disable — when absent the US branches never fire and CA/IE
 behavior is byte-identical). Country is **derived on the fly** from `location`
-via `derive_country` (→ `CA`/`IE`/`US`/`OTHER`) —
-no stored field. `derive_country` matches IE/CA before US so a combined
+via `derive_country` (→ `CA`/`IE`/`US`/`OTHER`) — no stored field anywhere in
+the pipeline, with **one exception**: `application_tracker.json` rows carry a
+`country` *snapshot* stamped by `update_status.log_application` at apply time.
+Nothing reads it (it's reporting surface — `generate_cl.js` re-derives from
+`location`), but it goes stale whenever `derive_country` sharpens, so **any
+change to `geography.py` needs a `scripts/resync_tracker_country.py --apply`
+sweep** — the tracker-side parallel of the `scan_foreign_locations.py`
+obligation below. `derive_country` matches IE/CA before US so a combined
 "Remote, Canada/US" posting resolves to the sponsorship-bearing country, and
 never uses a bare `"us"` substring (would match "houston"). Two-letter region
 *codes* (CA provinces `ON`/`BC`/…, US **state codes**) are matched only in an
