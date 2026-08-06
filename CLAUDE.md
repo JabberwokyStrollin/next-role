@@ -67,6 +67,7 @@ from one of these.
 |---|---|---|
 | Component weights (both profiles) + display denominators | `scripts/config.py:COMPONENTS` + `COMPOSITE_MAX` + `PRE_RESEARCH_MAX` | `from config import COMPONENTS, COMPOSITE_MAX, PRE_RESEARCH_MAX` |
 | Title → seniority cap | `scripts/config.py:_SENIORITY_BUCKETS` (via `title_seniority_cap()` / `apply_title_cap()`) | `from config import apply_title_cap` |
+| Banking rank suffix normalization | `scripts/config.py:strip_banking_rank()` (+ `_BANKING_RANK_RE`) | `from config import strip_banking_rank` |
 | Stack keyword scores + stack max + pre-filter title/location lists | `profile/stack_keywords.yaml` | loaded once by `_load_stack_keywords()` and `load_crawl_config()` |
 | Claude's native output ranges (seniority 0-25, domain 0-20) | `profile/scoring_rubric.md` | mirrored in `COMPONENTS[k].native_max`; update both together |
 | Research-queue minimum score | `scripts/config.py:RESEARCH_QUEUE_MIN_SCORE` | `from config import RESEARCH_QUEUE_MIN_SCORE` |
@@ -131,6 +132,28 @@ from one of these.
    to /30): edit `profile/scoring_rubric.md` AND `COMPONENTS["seniority"].native_max`
    in lockstep. The rubric tells Claude the range; `native_max` tells the
    composite math how to multiply it (for both profiles).
+
+9. **Moving the target seniority band takes THREE edits, not one.** The band
+   is currently **Senior** (`_SENIORITY_BUCKETS` bucket A/25; Staff, Lead,
+   Architect and plain unprefixed engineer titles at B/20; Principal at D/0).
+   To move it you must change all of:
+
+   1. `_SENIORITY_BUCKETS` — the per-title **ceiling**.
+   2. `profile/stack_keywords.yaml` `seniority_titles` / `title_exclude` — what
+      **enters** the pipeline at all.
+   3. `profile/scoring_rubric.md` "Seniority Alignment" — what Claude actually
+      **scores highly**.
+
+   Editing only (1) does almost nothing, and this is the trap: the cap is a
+   ceiling, not a score. When the rubric read "score how Staff-level the work
+   is" with a −5 penalty for Senior-scoped JDs, Senior roles averaged ~9.7/25 —
+   nowhere near even the old 15 cap — so raising their ceiling to 25 changed
+   essentially nothing until the rubric was rewritten to score senior-IC fit.
+   Whatever the rubric rewards is the real target band.
+
+   Retuning also only affects **new** ingests. Existing rows keep the old cap
+   until `rescore_all.py --stack-only` re-applies it mechanically (free, from
+   `seniority_raw`).
 
 ### Geography / US target toggle
 

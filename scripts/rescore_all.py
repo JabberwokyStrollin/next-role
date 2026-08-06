@@ -1,10 +1,15 @@
 """
 rescore_all.py — Re-score every active job under the current rubric.
 
-Use after editing profile/scoring_rubric.md or profile/stack_keywords.yaml to
-bring already-ingested jobs in line with the new rules. Mechanical stack score
-is always recomputed (free). Seniority + domain scores are re-fetched from
-Claude (paid API call per job).
+Use after editing profile/scoring_rubric.md, profile/stack_keywords.yaml, or
+config._SENIORITY_BUCKETS to bring already-ingested jobs in line with the new
+rules. Two things are always recomputed for free: the mechanical stack score,
+and the title-based seniority cap (re-applied from `seniority_raw` where
+present). Seniority + domain judgments are re-fetched from Claude (paid API
+call per job) unless --stack-only is passed.
+
+So `--stack-only` is the free way to land a _SENIORITY_BUCKETS retune on rows
+that were ingested under the old structure.
 
 Usage:
     python scripts/rescore_all.py --dry-run             # estimate count + cost, no writes
@@ -26,6 +31,7 @@ import traceback
 
 from config import (
     JOB_PIPELINE_PATH,
+    apply_title_cap,
     compute_stack_score,
     composite_score,
     load_json,
@@ -136,6 +142,24 @@ def main() -> int:
         # Mechanical stack rescore (free).
         new_stack = compute_stack_score(f"{live.get('title','')} {jd_text}")
         live["stack_match_score"] = new_stack
+
+        # Mechanical seniority re-cap (free). Retuning _SENIORITY_BUCKETS leaves
+        # already-ingested rows holding a cap from the old structure, so the
+        # retarget would otherwise only apply to jobs ingested after it. Re-cap
+        # from `seniority_raw` when it's there (the pre-cap value score_jd stores
+        # whenever it caps) and from the stored score otherwise — for a row the
+        # old rules never capped, the stored value IS the raw one.
+        #
+        # This only lowers a score to the new ceiling or restores a raw value the
+        # new ceiling now allows; it can't invent a score above what Claude gave.
+        raw_seniority = live.get("seniority_raw", old_seniority)
+        recapped = apply_title_cap(raw_seniority, live.get("title", ""))
+        if recapped != old_seniority:
+            live["seniority_score"] = recapped
+            if raw_seniority > recapped:
+                live["seniority_raw"] = raw_seniority
+            else:
+                live.pop("seniority_raw", None)
 
         # LLM seniority + domain rescore (paid). Pass title so score_jd
         # applies the mechanical title-cap on the way out.

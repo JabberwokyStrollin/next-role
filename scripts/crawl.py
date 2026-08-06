@@ -41,6 +41,7 @@ from config import (
     compute_stack_score,
     derive_country,
     location_passes,
+    strip_banking_rank,
 )
 from ingest import ingest_job
 
@@ -137,7 +138,12 @@ def pre_filter(title: str, location: str, text: str, cfg: dict,
     """Returns (passes, reason_string). ``source`` lets the US remote-only gate
     be source-aware (remote-only boards count region-only US locations as
     remote — see config.is_remote_role)."""
-    t = title.lower()
+    # Strip a banking corporate rank first ("… - Assistant Vice President").
+    # It's a pay band, not the job; leaving it on would trip the "vice
+    # president" entry in title_exclude and drop an ordinary Senior engineering
+    # role. A real exec title keeps its VP (head noun, not suffix) and is still
+    # excluded. SSOT: config.strip_banking_rank.
+    t = strip_banking_rank(title).lower()
     l = location.lower()
 
     if not any(kw in t for kw in cfg["seniority_titles"]):

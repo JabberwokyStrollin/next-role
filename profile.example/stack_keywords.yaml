@@ -20,8 +20,10 @@ crawl:
   # Title must contain at least one of these (case-insensitive)
   seniority_titles:
     - staff
-    - principal
+    - senior
     - senior staff
+    # 'principal' is intentionally absent — config._SENIORITY_BUCKETS
+    # scores Principal 0, so admitting it here only wastes an ingest.
     - lead engineer
     - lead developer
     - architect
@@ -32,6 +34,7 @@ crawl:
   # "... International"). Multi-word terms work as written; for variants
   # that share a prefix, list each one (e.g. both "intern" and "internship").
   title_exclude:
+    - principal
     - solutions architect
     - delivery architect
     - sales engineer

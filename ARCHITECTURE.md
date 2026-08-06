@@ -135,7 +135,8 @@ file.
 | `US_ACCEPTED_WORK_MODELS` | `frozenset[str]` | **The work-model policy knob.** Which models a US role may have; default `{"remote", "unstated"}` — a *confirmed* office requirement is rejected, but a JD that simply doesn't say is admitted for manual triage. Narrow to `{"remote"}` for confirmed-remote only, or add `"hybrid"` to accept a commute. US-only; CA/IE are never gated on work model. Read by `work_model_discard_reason`. |
 | `MAX_ACTIVE_APPS_PER_COMPANY` | `int` | Apply-time throttle — hide a company once N in-flight apps exist (3). |
 | `IN_FLIGHT_STATUSES` | `frozenset[str]` | What "in-flight" means for the throttle: `applied`, `recruiter_screen`, `interview`. `ghosted` is intentionally excluded so dead apps free the slot. |
-| `_SENIORITY_BUCKETS` | `list[(str, Pattern, int)]` | Ordered (bucket, regex, cap) — first match wins. Used by `title_seniority_cap`. |
+| `_SENIORITY_BUCKETS` | `list[(str, Pattern, int)]` | Ordered (bucket, regex, cap) — first match wins. Target is **Senior** (A/25); Staff, Lead, Architect and plain unprefixed engineer titles share B/20; Principal, VP, Junior are D/0. Used by `title_seniority_cap`. |
+| `_BANKING_RANK_RE` | `Pattern` | Trailing banking corporate rank ("… - Assistant Vice President", "… - AVP"), anchored to a preceding separator so a head-noun executive VP title is left alone. Consumed via `strip_banking_rank`. |
 | `_NO_SPONSORSHIP_PATTERNS` | `list[Pattern]` | Regexes that detect explicit no-sponsorship language in JD text. Single source consumed via `detect_no_sponsorship`. |
 | `_EMPLOYEE_SURVEILLANCE_RE` | `Pattern` | Word-boundary regex (`employee\|worker\|workforce`) matched against an ethics-flag description. Consumed via `is_employee_surveillance_flag`. |
 | `_MASS_SURVEILLANCE_DESC_RE` | `Pattern` | Alternation regex for mass-surveillance indicators (`mass surveillance`, `facial recognition`, `law enforcement`, `intelligence agencies`, `predictive policing`, `border surveillance`, `spyware`, `government surveillance`). Consumed via `is_mass_surveillance_flag`. |
@@ -241,20 +242,55 @@ Number of full days between an ISO date string and today. Raises
 catch it and degrade gracefully.
 
 #### `title_seniority_cap(title: str) -> tuple[str, int]`
-Classifies a job title into one of four seniority buckets and returns
-`(bucket_letter, max_seniority_score)`:
+Classifies a job title into a seniority bucket and returns
+`(bucket_letter, max_seniority_score)`. **Target is Senior:**
 
 | Bucket | Examples | Cap |
 |---|---|---|
-| **A** — at target | Staff, Senior Staff, Tech Lead, Architect | 25 |
-| **B** — one step below | Senior, Sr. | 15 |
-| **C** — one step above | Principal | 15 |
-| **D** — out of range | Distinguished, Fellow, VP, Junior, Intern, Associate Engineer, Senior Principal | 0 |
+| **A** — at target | Senior, Sr. | 25 |
+| **B** — one step off, either direction | Staff, Senior Staff, Lead Engineer, Tech Lead, Architect (above); Software / Backend / Data / Platform Engineer, Engineer II–III (below) | 20 |
+| **D** — out of range | Principal, Distinguished, Fellow, VP, Junior, Intern, Associate Engineer | 0 |
 
-Order matters: more specific patterns (e.g. `Senior Staff`, `Senior
-Principal`) appear before broader ones (`Senior`, `Principal`) so substring
-matches are first-wins. Defaults to `("A", 25)` if no bucket matches —
-under-cap rather than silently zero an unfamiliar title.
+Bucket **C** no longer exists: Principal moved to D and is also excluded at
+intake (removed from the YAML `seniority_titles`, added to `title_exclude`), so
+the D entry is defense-in-depth for a manual paste, which bypasses both
+pre-filters.
+
+A **banking rank suffix is stripped first** via `strip_banking_rank`, so
+"Sr Software Developer - Assistant Vice President" is classified on
+"Sr Software Developer" → bucket A, not zeroed as a VP.
+
+Order matters: more specific patterns appear before broader ones, first match
+wins. `Senior Staff` is matched **before** bucket A's bare `\bsenior\b`, or it
+would read as target. Defaults to `("B", 20)` when nothing matches — an
+unrecognized title is far likelier to be an unprefixed engineering role than a
+Senior one, and the previous `("A", 25)` default silently granted target credit
+to anything the patterns missed.
+
+> Retuning these buckets only affects **new** ingests. Rows scored under the old
+> structure keep their old cap until `rescore_all.py --stack-only` re-applies
+> the cap mechanically (free, no Claude call) from `seniority_raw`.
+>
+> The cap is a **ceiling, not a score**. Moving the target band also needs
+> `profile/scoring_rubric.md` updated — Claude decides what actually reaches the
+> ceiling, and a rubric aimed at a different band will keep the new target
+> scoring low regardless of its cap.
+
+#### `strip_banking_rank(title: str) -> str`
+Removes a trailing banking corporate rank (`_BANKING_RANK_RE`):
+`"Sr Software Developer - Assistant Vice President"` → `"Sr Software Developer"`.
+Banks append an internal pay-band rank to ordinary engineering titles; it
+describes signing authority, not the job.
+
+Anchored to a **preceding separator**, which is what distinguishes it from a
+genuine executive role: `"Vice President, Data Engineering"` puts the rank at
+the head and is returned unchanged, so it still hits the VP exclusion. Never
+strips a title down to empty.
+
+SSOT for the normalization — applied by `title_seniority_cap` and by both
+pre-filters before their exclude + seniority checks, so one rule covers ranking
+and intake. Without it these rows failed twice: `vice president` is in the YAML
+`title_exclude` (intake rejected them) and matched bucket D (seniority zeroed).
 
 #### `apply_title_cap(raw_seniority: int, title: str) -> int`
 Clamps a raw Claude seniority score (0-25) by the title bucket's cap.
