@@ -75,6 +75,27 @@ REQUEST_DELAY_S  = 1.2   # between requests generally
 LINKEDIN_DELAY_S = 6.0   # deliberately slow — see the module docstring
 LINKEDIN_CAP     = 15    # hard ceiling per run even with --include-linkedin
 
+# Statuses that say nothing about the posting and are worth one more try.
+#
+# A 517-row run produced 16 x HTTP 202 (Toast, GoDaddy) and 8 x 403 (ZoomInfo).
+# What was actually going on took a few passes to pin down, and the honest
+# answer is that some hosts are simply not verifiable from here:
+#   - A single hand request to a Toast URL, before any bulk run, returned 200
+#     with the job title in the body — so the postings are live.
+#   - Retrying recovered only 4 of 26.
+#   - Spacing those requests ~21s apart still returned 202 every time.
+# So it is IP-level throttling with a cooldown longer than a run, not a
+# per-request transient. Retrying is still worth its one extra request for the
+# genuinely transient cases, but it does NOT fix Toast or ZoomInfo.
+#
+# Those rows stay `unknown` and are never archived, which is the correct
+# outcome: unverifiable is not dead. Do NOT be tempted to treat 202 as alive —
+# that stamps date_last_verified off a throttle response whose body was never
+# the posting.
+_TRANSIENT_STATUSES = frozenset({202, 408, 425, 429, 403, 500, 502, 503, 504})
+RETRY_BACKOFF_S = 4.0
+FETCH_ATTEMPTS  = 2
+
 # Phrases boards use when the URL still resolves but applications are closed.
 _DEAD_TEXT_RE = re.compile(
     r"no longer accepting applications"
@@ -139,19 +160,35 @@ def classify_url(url: str, session: requests.Session | None = None) -> tuple[str
         return "unknown", "no apply_url"
     if "jobs.ashbyhq.com" in url:
         return _classify_ashby(url, session)
-    get = (session or requests).get
-    try:
-        resp = get(url, headers=HEADERS, timeout=20, allow_redirects=True)
-    except requests.Timeout:
-        return "unknown", "timeout"
-    except Exception as e:                                   # noqa: BLE001
-        return "unknown", f"{type(e).__name__}"
+
+    # One retry after a backoff on transient answers. A definitive status (404,
+    # 410, 200) short-circuits immediately — only the ambiguous ones cost a
+    # second request, so a healthy run is no slower.
+    resp, failure = None, ("unknown", "no response")
+    for attempt in range(FETCH_ATTEMPTS):
+        try:
+            r = (session or requests).get(url, headers=HEADERS, timeout=20,
+                                         allow_redirects=True)
+            if r.status_code not in _TRANSIENT_STATUSES:
+                resp = r
+                break
+            failure = ("unknown", f"HTTP {r.status_code}")
+        except requests.Timeout:
+            failure = ("unknown", "timeout")
+        except Exception as e:                               # noqa: BLE001
+            failure = ("unknown", f"{type(e).__name__}")
+        if attempt + 1 < FETCH_ATTEMPTS:
+            time.sleep(RETRY_BACKOFF_S)
+    if resp is None:
+        # Still ambiguous after the retry — say so rather than guess. Reported
+        # detail keeps the last observed cause so a run's unknowns are readable.
+        return failure
 
     if resp.status_code in (404, 410):
         return "dead", f"HTTP {resp.status_code}"
     if resp.status_code != 200:
-        # 403/429 mean we were blocked, 5xx means the host is unwell. Neither
-        # says anything about the posting.
+        # Anything else non-200 that isn't in the transient set — nothing about
+        # the posting can be concluded from it.
         return "unknown", f"HTTP {resp.status_code}"
 
     # Greenhouse (and others) answer 200 and bounce a removed posting to the
@@ -180,6 +217,45 @@ def select_targets(jobs: list[dict], co_by_id: dict, limit: int,
     return ordered[:limit]
 
 
+def interleave_by_host(rows: list[dict]) -> list[dict]:
+    """Round-robin the selected rows across apply-URL hosts, preserving order
+    within each host.
+
+    Selection is by apply-queue rank, which clusters one company's rows
+    together — Toast had ~20 consecutive rows, so the 1.2s global delay meant 20
+    hits on one host in 24 seconds. Interleaving spreads each host's rows across
+    the whole run at no extra wall-clock cost: measured on 408 rows it cuts the
+    worst same-host run from 24 to 3 and lifts Toast's minimum gap from 1 row to
+    18 (~21s).
+
+    This is a politeness/burstiness improvement, and it is worth having on those
+    grounds alone — but it did **not** recover the hosts that throttled. Toast
+    still answers 202 at 21s spacing (see `_TRANSIENT_STATUSES`). Don't read a
+    low unknown count as proof this fixed anything.
+
+    Order here affects only request sequencing, never which rows are checked —
+    the ``--limit`` cut happens before this, on rank.
+
+    Each row is placed at its *fractional* position within its own host —
+    ``(i + 0.5) / n`` — and everything is then sorted on that. Plain round-robin
+    is not enough: one host dominates (Greenhouse held 193 of 408 rows), so
+    draining a row per host per pass empties the small buckets early and leaves
+    the dominant host as one solid block at the tail. Measured, that turned a
+    worst-case run of 24 into 128. Fractional spreading keeps every host evenly
+    distributed across the whole sequence regardless of how lopsided the mix is.
+    """
+    buckets: dict = {}
+    for r in rows:
+        buckets.setdefault(urlparse(r.get("apply_url") or "").netloc, []).append(r)
+    keyed: list[tuple[float, str, dict]] = []
+    for host, group in buckets.items():
+        n = len(group)
+        for i, r in enumerate(group):
+            keyed.append(((i + 0.5) / n, host, r))
+    keyed.sort(key=lambda k: (k[0], k[1]))       # host name breaks ties, so it's stable
+    return [r for _pos, _host, r in keyed]
+
+
 def scan_dead_links(apply: bool = False, limit: int = _DEFAULT_LIMIT,
                     include_linkedin: bool = False, check_all: bool = False,
                     verbose: bool = True) -> tuple[int, int, int]:
@@ -188,7 +264,10 @@ def scan_dead_links(apply: bool = False, limit: int = _DEFAULT_LIMIT,
     ``(n_dead, n_alive, n_unknown)``."""
     jobs     = load_json(JOB_PIPELINE_PATH)
     co_by_id = {c["company_id"]: c for c in load_json(COMPANY_REGISTRY_PATH)}
-    targets  = select_targets(jobs, co_by_id, limit, include_linkedin, check_all)
+    # Rank-order + limit first (so the most imminent roles are the ones covered),
+    # then interleave hosts for the request loop to avoid per-host throttling.
+    targets  = interleave_by_host(
+        select_targets(jobs, co_by_id, limit, include_linkedin, check_all))
 
     dead, alive, unknown = [], [], []
     li_seen = 0
@@ -204,8 +283,12 @@ def scan_dead_links(apply: bool = False, limit: int = _DEFAULT_LIMIT,
         (dead if verdict == "dead" else alive if verdict == "alive" else unknown).append((j, detail))
         if verbose:
             mark = {"dead": "DEAD ", "alive": "ok   ", "unknown": "?    "}[verdict]
+            # flush per row: Python block-buffers stdout when it's redirected to
+            # a file, so a 517-row run sat at 0 bytes for 20 minutes with no way
+            # to tell progress from a hang.
             print(f"  [{i}/{len(targets)}] {mark} {detail[:34]:36} "
-                  f"{(j.get('company_name') or '?')[:16]:18} {(j.get('title') or '?')[:38]}")
+                  f"{(j.get('company_name') or '?')[:16]:18} {(j.get('title') or '?')[:38]}",
+                  flush=True)
         time.sleep(LINKEDIN_DELAY_S if li else REQUEST_DELAY_S)
 
     if not apply:
