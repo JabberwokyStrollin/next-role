@@ -1034,6 +1034,20 @@ _AUTOMATED_SENDER_RE: _re.Pattern = _re.compile(
     _re.I,
 )
 
+# Mail sent BY an applicant-tracking platform is automated whatever the local
+# part says. Salesforce's acknowledgement arrives as `salesforce@myworkday.com`,
+# whose local part is just the company name and so passed the local-part test
+# above — the domain is the reliable signal.
+_ATS_SENDER_DOMAIN_RE: _re.Pattern = _re.compile(
+    r"@(?:[a-z0-9-]+\.)*(?:"
+    r"myworkday\.com|workday\.com|greenhouse\.io|lever\.co|ashbyhq\.com"
+    r"|icims\.com|taleo\.net|successfactors\.com|smartrecruiters\.com"
+    r"|workable\.com|jobvite\.com|bamboohr\.com|breezy\.hr|teamtailor\.com"
+    r"|applytojob\.com|recruitee\.com|hire\.lever\.co|myworkdayjobs\.com"
+    r")\b",
+    _re.I,
+)
+
 _NEEDS_REPLY_PATTERNS: list[_re.Pattern] = [
     _re.compile(r"\b(?:can|could|would)\s+you\s+(?:please\s+)?(?:confirm|clarify|let\s+me\s+know|share|tell\s+me)\b", _re.I),
     _re.compile(r"\bjust\s+(?:to\s+)?(?:confirm|check(?:ing)?|clarify)\b", _re.I),
@@ -1054,8 +1068,15 @@ _NEEDS_REPLY_PATTERNS: list[_re.Pattern] = [
 
 def is_automated_sender(from_header: str) -> bool:
     """True if the From header looks like an automated mailbox rather than a
-    person. SSOT for the human-sender half of the needs-reply check."""
-    return bool(_AUTOMATED_SENDER_RE.search(from_header or ""))
+    person. SSOT for the human-sender half of the needs-reply check.
+
+    Two tests: a boilerplate local part (``no-reply@``, ``careers@``, …) and an
+    ATS platform domain. The domain test exists because Workday sends as
+    ``salesforce@myworkday.com`` — a local part that is just the company name,
+    which sails past the first test."""
+    hdr = from_header or ""
+    return bool(_AUTOMATED_SENDER_RE.search(hdr)
+                or _ATS_SENDER_DOMAIN_RE.search(hdr))
 
 
 def detect_needs_reply(subject: str, body: str, from_header: str) -> str:
@@ -1072,11 +1093,16 @@ def detect_needs_reply(subject: str, body: str, from_header: str) -> str:
     ev = _first_match_evidence(haystack, _NEEDS_REPLY_PATTERNS)
     if ev:
         return ev
-    # A bare question mark from a human still counts, in the new prose only.
-    if "?" in prose:
-        for line in prose.splitlines():
-            if "?" in line and len(line.strip()) > 12:
-                return line.strip()[:200]
+    # A bare question mark from a human still counts, in the new prose only —
+    # but the question has to be aimed at the reader. Boilerplate is full of
+    # rhetorical ones ("So what's next?", "Questions?", "Why join us?"), and
+    # Salesforce's acknowledgement was flagged on exactly that. A question that
+    # genuinely wants an answer from the candidate almost always says "you" or
+    # "your"; a rhetorical section heading almost never does.
+    for line in prose.splitlines():
+        s = line.strip()
+        if "?" in s and len(s) > 12 and _re.search(r"\byou\b|\byour\b", s, _re.I):
+            return s[:200]
     return ""
 
 
