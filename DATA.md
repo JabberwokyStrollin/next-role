@@ -58,7 +58,8 @@ JSONL logs have no foreign keys to the rest — they're parallel.
 | `email_staged.json` | JSON array | Parsed LinkedIn alert jobs awaiting per-row ingest | `linkedin_fetch.py`, `prefilter_staged.py`, `cleanup_staged_jd.py`, `serve.py` | `serve.py` `/today` |
 | `inbox_matches.json` | JSON array | Staged rejection / interview / offer email matches awaiting one-click review | `inbox_scan.py`, `serve.py` (apply/dismiss) | `serve.py` `/today` |
 | `inbox_scan_state.json` | JSON object | Cross-run `processed_message_ids` (every message examined, matched or not) for the inbox scanner's own dedup | `inbox_scan.py` | `inbox_scan.py` |
-| `drills.json` | JSON array | Claude-generated code drills (prompt, partial interface, status, review feedback) for the `/today` Code-drills section | `scripts/drills.py`, `serve.py` (complete) | `serve.py` `/today` |
+| `discarded_urls.json` | JSON object | Ledger of apply URLs the pipeline already judged and discarded, so the crawl stops re-fetching and re-scoring them | `scripts/ingest.py` (on every discard), `scripts/discard_ledger.py` | `scripts/crawl.py` |
+| `drills.json` | JSON array | Claude-generated code drills, each a 3–6 **part** series (per-part prompt, partial interface, status, review feedback) for the `/today` Code-drills section | `scripts/drills.py`, `serve.py` (complete) | `serve.py` `/today` |
 | `backups/<date>/` | dir of JSON | Daily local snapshots of the `data/*.json` files (recovery from a stray delete / corrupt write) | `scripts/backup_data.py` (via `serve.py` `/today`) | manual recovery |
 | `crawl_log.jsonl` | JSONL | Per-run crawl summaries (funnel breakdown) | `crawl.py` | manual inspection |
 | `jd_fetch_log.jsonl` | JSONL | Per-URL JD-fetch diagnostics from `linkedin_fetch._fetch_jd_text` | `linkedin_fetch.py` | manual inspection |
@@ -619,9 +620,10 @@ forensics.
 | `application_question_generated` | `answer_questions.generate_answer` | `"class=<motivation\|behavioral> version=<n> chars=<n> tokens_in=<n> tokens_out=<n>"` |
 | `application_question_edited` | `answer_questions.save_edit` | `"version=<n> chars=<n>"` |
 | `application_question_finalized` | `answer_questions.finalize_answer` | `"version=<n> chars=<n>"` |
-| `drill_generated` | `drills.generate_drill` | `"<Generated\|Regenerated> Drill <n> (java): <title>"`. Also carries the full `prompt`, `interface`, and a `regenerated` bool on the event — the durable record of every drill prompt created (the `drills.json` store keeps only the latest active version). |
-| `drill_reviewed` | `drills.review_drill` | `"Reviewed Drill <n>."` |
-| `drill_solved` | `drills.solve_drill` | `"Generated reference solution for Drill <n>."` |
+| `drill_generated` | `drills.generate_drill` | `"<Generated\|Regenerated> Drill <n> (java): <title> — <k> parts"`. Also carries the `premise`, the full `parts` array (each with its `title`/`prompt`/`interface`), and a `regenerated` bool on the event — the durable record of every drill series created (the `drills.json` store keeps only the latest active version). |
+| `drill_part_reverted` | `drills.revert_part` | `"Reverted Drill <n> part <m> to active (grade, reference answer and last review dropped)."` Carries `part` and the `files` rewritten in the Maven project. The undo for a mis-clicked Finish — parallel to `application_reverted`. |
+| `drill_reviewed` | `drills.review_drill` | `"Reviewed Drill <n> part <m> (<skill> <s>/5, …)."` Carries the `part` number and the full `assessment` object (`null` when the grade didn't parse) — the durable record of every grade, since `drills.json` keeps only the latest per part. |
+| `drill_solved` | `drills.solve_drill` | `"Generated reference solution for Drill <n> part <m>; appended Correct Code to <files>."` Carries the `part` number and `wrote_correct_code` (the paths appended to in the Maven project, `[]` when none existed). |
 
 ### Example
 
@@ -925,31 +927,117 @@ later. See `ARCHITECTURE.md` → `inbox_scan.py` "IMAP round-trip budget".
 
 ---
 
-## `data/drills.json`
+## `data/discarded_urls.json`
 
-**Role.** Claude-generated interview-prep coding drills for the `/today` "Code
-drills" section. Each drill is a short, deliberately underspecified prompt with
-a partial interface (method names + params, **no return types**). The actual
-`Drill<N>.java` + `Drill<N>Test.java` live in the sibling Maven project
-(`config.MANUAL_CODE_DRILLS_DIR`, default `../manual-code-drills`), **not** here;
-this file only holds the generated prompts, status, and review feedback.
+**Role.** Memory of postings the pipeline already rejected. A discard never
+enters `job_pipeline.json`, which is where the crawl's URL dedup set comes from
+— so without this ledger every crawl rediscovers, re-fetches and re-processes
+the same rejects forever. That is expensive rather than merely wasteful, because
+the work-model gate can only run **after** `score_jd`: each retry costs a JD
+fetch plus a full Sonnet call before reaching the same verdict. Measured before
+the ledger existed: 123 postings re-processed per crawl, **940 discard events
+across only 165 unique URLs**, 860 wasted scoring calls and 10.1 hours over 7
+runs, for zero ingests.
 
 **Lifecycle.**
 
-- **Written** by `scripts/drills.py generate` (`config.save_drills`). The number
-  only advances once the current drill is marked **complete**: while the current
-  drill is `active`, regenerating *replaces* it at the same number (a reroll);
-  otherwise a new record takes the next number — one past the highest
+- **Written** by `scripts/ingest.py` via `config.record_discarded_url` at all
+  five discard gates (validation, location, ethics, no-sponsorship, work-model).
+  Re-discarding a URL overwrites its entry rather than duplicating it.
+- **Read** by `scripts/crawl.py`, which skips ledger URLs *before* any network
+  work and counts them as `discard_skips` / `funnel.discard_ledger` in
+  `crawl_log.jsonl` — a silent skip set would make a quiet crawl unexplainable.
+- **Deliberately NOT read by manual ingest.** A URL pasted into `/` or
+  `run.py --url` is an explicit operator decision and is always processed.
+- **Managed** by `scripts/discard_ledger.py` — summarise, `--backfill` from
+  `process_log.json` (`job_discarded` events carry `source_url`, so the memory
+  is recoverable retroactively), or delete by `--reason` / `--all`.
+- **Never expires.** Entries are only removed deliberately.
+
+**Reason codes** are `config.DISCARD_REASONS` — `validation`, `location`,
+`ethics`, `no_sponsorship`, `work_model`. They are the reset selector, so
+renaming one orphans existing entries.
+
+> **Loosening a policy requires a reason-scoped reset.** Widen
+> `US_ACCEPTED_WORK_MODELS` to accept `"hybrid"` and every `work_model` entry
+> becomes a role the operator would now take but the crawl will never look at
+> again. Run `python scripts/discard_ledger.py --reason work_model --apply`.
+> This is the ledger's parallel of the `scan_no_sponsorship.py` /
+> `scan_foreign_locations.py` retroactive sweeps.
+
+### Schema
+
+A JSON object keyed by apply URL:
+
+| Field | Type | Notes |
+|---|---|---|
+| `reason` | string | A `config.DISCARD_REASONS` code. Unknown codes are stored rather than dropped (losing the memory is worse than an unrecognised label) but aren't selectable by a reason-scoped reset. |
+| `detail` | string | The gate's own message, truncated to 200 chars. Display/debug only. |
+| `at` | ISO datetime | When recorded. Backfilled entries carry the original log timestamp. |
+| `company`, `title` | string | Denormalised for readable `discard_ledger.py` output. |
+
+### Example
+
+```json
+{
+  "https://boards.greenhouse.io/acme/jobs/4412": {
+    "reason": "work_model",
+    "detail": "US role is hybrid; accepted: remote/unstated",
+    "at": "2026-08-09T18:22:41+00:00",
+    "company": "Acme Corp",
+    "title": "Staff Software Engineer"
+  }
+}
+```
+
+---
+
+## `data/drills.json`
+
+**Role.** Claude-generated interview-prep coding drills for the `/today` "Code
+drills" section. Each drill is a **multi-part series**: one small theme split
+into 3–6 parts (`config.DRILL_MIN_PARTS`..`DRILL_MAX_PARTS`), each a short,
+deliberately underspecified prompt with a partial interface (method names +
+params, **no return types**) sized for a single
+~`config.DRILL_PART_TARGET_MINUTES` sitting. Part 1 is the plain working
+version; each later part adds exactly one gotcha. The actual `Drill<N>.java` +
+`Drill<N>Test.java` live in the sibling Maven project
+(`config.MANUAL_CODE_DRILLS_DIR`, default `../manual-code-drills`), **not** here
+— **one file per drill, shared and extended by all its parts**. This file only
+holds the generated prompts, per-part status, and review feedback.
+
+**Lifecycle.**
+
+- **Written** by `scripts/drills.py generate` (`config.save_drills`).
+  Regenerating *replaces* the current drill at the same number (a reroll) **only
+  while none of its parts are complete** — once a sitting is banked, a reroll
+  would discard that work, so a new record takes the next number instead (as it
+  also does when the drill is finished). The next number is one past the highest
   `Drill<N>.java` in the Maven project and the highest number in the store
   (`config.next_drill_number`). The store therefore keeps only the latest version
-  of an active drill; the full history of every generated prompt lives in the
+  of an active drill; the full history of every generated series lives in the
   process log (`drill_generated` events).
-- **Mutated by** `scripts/drills.py review` (appends to `feedback`) and
-  `serve.py` via `config.mark_drill_complete` (sets `status`/`completed_at`).
-- **Read** by `serve.py` for the current drill (`config.current_drill`), the
-  drills-completed-today meter (`config.drills_completed_today`), and
-  `section_done`.
+- **Mutated by** `scripts/drills.py review` / `solve` (append to the **part's**
+  `feedback` and overwrite its `assessment` / set its `solution`) and `serve.py`
+  via `config.mark_drill_part_complete` (sets the part's `status`/`completed_at`,
+  and the record's once the last part lands).
+- **Read** by `serve.py` for the current drill (`config.current_drill`) and its
+  current part (`config.current_drill_part`), the parts-completed-today meter
+  (`config.drills_completed_today`), and `section_done`. Also the **sole input
+  to the proficiency profile** (`config.drill_proficiency`), which is derived on
+  read from the per-part `assessment` objects and never stored — so
+  re-reviewing a part updates the profile with no migration and no chance of a
+  stale copy. That profile is **recency-weighted** (`config.DRILL_GRADE_HALF_LIFE`) so
+  improvement shows up and old grades don't anchor it, and is fed back into the
+  next `generate` as its `## Targeting` section.
 - **Never deleted.**
+
+**Legacy records.** Drills generated before the multi-part split have no
+`parts`; they carry `prompt` / `interface` / `feedback` / `solution` on the
+record itself. `config.drill_parts` **adapts these on read** into an equivalent
+one-part series, so every surface sees the same shape and no migration was
+needed. The first mutation of such a record materializes that adapted part into
+`parts` and leaves the old top-level fields in place.
 
 ### Schema
 
@@ -959,29 +1047,63 @@ A JSON array; each record:
 |---|---|---|
 | `number` | int | Drill number (continues the `Drill<N>.java` sequence). Primary key. |
 | `language` | string | `"java"` (only language currently generated). |
-| `title` | string | Short generated name. |
-| `prompt` | string | The interview-style, underspecified problem statement. No hints. |
-| `interface` | list[string] | Method-name-with-params strings, **without return types** (deciding those is part of the drill). |
-| `status` | `"active"` / `"complete"` | `complete` once marked done. |
+| `title` | string | Short generated name for the whole series. |
+| `premise` | string | The **drill-level overview** (3–5 sentences): what is being built, who calls it and why, and that it's one class extended across sittings. Repeated at the top of every part's pasteable comment as the standing brief. Deliberately carries **no** performance / ordering / concurrency / immutability language — those are later-part twists, and naming one here would hand it over on day one. Never names the class (it's always `Drill<N>`). |
+| `parts` | list[object] | The series, in order — see the part schema below. |
+| `status` | `"active"` / `"complete"` | `complete` once **every** part is complete. |
 | `created_at` | ISO datetime | When generated. |
-| `completed_at` | ISO datetime / `null` | Set by `mark_drill_complete`; its date drives the daily goal. |
-| `feedback` | list[object] | Review history: `{"at": ISO, "text": <markdown feedback>}`, appended by each review. |
-| `solution` | object / absent | The reference "correct answer": `{"at": ISO, "text": <markdown: design notes + Java impl + test>}`. Written by `drills.solve_drill`, overwritten on regenerate; absent until first requested. |
+| `completed_at` | ISO datetime / `null` | Set when the last part completes. |
+| `prompt`, `interface`, `feedback`, `solution` | — | **Legacy only** (pre-`parts` records); see *Legacy records* above. Not written for new drills. |
+
+Each entry in `parts`:
+
+| Field | Type | Notes |
+|---|---|---|
+| `part` | int | 1-based position in the series. |
+| `title` | string | Short name for this part. Never shown for parts the operator hasn't reached. |
+| `prompt` | string | The interview-style, underspecified statement for **this part only**. No hints, and it never names the gotcha as a warning. Underspecified means the *semantics* are open (case sensitivity, tie-breaking, overlap handling), never that the task is vague. |
+| `tasks` | list[string] | **At most 3** imperative steps — what to actually *do* this sitting, in order, the last being the tests. The canonical shape is *"Decide how the bookings will be stored."* / *"Write the book method."* / *"Write tests for it."* — one design decision, **one method**, its tests. Scope, never solution: naming the work is allowed, naming the answer is not. Absent on legacy records; renders as the "This sitting:" block. |
+| `interface` | list[string] | Method-name-with-params strings, **without return types** (deciding those is part of the drill) — only the methods **this part** introduces; may be empty when a part only changes existing behaviour. **At most one per part**, including part 1 — one method plus its tests is the sitting. Every operation the prompt or tasks describe must be reachable through these or an earlier part's methods. |
+| `status` | `"active"` / `"complete"` | `complete` once marked done. |
+| `completed_at` | ISO datetime / `null` | Set by `mark_drill_part_complete`; its date drives the daily goal. |
+| `feedback` | list[object] | Review history for this part: `{"at": ISO, "text": <markdown feedback>}`, appended by each review. |
+| `assessment` | object / absent | The **grade**, from the same review call: `{"at": ISO, "skills": {<key>: 0-5}, "idioms_used": [<key>, …]}`, keyed by `config.DRILL_SKILLS` / `config.DRILL_IDIOMS`. **Overwritten, not appended** — a part reviewed three times contributes one sample, so re-reviewing a fix can't inflate the profile. Absent when the part hasn't been reviewed or the grade failed to parse (the prose feedback survives either way). This is the sole input to the derived proficiency profile. |
+| `solution` | object / absent | The reference "correct answer" as of this part (**cumulative** — this part plus every earlier one): `{"at": ISO, "text": <markdown: design notes + Java impl + test>}`. Written by `drills.solve_drill`, overwritten on regenerate; absent until first requested. |
 
 ### Example
 
 ```json
 [
   {
-    "number": 3,
+    "number": 8,
     "language": "java",
-    "title": "Recent Activity Feed Tracker",
-    "prompt": "Build a simple activity feed. Users log events (a user + an event type); support pulling the most recent N events, the distinct event types for a user, and the most active user…",
-    "interface": ["record(String user, String eventType)", "recent(int n)", "typesFor(String user)", "mostActive()"],
+    "title": "Conference Room Booking Registry",
+    "premise": "The registry tracks which meeting rooms are booked and when, so a corporate office's scheduling system can answer availability questions and manage reservations. A front-desk app calls it when staff want to book a room or check what is available. The registry lives entirely in memory and is one class extended across several sittings. Rooms have names, and bookings have an owner, a date, and a start and end hour.",
+    "parts": [
+      {
+        "part": 1,
+        "title": "Basic Room Reservations",
+        "prompt": "We need a simple booking registry where rooms can be reserved for a block of hours on a given date… What happens when someone books a slot that overlaps an existing booking is up to you to decide.",
+        "tasks": ["Decide how bookings will be stored internally so that room-and-date lookups are natural.", "Write the book and cancel methods and get them working end to end, including overlap detection.", "Add tests covering the normal flow, overlap attempts, and whatever edge cases you decided on."],
+        "interface": ["book(String room, String owner, LocalDate date, int startHour, int endHour)", "cancel(String room, String owner, LocalDate date)", "isFree(String room, LocalDate date, int hour)"],
+        "status": "complete",
+        "completed_at": "2026-08-07T18:02:11+00:00",
+        "feedback": [{"at": "2026-08-07T17:55:00+00:00", "text": "…"}]
+      },
+      {
+        "part": 2,
+        "title": "Listing a Room's Day",
+        "prompt": "The front desk wants to see a room's whole day at a glance, in chronological order.",
+        "tasks": ["Work out how to produce an ordered view of a room's bookings for a date.", "Implement the schedule method.", "Add tests covering an empty day, a full day, and ordering."],
+        "interface": ["schedule(String room, LocalDate date)"],
+        "status": "active",
+        "completed_at": null,
+        "feedback": []
+      }
+    ],
     "status": "active",
-    "created_at": "2026-07-23T23:28:08+00:00",
-    "completed_at": null,
-    "feedback": []
+    "created_at": "2026-08-07T16:30:00+00:00",
+    "completed_at": null
   }
 ]
 ```
@@ -1032,6 +1154,7 @@ the rubric change?".
 | `dry_run` | bool | Whether `--dry-run` was passed. |
 | `source_filter` | string / `null` | The `--source` flag value, or `null` for "all sources". |
 | `total_fetched` | int | Total listings across all sources before any filtering. |
+| `discard_skips` | int | Listings skipped because `discarded_urls.json` already rejected them. Counted separately from `dedup_hits` so the ledger's effect is visible. Also in `funnel.discard_ledger`. |
 | `dedup_hits` | int | Listings rejected because the apply URL was already in the pipeline. |
 | `filtered_total` | int | Listings rejected by the pre-filter. |
 | `funnel` | object | Categorized rejection counts. Keys: `pass`, `title_seniority`, `title_exclude`, `location`, `stack`, `other`. Categories from `crawl._categorize_reason`. |

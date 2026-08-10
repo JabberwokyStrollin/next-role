@@ -50,7 +50,9 @@ from config import (
     APPLICATION_TRACKER_PATH,
     INBOX_SCAN_WINDOW_DAYS,
     classify_inbox_email,
+    is_ats_sender,
     load_json,
+    looks_like_recruiting_mail,
     now_utc,
     save_json,
 )
@@ -204,24 +206,51 @@ def _sender_domain_label(from_header: str) -> str:
     return parts[0] if parts else ""
 
 
+def _from_display_name(from_header: str) -> str:
+    """The display-name portion of a From header ("Yahoo Recruiting" from
+    ``Yahoo Recruiting <no-reply@…>``), or the whole header when unstructured."""
+    hdr = (from_header or "").strip()
+    return hdr.split("<", 1)[0] if "<" in hdr else hdr
+
+
 def company_matches(company_name: str, from_header: str, subject: str) -> bool:
-    """True if the message plausibly relates to ``company_name`` — the name as a
-    whole phrase in the From/Subject text, or a slug overlap with the sender's
-    domain label. ATS relays (greenhouse.io, lever.co, …) name the company in
-    the From-display / subject, so the phrase match covers them."""
+    """True if the message plausibly comes FROM ``company_name``.
+
+    The message must be *from* the employer — it is not enough for the name to
+    appear somewhere in the text. Matching on the subject line meant a Quora
+    Digest headed "Are Google interviews harder than the interviews of Amazon
+    and Microsoft?" was matched to a Microsoft application and surfaced as
+    needing a reply. Three accepted routes, all sender-anchored:
+
+      1. the sender's own domain is the company (``no-reply@samsara.com``,
+         ``…@email.careers.microsoft.com``, ``…@recruiting.yahooinc.com``);
+      2. an ATS relay is speaking for them, and the company is named in the
+         From/Subject — Greenhouse mails as ``no-reply@us.greenhouse-mail.io``
+         and identifies the employer only in the text;
+      3. the company is named in the From DISPLAY NAME, which covers a recruiter
+         mailing from a personal or agency address.
+
+    A name in the subject alone is deliberately NOT a route."""
     slug = _company_slug(company_name)
     if not slug or len(slug) < 3:
         return False
-
-    hay = " " + re.sub(r"[^a-z0-9]+", " ", f"{from_header} {subject}".lower()) + " "
     core = _company_core_tokens(company_name)
-    if core and f" {' '.join(core)} " in hay:
-        return True
 
+    # 1. sender's own domain
     dom_label = _sender_domain_label(from_header)
     if len(dom_label) >= 4 and (dom_label in slug or slug in dom_label):
         return True
-    return False
+
+    def _named_in(text: str) -> bool:
+        hay = " " + re.sub(r"[^a-z0-9]+", " ", (text or "").lower()) + " "
+        return bool(core and f" {' '.join(core)} " in hay)
+
+    # 2. an ATS relay naming the employer
+    if is_ats_sender(from_header) and _named_in(f"{from_header} {subject}"):
+        return True
+
+    # 3. a human/agency whose display name is the company
+    return _named_in(_from_display_name(from_header))
 
 
 def _title_tokens(title: str) -> set[str]:
@@ -232,7 +261,15 @@ def match_application(open_apps: list[dict], from_header: str, subject: str,
                       body: str) -> dict | None:
     """Pick the open application this message relates to, or None. When several
     open applications share the matched company, prefer the one whose title
-    tokens appear in the subject/body; otherwise the first candidate."""
+    tokens appear in the subject/body; otherwise the first candidate.
+
+    A sender that looks like the employer is still not enough on its own —
+    the message must also read as being about a job application. Microsoft
+    Rewards mails from ``microsoftrewards.com``, whose domain label contains
+    "microsoft", so a prize-draw promo cleared the sender test and was matched
+    to a Microsoft application."""
+    if not looks_like_recruiting_mail(subject, body):
+        return None
     candidates = [a for a in open_apps
                   if company_matches(a.get("company_name", ""), from_header, subject)]
     if not candidates:

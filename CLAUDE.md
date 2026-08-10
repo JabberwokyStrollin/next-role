@@ -550,6 +550,270 @@ composite (so `metrics.py`'s "components sum to composite" invariant holds).
    *displaying* the pure composite. Pre-research ranking is never penalized
    (the company flag isn't known before research).
 
+## Code drills — one sitting per part (SSOT)
+
+A generated drill is **not** one exercise; it's a series of 3-6 parts, each
+sized for a single ~60-minute sitting.
+
+**The unit of a part is ONE method plus its tests.** Not one "feature", not one
+"plain working version". This is the rule that keeps getting relaxed and it is
+the one that matters most: a part asking for three methods needs six or more
+test cases to cover, which is a two-hour sitting. The canonical part 1 is
+literally *"Decide how the bookings will be stored. Write the book method. Write
+tests for it."* — one design decision, one method, its tests. Because parts are
+that small, a theme needs 3-6 of them, which is why the range is not 2-4.
+
+This shape exists for a behavioral reason, not an aesthetic one. When a whole
+sprawling spec was shown at once (old Drill 7: six methods, session lifecycle,
+merge semantics and global aggregation together), a drill took 3-4+ hours, which
+produced both procrastination on starting and rushing once started — so material
+got missed either way. Anything that puts the full spec back in front of the
+operator recreates that, even if each individual part is still small.
+
+| Concern | Canonical location |
+|---|---|
+| Sitting budget + series length | `scripts/config.py:DRILL_PART_TARGET_MINUTES` (60), `DRILL_MIN_PARTS`/`DRILL_MAX_PARTS` (3-6) |
+| Part sizing + content rules given to Claude | `scripts/drills.py:_GENERATE_SYSTEM` (interpolates all three constants) |
+| Parts list / legacy adaptation | `scripts/config.py:drill_parts` |
+| Which part the operator is on | `scripts/config.py:current_drill_part` (first not-complete, else last) |
+| Completion + daily goal | `scripts/config.py:mark_drill_part_complete`, `drills_completed_today` |
+| One-step finish (grade + answer + complete) | `scripts/drills.py:finish_part`, `POST /today/drill/finish` |
+| Undo a mis-clicked finish | `scripts/config.py:revert_drill_part`, `scripts/drills.py:revert_part`, `POST /today/drill/revert` |
+| Context handed to review/solve | `scripts/drills.py:_series_context` |
+| Graded vocabularies + scale | `scripts/config.py:DRILL_SKILLS`, `DRILL_IDIOMS`, `DRILL_SKILL_MAX` (5) |
+| Profile thresholds | `scripts/config.py:DRILL_PROFICIENCY_MIN_SAMPLES` (2), `DRILL_WEAK_SKILL_THRESHOLD` (3.5), `DRILL_RARE_IDIOM_MAX_USES` (1), `DRILL_MAX_TARGET_SKILLS` (3) |
+| Recency weighting | `scripts/config.py:DRILL_GRADE_HALF_LIFE` (5) + `_recency_weights` |
+| Derived proficiency profile | `scripts/config.py:drill_proficiency` / `drill_proficiency_brief` |
+| Grade extraction from a review | `scripts/drills.py:_split_assessment` (+ `_ASSESSMENT_SENTINEL`) |
+| Reference solution written into the Java files | `scripts/drills.py:write_correct_code`; markers + `strip_correct_code` in `config.py` |
+
+### Rules
+
+1. **Never surface a part the operator hasn't reached.** Not its prompt, not
+   its title, not a summary. `render_drills_body` renders later parts as
+   "not yet revealed" (numbers only) and `_series_context` truncates at the
+   current part, so neither the reviewer nor the reference solution can leak
+   the next twist. A one-line "coming up: thread safety" would undo the whole
+   feature. This extends to the **overview**: it must carry no performance,
+   ordering, concurrency or immutability language, because that vocabulary *is*
+   the later parts' twists. A drill whose brief says "answers availability
+   without rescanning" has already given away part 3.
+
+2. **Underspecified ≠ vague, and a part must be self-sufficient.** The
+   *semantics* are deliberately open (case sensitivity, tie-breaking, overlap,
+   null/empty) — the *task* never is. Each sitting shows exactly three layers,
+   and all three are load-bearing: the drill **overview** (`premise`, the
+   standing brief), **this part's** prompt, and its **`tasks`** (≤3 imperative
+   steps, last one the tests). Strip any of them and the operator can't start
+   typing. Two specific failures to keep fixed:
+   - The overview must not merely restate part 1. When it did, the operator
+     effectively got one paragraph instead of two levels of context and
+     reported the drill as unwritable.
+   - Every operation the prompt or tasks name must be reachable through a
+     method of this or an earlier part. Prose describing "open a named session"
+     with no `openSession` in the interface reads as a *missing requirement*,
+     not as an ambiguity to resolve — it's the single fastest way to make a
+     well-sized drill feel broken.
+
+3. **The daily goal counts PARTS, not drills.** `drills_completed_today` sums
+   completed *parts* across all drills. Counting whole drills would mean a
+   normal hour of practice never earns the checkmark, which is exactly the
+   pressure that caused the rushing.
+
+4. **One file per drill, shared by every part.** All parts extend the same
+   `Drill<N>.java` / `Drill<N>Test.java` — `drill_impl_path`/`drill_test_path`
+   take a drill number only, never a part. So `review_drill` and `solve_drill`
+   are **cumulative**: they judge / write the class as of the current part.
+
+5. **At most one new method per part — including part 1.** A later part adds one
+   method, one new constraint on existing behaviour, or both; never two of
+   either. A part that only changes the *behaviour* of an existing method is
+   ideal. If a part's tasks say "write the X, Y and Z methods", it is too big:
+   split it. **If drills start sprawling, tighten `_GENERATE_SYSTEM`'s per-part
+   caps — never widen a part and add parts to compensate.** (Raising
+   `DRILL_MAX_PARTS` is only correct in the other direction: parts got
+   *smaller*, so a theme needs more of them. That's why it went 2-4 → 3-6.)
+
+6. **A reroll must not discard banked work — and "banked" includes unticked
+   work.** `generate_drill` replaces the current drill in place only while zero
+   parts are complete AND `_has_written_code` reports nothing in
+   `Drill<N>.java`. Completion status alone is not enough: an operator can write
+   246 lines across a session and never press *Mark part complete*, and a reroll
+   would then silently orphan the prompts that code answers.
+   `render_drills_body` mirrors both conditions in the button label — keep the
+   two in sync.
+
+7. **Legacy records are adapted on read, never migrated.** Pre-`parts` drills
+   carry `prompt`/`interface`/`feedback`/`solution` at the top level;
+   `drill_parts` presents them as a one-part series so surfaces don't branch.
+   Don't write a migration script — and don't strip the legacy fields when a
+   record is first mutated.
+
+8. **Grading rides the review call — never add a second one.** The candidate's
+   code is already in the review prompt, so scoring costs only the JSON's output
+   tokens. A separate "grade me" call would double the per-sitting spend for one
+   object. `_REVIEW_SYSTEM` **must stay an f-string**: it interpolates the
+   sentinel and both vocabularies from `config`. (It was briefly a plain string,
+   and the model dutifully echoed the literal `{_ASSESSMENT_SENTINEL}` and
+   invented its own skill keys — silently ungraded, because the sanitizer
+   dropped every unknown key. If grades stop appearing, check this first.)
+
+9. **A malformed grade must never cost the operator their feedback.**
+   `_split_assessment` degrades to `(whole text, None)` on any parse failure,
+   drops unknown skill/idiom keys, and clamps scores. An ungraded part simply
+   doesn't reach the profile — that's the correct failure mode, and it's why a
+   hallucinated dimension can't enter the vocabulary through the back door.
+
+10. **Proficiency is derived, never stored.** `drill_proficiency` recomputes
+    from the per-part `assessment` objects on every read, exactly as the
+    gov-screen result is recomputed rather than persisted. Don't add a
+    `drill_proficiency.json`. The **latest grade per part wins** — re-reviewing
+    to check a fix must contribute one sample, not three, so `assessment` is
+    overwritten while `feedback` appends.
+
+11. **The profile must decay — never a lifetime average.** Grades are weighted
+    by `_recency_weights` (half-life `DRILL_GRADE_HALF_LIFE`) on BOTH axes.
+    Without it, early drills graded 1-2/5 anchor the mean permanently: the
+    generator keeps aiming at weaknesses already fixed and improvement is
+    invisible, which is demoralising and wrong. Decay by **sample position, not
+    wall-clock time** — time off shouldn't erase the profile, only further
+    practice should move it. Idioms decay too, so an idiom used ten parts ago
+    but since abandoned returns to the targeting pool. Measured: six 1/5 grades
+    followed by 5/5 work clears the weak flag after ~5 parts (one drill) and
+    converges to 4.5/5 by twelve.
+
+12. **Two axes, and they are not interchangeable.** Skills measure how *well*;
+    idioms measure *what was reached for at all*. Someone can score 5/5 across
+    every skill and never touch streams — a breadth gap invisible to the skill
+    axis. Never collapse idiom coverage into a skill score.
+
+13. **The profile records the truth; the brief is a priority list.** Keep
+    `weak_skills` complete in `drill_proficiency` but truncate to
+    `DRILL_MAX_TARGET_SKILLS` in `drill_proficiency_brief`. Measured on real
+    work, this reviewer grades hard enough that all six skills flagged weak at
+    once — accurate, and useless as targeting. Naming only the worst few is
+    what makes the drill actually aim.
+
+14. **Targeting is opt-in on evidence.** `drill_proficiency_brief` returns `""`
+    until something is graded, and the prompt omits the whole `## Targeting`
+    section, so early drills aren't aimed at noise. At most **one**
+    idiom-constrained re-implementation part per drill, and only for an idiom
+    the brief actually names — never invent the constraint.
+
+15. **The appended reference must never be graded as the candidate's work.**
+    `review_drill` calls `strip_correct_code` on both files before building the
+    prompt. Without it, once the operator views one answer every later review
+    reads that reference back as their own code and the profile inflates —
+    silently, and in the flattering direction, which is the hardest kind to
+    notice. The block is a comment (the file must still compile), delimited (so
+    solve replaces rather than stacks), and has its inner `*/` defanged (Java
+    block comments don't nest; javadoc inside a reference hits this every time).
+
+16. **Sizing is checked in LINES, not method count.** The generation prompt
+    carries a ~60-90 line budget for a part's whole solution, a two-concept cap
+    on part 1's domain surface, and a ban on setup/registration helpers, custom
+    exception types and required value types in part 1. All three exist because
+    a part that passed the one-method rule on paper still came back as 246 lines
+    over several hours — two methods, four concepts, a record, custom
+    exceptions and a dozen tests. Method count alone does not catch size.
+
+17. **Define the data model; leave only the semantics open.** Every domain noun
+    must be pinned down enough to declare a field for it — especially anything
+    time-, range- or identity-shaped. A drill called "Monday 9am" a *slot*, an
+    instant described as an interval, and the candidate couldn't tell whether
+    overlap logic was needed. That is an unanswerable question, not productive
+    ambiguity, and it burns the sitting before any code is written.
+
+18. **Finishing a sitting is ONE action.** `finish_part` grades, generates the
+    reference answer and marks the part complete. Don't split these back into
+    separate buttons: in practice grading and completing were always the same
+    intent, and the standalone *mark complete* was the click that got forgotten,
+    so parts stayed open and the daily goal under-counted. *Grade only* survives
+    as a secondary action for iterating before committing — it must never
+    complete the part. Failure policy: grading failing aborts the whole thing
+    (no attempt on disk means nothing to finish); the reference answer failing
+    is a `WARNING:` and completion still stands.
+
+19. **Finish must stay undoable, and the undo must drop the GRADE.** One click
+    grades, answers and completes, so a misfire is cheap to make and expensive
+    to leave: a grade earned by code that never implemented the part lands in
+    the profile as the NEWEST and therefore highest-weighted sample, aiming the
+    next drill at a weakness never demonstrated. `revert_drill_part` therefore
+    drops `assessment`, `solution` and the last `feedback` entry — not just the
+    status. `restore_correct_code` must also **re-append the previous part's**
+    reference, since `write_correct_code` replaces rather than stacks and a bare
+    strip would cost an answer already earned. Never touch the operator's own
+    code. Same shape as `update_status.revert`: an undo, not a status.
+
+20. **Finishing advances the view, so the grade must not vanish with it.**
+    `render_drills_body` falls back to `_latest_reviewed_part` when the current
+    part has no feedback, badging it *completed*. Without that, the review the
+    operator just paid for disappears on the post-finish redirect.
+
+21. **Tuning:** `DRILL_GRADE_HALF_LIFE` for how fast old grades fade,
+    `DRILL_PART_TARGET_MINUTES` for sitting length,
+    `DRILL_MIN_PARTS`/`DRILL_MAX_PARTS` for series length,
+    `DRILL_WEAK_SKILL_THRESHOLD` / `DRILL_PROFICIENCY_MIN_SAMPLES` for how
+    eagerly a weak spot is called, `DRILL_RARE_IDIOM_MAX_USES` for breadth
+    sensitivity. All feed the prompt directly — no prompt edit needed for any.
+
+## Discard ledger — the crawl must not rediscover its own rejects
+
+`ingest_job` returning `None` writes nothing to `job_pipeline.json`, and the
+crawl's dedup set is built from that file. So a discard is **invisible to the
+next crawl** unless it is recorded somewhere else. That somewhere is
+`data/discarded_urls.json`.
+
+This is not a minor inefficiency. The work-model gate can only run **after**
+`score_jd` (the work model is one of that call's outputs), so each rediscovery
+costs a JD fetch *plus* a full Sonnet call before reaching the same verdict.
+Measured before the ledger existed: 123 postings re-processed every crawl, **940
+discard events across only 165 unique URLs**, 860 wasted scoring calls and 10.1
+hours over 7 runs — with **zero** jobs ingested. The symptom the operator saw was
+"a 4-hour crawl that found nothing".
+
+| Concern | Canonical location |
+|---|---|
+| Ledger path + reason codes | `scripts/config.py:DISCARDED_URLS_PATH`, `DISCARD_REASONS` |
+| Record / query / reset | `config.record_discarded_url`, `is_url_discarded`, `clear_discarded_urls` |
+| Recording sites | `scripts/ingest.py` — all five discard gates |
+| Crawl-side skip | `scripts/crawl.py` (before any network work; counted as `discard_skips`) |
+| Operator tool | `scripts/discard_ledger.py` (summarise / `--backfill` / reset) |
+
+### Rules
+
+1. **Every `return None` discard in `ingest_job` must record to the ledger.**
+   Adding a new discard gate without a `record_discarded_url` call silently
+   recreates the retry loop for that gate — and it will present as a slow crawl
+   that ingests nothing, which reads like a network problem rather than a
+   bookkeeping one.
+
+2. **The crawl consults the ledger; manual ingest never does.** A URL pasted
+   into `/` or `run.py --url` is an explicit operator decision and must always be
+   processed. Only the crawl's own rediscovery is the problem.
+
+3. **Skip before any network work.** The `if url in discarded_urls` check goes
+   before ATS auto-discovery and the JD fetch. Placed after them it saves
+   nothing, which is the entire point.
+
+4. **Never skip silently.** The count goes in `crawl_log.jsonl` as
+   `discard_skips` and `funnel.discard_ledger`. A hidden skip set makes a quiet
+   crawl impossible to explain — and "quiet crawl" is exactly the failure this
+   feature can cause if it over-matches.
+
+5. **Loosening a policy REQUIRES a reason-scoped reset.** Entries are only valid
+   while the rule that produced them holds. Widening
+   `US_ACCEPTED_WORK_MODELS`, relaxing `_NO_SPONSORSHIP_PATTERNS`, adding a
+   country to `TARGET_COUNTRIES`, or clearing an `ethics_hard_exclude` all
+   invalidate a slice of the ledger — run
+   `python scripts/discard_ledger.py --reason <code> --apply`. Same obligation
+   as the `scan_no_sponsorship.py` / `scan_foreign_locations.py` sweeps: treat it
+   as part of the policy change, not as follow-up.
+
+6. **Reason codes are the reset selector.** Renaming one orphans every existing
+   entry with the old label. Add new codes to `DISCARD_REASONS`; unknown codes
+   are stored rather than dropped, but can't be reset selectively.
+
 ## Other project notes
 
 - This is a **closed-source / proprietary** project. No `LICENSE` file, no

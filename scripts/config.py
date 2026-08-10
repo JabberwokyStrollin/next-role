@@ -73,6 +73,23 @@ DATA_BACKUP_RETAIN_DAYS = 7
 # continue that sequence. "Open manual-code-drills" launches EDITOR_CMD on that
 # folder (default "code", the VS Code CLI; override with NEXTROLE_EDITOR_CMD for
 # a different editor), falling back to the OS file manager if the launch fails.
+#
+# Drills are practiced in SITTINGS, not marathons. A generated drill is ONE
+# small theme split into DRILL_MIN_PARTS..DRILL_MAX_PARTS parts, each sized to
+# fit a single ~DRILL_PART_TARGET_MINUTES sitting: part 1 is the plain working
+# version, and every later part adds exactly ONE new gotcha to the same class.
+# All parts share one Drill<N>.java / Drill<N>Test.java, which the operator
+# keeps extending. Only the current part is ever surfaced — the later parts
+# stay hidden so the drill can't read as a 4-hour block, which is what drove
+# both procrastination and rushing when a whole spec was shown at once.
+
+# The unit of a part is ONE method plus its tests — not one "feature". Three
+# methods and the ~6 tests needed to cover them is a two-hour sitting, which is
+# the same overrun the split was meant to end. Because each part is that small,
+# a theme needs more of them to finish: hence 3-6 parts, not 2-4.
+DRILL_PART_TARGET_MINUTES = 60
+DRILL_MIN_PARTS = 3
+DRILL_MAX_PARTS = 6
 
 MANUAL_CODE_DRILLS_DIR = Path(
     os.environ.get("NEXTROLE_DRILLS_DIR") or (ROOT.parent / "manual-code-drills")
@@ -90,6 +107,115 @@ def drill_impl_path(number: int) -> Path:
 def drill_test_path(number: int) -> Path:
     """Absolute path to Drill<number>Test.java in the sibling Maven project."""
     return MANUAL_CODE_DRILLS_DIR / _DRILLS_TEST_PKG_DIR / f"Drill{number}Test.java"
+
+
+# Markers delimiting the reference solution that `drills.write_correct_code`
+# appends to the operator's own Drill<N>.java / Drill<N>Test.java once they ask
+# to see the answer. It's a BLOCK COMMENT because the file must still compile —
+# two classes of the same name can't coexist — and it's delimited for two
+# reasons that both matter:
+#   1. re-running solve REPLACES the block instead of stacking copies;
+#   2. `review_drill` STRIPS it before grading, or Claude would read its own
+#      reference answer as the candidate's work and grade it as theirs.
+CORRECT_CODE_BEGIN = "/* ===== CORRECT CODE"
+CORRECT_CODE_END   = "===== END CORRECT CODE ===== */"
+
+
+def strip_correct_code(text: str) -> str:
+    """Remove every appended Correct Code block from Java source. Idempotent,
+    and returns the text unchanged when there is none. An unterminated block
+    (hand-edited, or a truncated write) drops everything from its start, since
+    the remainder can't be trusted to be the operator's own code."""
+    if CORRECT_CODE_BEGIN not in text:
+        return text
+    out, idx = [], 0
+    while True:
+        begin = text.find(CORRECT_CODE_BEGIN, idx)
+        if begin < 0:
+            out.append(text[idx:])
+            break
+        out.append(text[idx:begin])
+        end = text.find(CORRECT_CODE_END, begin)
+        if end < 0:
+            break
+        idx = end + len(CORRECT_CODE_END)
+    return "".join(out).rstrip("\n")
+
+
+# ─── Discard ledger ───────────────────────────────────────────────────────────
+#
+# A discarded posting never enters job_pipeline.json, so the crawl's URL dedup
+# (built from that file) has no memory of it and re-ingests it on every run.
+# Because the work-model gate can only run AFTER score_jd — the work model is one
+# of that call's outputs — each retry costs a JD fetch plus a full Sonnet call
+# before reaching the same verdict. Measured: 123 postings re-processed every
+# crawl, 860 wasted scoring calls and 10.1 hours across 7 runs, for zero ingests.
+#
+# The ledger is that missing memory: url -> {reason, detail, at, company, title}.
+#
+# Two deliberate boundaries:
+#   * The CRAWL consults it; manual ingest does NOT. A pasted URL is an explicit
+#     operator decision and must always be processed, ledger or no ledger.
+#   * Entries record WHY. Policy can change — widening US_ACCEPTED_WORK_MODELS
+#     makes every `work_model` entry stale — so a reason-scoped reset is possible
+#     (scripts/clear_discards.py) instead of blowing the whole ledger away.
+
+DISCARDED_URLS_PATH = DATA_DIR / "discarded_urls.json"
+
+# Reason codes. Stable strings — they're the reset selector, so renaming one
+# orphans existing entries.
+DISCARD_REASONS: dict[str, str] = {
+    "validation":     "Required field missing or malformed",
+    "location":       "Location not an enabled target geography",
+    "ethics":         "Company is ethics-excluded",
+    "no_sponsorship": "JD explicitly refuses visa sponsorship",
+    "work_model":     "US role's work model not accepted (hybrid/onsite)",
+}
+
+
+def load_discarded_urls() -> dict:
+    """The discard ledger ({} when missing or malformed)."""
+    data = load_json(DISCARDED_URLS_PATH)
+    return data if isinstance(data, dict) else {}
+
+
+def save_discarded_urls(rows: dict) -> None:
+    save_json(DISCARDED_URLS_PATH, rows)
+
+
+def record_discarded_url(apply_url: str, reason: str, detail: str = "",
+                         company: str = "", title: str = "") -> None:
+    """Remember that ``apply_url`` was discarded, so the crawl stops paying to
+    rediscover it. Unknown reason codes are stored as-is rather than dropped —
+    losing the memory is worse than an unrecognised label — but they won't be
+    selectable by a reason-scoped reset, so keep DISCARD_REASONS complete."""
+    if not apply_url:
+        return
+    ledger = load_discarded_urls()
+    ledger[apply_url] = {"reason": reason, "detail": detail[:200],
+                         "at": now_utc(), "company": company, "title": title}
+    save_discarded_urls(ledger)
+
+
+def is_url_discarded(apply_url: str, ledger: dict | None = None) -> bool:
+    ledger = load_discarded_urls() if ledger is None else ledger
+    return bool(apply_url) and apply_url in ledger
+
+
+def clear_discarded_urls(reason: str | None = None) -> int:
+    """Drop ledger entries — all of them, or only those with ``reason``. Returns
+    the number removed. Run this after loosening the policy that caused them,
+    or the crawl will keep skipping roles that are now acceptable."""
+    ledger = load_discarded_urls()
+    if reason is None:
+        n = len(ledger)
+        save_discarded_urls({})
+        return n
+    kept = {u: v for u, v in ledger.items() if v.get("reason") != reason}
+    n = len(ledger) - len(kept)
+    if n:
+        save_discarded_urls(kept)
+    return n
 
 
 def load_drills() -> list:
@@ -129,25 +255,294 @@ def current_drill(drills: list | None = None) -> dict | None:
     return max(drills, key=lambda d: int(d.get("number", 0)))
 
 
-def drills_completed_today(drills: list | None = None) -> int:
-    """How many drills were marked complete today (drives the section goal)."""
-    drills = load_drills() if drills is None else drills
-    t = today()
-    return sum(1 for d in drills
-               if d.get("status") == "complete"
-               and (d.get("completed_at") or "")[:10] == t)
+def revert_drill_part(number: int, part: int | None = None) -> dict | None:
+    """Undo a finish/complete for one part — the misclick escape hatch, and the
+    exact parallel of `update_status.revert` for a mis-logged application.
 
+    ``part=None`` reverts the most recently completed part, which is what a
+    misclick almost always means. Returns the updated drill record, or ``None``
+    when the drill has no such completed part.
 
-def mark_drill_complete(number: int) -> bool:
-    """Flag drill ``number`` complete (idempotent). Returns True if found."""
+    Drops three things besides the status:
+      * ``assessment`` — a grade earned by code that never implemented the part
+        would otherwise sit in the proficiency profile as the NEWEST and
+        therefore highest-weighted sample, dragging the targeting toward a
+        weakness that was never demonstrated;
+      * ``solution`` — the answer was revealed for work not yet attempted;
+      * the most recent ``feedback`` entry — the review that finish produced.
+
+    The drill's own completion is cleared too: an incomplete part means an
+    incomplete series. Java-side cleanup (removing the appended Correct Code)
+    belongs to `drills.revert_part` — this owns the store only."""
     drills = load_drills()
     for d in drills:
-        if int(d.get("number", 0)) == int(number):
+        if int(d.get("number", 0)) != int(number):
+            continue
+        d["parts"] = drill_parts(d)
+        if part is None:
+            done = [p for p in d["parts"] if p.get("status") == "complete"]
+            if not done:
+                return None
+            target = max(done, key=lambda p: (p.get("completed_at") or ""))
+        else:
+            target = find_drill_part(d, part)
+        if target is None or target.get("status") != "complete":
+            return None
+
+        target["status"]       = "active"
+        target["completed_at"] = None
+        target.pop("assessment", None)
+        target.pop("solution", None)
+        if target.get("feedback"):
+            target["feedback"].pop()
+        d["status"]       = "active"
+        d["completed_at"] = None
+        save_drills(drills)
+        return d
+    return None
+
+
+def drill_parts(drill: dict) -> list[dict]:
+    """The drill's parts, in order. Pre-parts records (a single prompt +
+    interface stored on the record itself) are adapted on READ into one
+    equivalent part, so surfaces never branch on schema version and no data
+    migration is needed — an old drill simply reads as a one-part series."""
+    parts = drill.get("parts")
+    if isinstance(parts, list) and parts:
+        return parts
+    legacy = {
+        "part":         1,
+        "title":        (drill.get("title") or "").strip(),
+        "prompt":       drill.get("prompt", ""),
+        "interface":    drill.get("interface") or [],
+        "status":       drill.get("status", "active"),
+        "completed_at": drill.get("completed_at"),
+        "feedback":     drill.get("feedback") or [],
+    }
+    if drill.get("solution"):
+        legacy["solution"] = drill["solution"]
+    return [legacy]
+
+
+def current_drill_part(drill: dict) -> dict:
+    """The part the operator is actually on: the first not-yet-complete part,
+    or the last one once the whole series is finished."""
+    parts = drill_parts(drill)
+    return next((p for p in parts if p.get("status") != "complete"), parts[-1])
+
+
+def find_drill_part(drill: dict, part: int | None) -> dict | None:
+    """Look up a part by number; ``None`` means "whichever part is current"."""
+    if part is None:
+        return current_drill_part(drill)
+    return next((p for p in drill_parts(drill)
+                 if int(p.get("part", 0)) == int(part)), None)
+
+
+def drill_part_progress(drill: dict) -> tuple[int, int]:
+    """``(parts complete, total parts)`` for one drill."""
+    parts = drill_parts(drill)
+    return sum(1 for p in parts if p.get("status") == "complete"), len(parts)
+
+
+def drills_completed_today(drills: list | None = None) -> int:
+    """How many drill PARTS were marked complete today (drives the section
+    goal). Parts, not whole drills: one part is one sitting, so an ordinary
+    hour of practice earns the day's checkmark without having to finish an
+    entire series."""
+    drills = load_drills() if drills is None else drills
+    t = today()
+    return sum(1 for d in drills for p in drill_parts(d)
+               if p.get("status") == "complete"
+               and (p.get("completed_at") or "")[:10] == t)
+
+
+def mark_drill_part_complete(number: int, part: int | None = None) -> dict | None:
+    """Mark ONE part of drill ``number`` complete (idempotent), defaulting to
+    the current part. Completing the last part completes the drill itself,
+    which is what lets ``next_drill_number`` advance. Returns the updated drill
+    record, or ``None`` when the drill or part isn't found.
+
+    Mutating a legacy (pre-parts) record materializes its adapted single part
+    into ``parts``; the old top-level fields are left in place, so nothing that
+    still reads them breaks."""
+    drills = load_drills()
+    for d in drills:
+        if int(d.get("number", 0)) != int(number):
+            continue
+        d["parts"] = drill_parts(d)
+        target = find_drill_part(d, part)
+        if target is None:
+            return None
+        if target.get("status") != "complete":
+            target["status"]       = "complete"
+            target["completed_at"] = now_utc()
+        if all(p.get("status") == "complete" for p in d["parts"]):
             d["status"]       = "complete"
-            d["completed_at"] = now_utc()
-            save_drills(drills)
-            return True
-    return False
+            d["completed_at"] = d.get("completed_at") or now_utc()
+        save_drills(drills)
+        return d
+    return None
+
+# ─── Drill proficiency (derived, never stored) ────────────────────────────────
+#
+# Every review returns a structured assessment alongside its prose, stored on
+# the part. The proficiency profile is DERIVED from those assessments on read —
+# never persisted — so re-reviewing a part can't leave a stale profile behind.
+# Same rule the gov-screen result follows: store the inputs, compute the verdict.
+#
+# TWO AXES, because they fail independently:
+#   skills — how WELL the work was done (0-DRILL_SKILL_MAX per dimension)
+#   idioms — WHICH parts of Java were reached for at all
+# Someone can score 5/5 on every skill and still never once touch streams. That
+# is a breadth gap, not a quality gap, and only the idiom axis can see it —
+# which is the whole point of tracking them separately.
+
+DRILL_SKILL_MAX = 5
+
+DRILL_SKILLS: dict[str, str] = {
+    "correctness":     "Does it do what the part asked, edge cases included",
+    "data_structures": "Right collection / structure for the job",
+    "idiomatic_java":  "Standard-library fluency, modern constructs, naming",
+    "complexity":      "Time and space, and avoiding needless rework",
+    "tests":           "Do the tests actually pin the behaviour down",
+    "decomposition":   "Method breakdown, cohesion, readability",
+}
+
+DRILL_IDIOMS: dict[str, str] = {
+    "streams":          "Stream pipelines — map/filter/collect, grouping, reduction",
+    "lambdas":          "Lambdas and method references",
+    "optional":         "Optional rather than null sentinels",
+    "records":          "Records for value types",
+    "pattern_matching": "Sealed types, pattern-matching switch, enhanced instanceof",
+    "collections_api":  "Beyond get/put — computeIfAbsent, merge, TreeMap, Deque, …",
+    "generics":         "Type parameters / bounded types on your own API",
+    "polymorphism":     "Interfaces or abstract classes unifying implementations",
+    "concurrency":      "java.util.concurrent types, synchronization",
+    "legacy_java8":     "Pre-var, pre-record style: explicit iteration, anonymous classes",
+}
+
+# A skill needs this many graded parts before it counts as weak — one bad
+# sitting is noise, not a pattern.
+DRILL_PROFICIENCY_MIN_SAMPLES = 2
+# Mean below this (out of DRILL_SKILL_MAX) is a weak spot worth targeting.
+DRILL_WEAK_SKILL_THRESHOLD = 3.5
+# An idiom reached for in this many parts or fewer is a breadth gap.
+DRILL_RARE_IDIOM_MAX_USES = 1
+# How many weak skills the generation brief may name. The profile keeps the full
+# truth; the BRIEF is a priority list. Early on a harsh reviewer flags every
+# skill at once, and "everything is weak" tells the generator nothing — naming
+# only the worst few is what makes the targeting actually aim.
+DRILL_MAX_TARGET_SKILLS = 3
+
+# The profile is RECENCY-WEIGHTED: a grade's influence halves every this many
+# graded parts. A lifetime average can't show improvement — early drills graded
+# 1-2/5 would anchor the mean forever, so the profile would keep aiming at
+# weaknesses already fixed, and there'd be no way to see progress. Weighting by
+# POSITION rather than wall-clock time is deliberate: a fortnight off shouldn't
+# erase the profile, only further practice should move it.
+DRILL_GRADE_HALF_LIFE = 5
+
+
+def _recency_weights(count: int) -> list[float]:
+    """Weights for ``count`` assessments in OLDEST-FIRST order (the order
+    `drill_assessments` returns). The newest always weighs 1.0 and each
+    `DRILL_GRADE_HALF_LIFE` steps back halves it, so old grades fade smoothly
+    instead of dropping off a cliff at a window edge."""
+    if count <= 0:
+        return []
+    hl = max(1e-9, float(DRILL_GRADE_HALF_LIFE))
+    return [0.5 ** ((count - 1 - i) / hl) for i in range(count)]
+
+
+def drill_assessments(drills: list | None = None) -> list[dict]:
+    """Every stored per-part assessment, oldest first. One per part — a re-review
+    overwrites rather than appending, so a part graded three times counts once
+    and can't skew the profile."""
+    drills = load_drills() if drills is None else drills
+    out = []
+    for d in sorted(drills, key=lambda r: int(r.get("number", 0))):
+        for p in drill_parts(d):
+            a = p.get("assessment")
+            if isinstance(a, dict) and a.get("skills"):
+                out.append(a)
+    return out
+
+
+def drill_proficiency(drills: list | None = None) -> dict:
+    """Derive the proficiency profile from stored assessments.
+
+    Every figure is RECENCY-WEIGHTED (see `DRILL_GRADE_HALF_LIFE`) on BOTH axes,
+    so improvement shows up and old grades stop anchoring: a skill you've fixed
+    climbs out of `weak_skills`, and an idiom you used ten parts ago but have
+    since stopped reaching for decays back into `rare_idioms`.
+
+    Returns ``{"graded": int, "skills": {k: {mean, count, weak}},
+    "idioms": {k: {uses, raw, rare}}, "weak_skills": [k, …] (worst first),
+    "rare_idioms": [k, …] (least-used first)}``, where `mean` and `uses` are
+    weighted while `count` and `raw` are honest sample counts. With nothing
+    graded yet every skill is absent and every idiom rare, and
+    `drill_proficiency_brief` returns "" so the first drill is untargeted."""
+    rows    = drill_assessments(drills)
+    weights = _recency_weights(len(rows))
+
+    skills: dict[str, dict] = {}
+    for key in DRILL_SKILLS:
+        graded = [(r["skills"][key], w) for r, w in zip(rows, weights)
+                  if isinstance(r.get("skills"), dict) and key in r["skills"]]
+        if not graded:
+            continue
+        wsum = sum(w for _, w in graded) or 1.0
+        mean = sum(score * w for score, w in graded) / wsum
+        skills[key] = {
+            "mean":  round(mean, 2),
+            "count": len(graded),
+            # The min-samples floor counts RAW parts, not weighted mass: two
+            # real gradings is the evidence bar, regardless of their age.
+            "weak":  (len(graded) >= DRILL_PROFICIENCY_MIN_SAMPLES
+                      and mean < DRILL_WEAK_SKILL_THRESHOLD),
+        }
+
+    idioms = {}
+    for key in DRILL_IDIOMS:
+        hits = [(r, w) for r, w in zip(rows, weights)
+                if key in (r.get("idioms_used") or [])]
+        uses = sum(w for _, w in hits)
+        idioms[key] = {"uses": round(uses, 2), "raw": len(hits),
+                       "rare": uses <= DRILL_RARE_IDIOM_MAX_USES}
+
+    return {
+        "graded":      len(rows),
+        "skills":      skills,
+        "idioms":      idioms,
+        "weak_skills": sorted((k for k, v in skills.items() if v["weak"]),
+                              key=lambda k: skills[k]["mean"]),
+        "rare_idioms": sorted((k for k, v in idioms.items() if v["rare"]),
+                              key=lambda k: idioms[k]["uses"]),
+    }
+
+
+def drill_proficiency_brief(drills: list | None = None) -> str:
+    """Plain-text profile summary for the generation prompt, or "" when nothing
+    has been graded yet (so the first drill isn't targeted at noise)."""
+    prof = drill_proficiency(drills)
+    if not prof["graded"]:
+        return ""
+
+    lines = [f"Graded parts so far: {prof['graded']} "
+             f"(scores are recency-weighted — recent work counts most)."]
+    if prof["weak_skills"]:
+        # Worst-first, truncated: see DRILL_MAX_TARGET_SKILLS.
+        weak = ", ".join(f"{k} ({prof['skills'][k]['mean']}/{DRILL_SKILL_MAX})"
+                         for k in prof["weak_skills"][:DRILL_MAX_TARGET_SKILLS])
+        lines.append(f"Weakest skills, worst first: {weak}.")
+    else:
+        lines.append("No skill is measurably weak yet.")
+    if prof["rare_idioms"]:
+        rare = ", ".join(k for k in prof["rare_idioms"])
+        lines.append(f"Idioms rarely or never reached for lately: {rare}.")
+    return "\n".join(lines)
+
 
 # ─── Rules files ──────────────────────────────────────────────────────────────
 
@@ -975,6 +1370,36 @@ _INTERVIEW_PATTERNS: list[_re.Pattern] = [
     _re.compile(r"\bnext\s+steps?\b[^.!?\n]{0,40}?\b(?:schedule|call|interview|availabilit|meet)\b", _re.I),
 ]
 
+# An application-received confirmation ("Thank you for applying to X") is NOT a
+# status change. Its boilerplate trips the two weaker signals almost by design:
+#   * future-tense advancement — "if your experience is a match, one of our team
+#     members will contact you to schedule a call" reads as an interview invite;
+#     Ping Identity's Greenhouse acknowledgement was surfaced as a Recruiter
+#     Screen on exactly that sentence.
+#   * "questions? just reply to this email" reads as a human asking one.
+# Identifying the genre is far more reliable than trying to special-case every
+# such sentence, so `detect_status` suppresses BOTH weaker signals once these
+# match — but only after rejection/offer, since real rejections routinely open
+# with "thank you for applying".
+_ACKNOWLEDGEMENT_PATTERNS: list[_re.Pattern] = [
+    _re.compile(r"\bthank(?:s|\s+you)\b[^.!?\n]{0,30}?\bfor\s+(?:applying|your\s+application|your\s+recent\s+application)\b", _re.I),
+    _re.compile(r"\bwe(?:'ve|\s+have)\s+received\s+your\s+(?:application|submission|resume|cv)\b", _re.I),
+    _re.compile(r"\byour\s+application\b[^.!?\n]{0,30}?\b(?:has\s+been|was|is)\s+received\b", _re.I),
+    _re.compile(r"\bapplication\s+(?:has\s+been\s+)?received\b", _re.I),
+    _re.compile(r"\bthis\s+(?:email|message)\s+confirms\b[^.!?\n]{0,40}?\bapplication\b", _re.I),
+]
+
+
+def detect_acknowledgement(subject: str, body: str) -> str:
+    """Matched snippet if this is an application-received confirmation, else "".
+
+    SSOT for "this is an acknowledgement, not a status change". Used by
+    `detect_status` to suppress the interview and needs-reply signals; never to
+    suppress a rejection or an offer, which are checked first."""
+    return _first_match_evidence(f"{subject or ''}\n{body or ''}",
+                                 _ACKNOWLEDGEMENT_PATTERNS) or ""
+
+
 # Offer phrases → status "offer". Checked AFTER rejection so "we will not be
 # extending an offer" resolves to a rejection, not an offer.
 _OFFER_PATTERNS: list[_re.Pattern] = [
@@ -1038,15 +1463,52 @@ _AUTOMATED_SENDER_RE: _re.Pattern = _re.compile(
 # part says. Salesforce's acknowledgement arrives as `salesforce@myworkday.com`,
 # whose local part is just the company name and so passed the local-part test
 # above — the domain is the reliable signal.
+# NOTE: ATS platforms send from dedicated RELAY domains that are not the domain
+# you apply on — Greenhouse mails from `us.greenhouse-mail.io`, not
+# `greenhouse.io`. Listing only the apply-side domain silently misses every
+# message they actually send, which is how a Greenhouse acknowledgement reached
+# the needs-reply and status detectors. When adding a platform, add its relay.
 _ATS_SENDER_DOMAIN_RE: _re.Pattern = _re.compile(
     r"@(?:[a-z0-9-]+\.)*(?:"
-    r"myworkday\.com|workday\.com|greenhouse\.io|lever\.co|ashbyhq\.com"
+    r"myworkday\.com|workday\.com|greenhouse\.io|greenhouse-mail\.io"
+    r"|greenhousemail\.io|lever\.co|ashbyhq\.com"
     r"|icims\.com|taleo\.net|successfactors\.com|smartrecruiters\.com"
     r"|workable\.com|jobvite\.com|bamboohr\.com|breezy\.hr|teamtailor\.com"
     r"|applytojob\.com|recruitee\.com|hire\.lever\.co|myworkdayjobs\.com"
+    r"|smartrecruiters\.net|jazzhr\.com|paylocity\.com|dayforcehcm\.com"
     r")\b",
     _re.I,
 )
+
+
+def is_ats_sender(from_header: str) -> bool:
+    """True if the From header is an applicant-tracking platform's relay domain.
+    Narrower than `is_automated_sender` (which also fires on `no-reply@` style
+    local parts) — this one answers "is a hiring system speaking for a company",
+    which is what lets `inbox_scan` trust a company name it finds in the
+    subject line."""
+    return bool(_ATS_SENDER_DOMAIN_RE.search(from_header or ""))
+
+
+# Words that mark a message as being about a job application at all. The inbox
+# matcher requires one, because "from a domain that looks like the employer" is
+# not enough on its own: Microsoft Rewards mails from `microsoftrewards.com`,
+# whose label contains "microsoft", and a prize-draw promo about Harry Styles
+# tickets was matched to a Microsoft application and flagged as needing a reply.
+# Kept deliberately narrow — "offer" and "job" are excluded because marketing
+# mail is full of both.
+_RECRUITING_RELEVANCE_RE: _re.Pattern = _re.compile(
+    r"\b(?:applicat\w*|applied|applying|candidat\w*|recruit\w*|hiring"
+    r"|interview\w*|position|vacancy|requisition|r[ée]sum[ée]|curriculum\s+vitae"
+    r"|talent\s+(?:team|acquisition)|hiring\s+manager|your\s+role)\b",
+    _re.I,
+)
+
+
+def looks_like_recruiting_mail(subject: str, body: str) -> bool:
+    """True if the message is plausibly about a job application. A relevance
+    gate for inbox matching only — never a status signal."""
+    return bool(_RECRUITING_RELEVANCE_RE.search(f"{subject or ''}\n{body or ''}"))
 
 _NEEDS_REPLY_PATTERNS: list[_re.Pattern] = [
     _re.compile(r"\b(?:can|could|would)\s+you\s+(?:please\s+)?(?:confirm|clarify|let\s+me\s+know|share|tell\s+me)\b", _re.I),
@@ -1056,7 +1518,12 @@ _NEEDS_REPLY_PATTERNS: list[_re.Pattern] = [
     _re.compile(r"\bwould\s+you\s+be\s+(?:open|willing|able|interested)\b", _re.I),
     _re.compile(r"\bquick\s+question\b", _re.I),
     _re.compile(r"\ba\s+(?:few|couple\s+of)\s+questions?\b", _re.I),
-    _re.compile(r"\b(?:confirm|clarify)\s+(?:that|whether|if)\b", _re.I),
+    # Must be a REQUEST to confirm, not a statement containing "confirm that".
+    # A bare `confirm\s+that` fired on terms-and-conditions boilerplate — "by
+    # redeeming points you confirm that you have reached the age of majority" —
+    # which is nobody asking the reader anything. "can/could/would you confirm"
+    # is covered by the first pattern above.
+    _re.compile(r"\b(?:please|kindly)\s+(?:confirm|clarify)\b", _re.I),
     _re.compile(r"\blet\s+me\s+know\s+(?:if|whether|your)\b", _re.I),
     _re.compile(r"\b(?:require|need)\s+(?:visa\s+)?sponsorship\b", _re.I),
     _re.compile(r"\b(?:willing|open)\s+to\s+relocat", _re.I),
@@ -1155,6 +1622,18 @@ def classify_inbox_email(subject: str, body: str,
     ev = _first_match_evidence(haystack, _OFFER_PATTERNS)
     if ev:
         return "offer", None, ev
+
+    # Everything below is a WEAK signal that acknowledgement boilerplate fakes
+    # convincingly, so bail out here once the message is identified as one.
+    # Two guards, both load-bearing:
+    #   * only AFTER rejection/offer — a real rejection commonly opens with
+    #     "thank you for applying";
+    #   * only for an AUTOMATED sender — an acknowledgement is automated by
+    #     definition, whereas a human recruiter opening with "Thanks for
+    #     applying! Are you open to relocating?" is asking a real question, and
+    #     suppressing that would drop the one signal the operator must act on.
+    if is_automated_sender(from_header) and detect_acknowledgement(subject, body):
+        return None, None, ""
 
     ev = _first_match_evidence(haystack, _INTERVIEW_PATTERNS)
     if ev:
