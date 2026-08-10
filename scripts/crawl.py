@@ -30,6 +30,7 @@ import yaml
 from bs4 import BeautifulSoup
 
 from config import (
+    load_discarded_urls,
     CRAWL_LOG_PATH,
     JOB_PIPELINE_PATH,
     STACK_KEYWORDS_PATH,
@@ -458,12 +459,19 @@ def crawl(
     started_at    = time.time()
     cfg           = load_crawl_config()
     existing_urls = {j["apply_url"] for j in load_json(JOB_PIPELINE_PATH) if j.get("apply_url")}
+    # Postings already judged and thrown away. A discard never reaches the
+    # pipeline, so without this the crawl re-fetches and re-scores every one of
+    # them on every run — and the work-model verdict costs a Sonnet call before
+    # it can be reached. Consulted HERE only: manual ingest deliberately ignores
+    # the ledger, so a pasted URL is always processed.
+    discarded_urls = load_discarded_urls()
 
     print(f"\n── Crawl starting ──────────────────────────────────────────────")
     print(f"  Seniority filter:  {', '.join(cfg['seniority_titles'])}")
     print(f"  Location filter:   {', '.join(cfg['location_allow'])}")
     print(f"  Min stack score:   {cfg['min_pre_filter_score']}")
     print(f"  Pipeline size:     {len(existing_urls)} known URLs (dedup)")
+    print(f"  Discard ledger:    {len(discarded_urls)} previously-rejected URLs")
     print()
 
     listings: list[dict] = []
@@ -508,6 +516,7 @@ def crawl(
     # ── Pre-filter + dedup + ATS auto-discovery ───────────────────────────────
     candidates:    list[dict] = []
     skipped_dupe   = 0
+    skipped_discarded = 0
     skipped_filter = 0
     funnel         = Counter()
     auto_added     = []
@@ -519,6 +528,14 @@ def crawl(
 
         if url in existing_urls:
             skipped_dupe += 1
+            continue
+
+        # Already judged and rejected on a previous run. Counted separately from
+        # the dedup hits so the ledger's effect stays visible in the crawl log —
+        # a silent skip set is how you end up unable to explain a quiet crawl.
+        if url in discarded_urls:
+            skipped_discarded += 1
+            funnel["discard_ledger"] += 1
             continue
 
         # Auto-discover ATS from aggregator URLs
@@ -556,6 +573,7 @@ def crawl(
     print(f"\n── Pre-filter results ──────────────────────────────────────────")
     print(f"  Passed:    {len(candidates)}")
     print(f"  Dupes:     {skipped_dupe}")
+    print(f"  Previously discarded: {skipped_discarded}")
     print(f"  Filtered:  {skipped_filter}")
     if auto_added:
         print(f"  New ATS boards auto-added: {len(auto_added)}")
@@ -658,6 +676,7 @@ def crawl(
         "source_filter":     source,
         "total_fetched":     len(listings),
         "dedup_hits":        skipped_dupe,
+        "discard_skips":     skipped_discarded,
         "filtered_total":    skipped_filter,
         "funnel":            dict(funnel),
         "passed":            len(candidates),

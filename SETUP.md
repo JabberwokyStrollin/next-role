@@ -88,10 +88,13 @@ Edit these files in `profile/`:
 
 The `/today` **Code drills** section generates interview-prep Java drills
 with Claude and reviews your manual attempts. There's nothing to author —
-click **Generate new drill prompt** and Claude produces a short,
-deliberately underspecified prompt plus a partial interface (method names +
-params, no return types — deciding those is part of the drill). You
-implement it by hand, then click **Check my code & get feedback**.
+click **Generate new drill prompt** and Claude produces a **3–6 part series**
+on one small theme. Each part gives you an overview of the whole drill, a
+short deliberately underspecified prompt for that part, numbered tasks for
+the sitting, and a partial interface (method names + params, no return types
+— deciding those is part of the drill). You work **one part per sitting**
+(about an hour each): implement it by hand, click **Check my code & get
+feedback**, then **Mark part N complete** to reveal the next one.
 
 It expects a **sibling Maven project** where the code + JUnit tests live:
 
@@ -104,6 +107,12 @@ applications/
 - The default location is `../manual-code-drills` (override with the
   `NEXTROLE_DRILLS_DIR` env var). Generated drills continue the numbering
   after the highest `Drill<N>.java` already there.
+- **All parts of a drill share one `Drill<N>.java` / `Drill<N>Test.java`** —
+  later parts extend the class the earlier ones built, so there's one file
+  per drill, not one per part.
+- Sitting length and series length are tunable in `scripts/config.py`:
+  `DRILL_PART_TARGET_MINUTES` (60), `DRILL_MIN_PARTS` / `DRILL_MAX_PARTS`
+  (3–6). They're interpolated straight into the generation prompt.
 - **Open manual-code-drills** launches the folder in your editor. It defaults
   to the **VS Code** CLI (`code`), which works out of the box if VS Code's
   "code" command is on your PATH (it is by default on Windows). To use a

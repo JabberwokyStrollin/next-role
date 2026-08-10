@@ -31,6 +31,7 @@ from config import (
     JOB_PIPELINE_PATH,
     PROCESS_LOG_PATH,
     detect_no_sponsorship,
+    record_discarded_url,
     derive_country,
     location_passes,
     load_json,
@@ -238,6 +239,7 @@ def ingest_job(
             "source_url":  apply_url,
             "detail":      f"Job discarded: {reason}",
         })
+        record_discarded_url(apply_url, "validation", reason, company_name, title)
         return None
 
     # ── Geography gate ────────────────────────────────────────────────────────
@@ -257,6 +259,9 @@ def ingest_job(
             "source_url":  apply_url,
             "detail":      f"Job discarded: location '{location[:60]}' not an enabled target (US is remote-only / off).",
         })
+        record_discarded_url(apply_url, "location",
+                             f"location '{location[:60]}' not an enabled target",
+                             company_name, title)
         return None
 
     # ── Company lookup ────────────────────────────────────────────────────────
@@ -269,6 +274,8 @@ def ingest_job(
             "source_url":  apply_url,
             "detail":      "Job discarded: company is ethics-excluded.",
         })
+        record_discarded_url(apply_url, "ethics", "company is ethics-excluded",
+                             company_name, title)
         return None
 
     # ── ATS auto-onboarding ──────────────────────────────────────────────────-
@@ -302,6 +309,9 @@ def ingest_job(
             "source_url":  apply_url,
             "detail":      f"Job discarded: JD says no sponsorship (\"...{no_sponsor_snippet}...\").",
         })
+        record_discarded_url(apply_url, "no_sponsorship",
+                             f"JD says no sponsorship: ...{no_sponsor_snippet}...",
+                             company_name, title)
         return None
 
     # ── Mechanical scores (no Claude) ─────────────────────────────────────────
@@ -337,6 +347,8 @@ def ingest_job(
             "source_url":  apply_url,
             "detail":      f"Job discarded: {wm_discard}.",
         })
+        record_discarded_url(apply_url, "work_model", wm_discard,
+                             company_name, title)
         return None
     print(f"  Work model: {work_model}")
 

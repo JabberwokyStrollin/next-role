@@ -101,10 +101,11 @@ SETUP.md.
    you…") — paste the question, hit Generate, copy the result.
 5. **Code drills** — interview-prep coding practice (see *Code drills* below).
    **Generate new drill prompt** has Claude produce a fresh, underspecified
-   Java drill; you implement it by hand in the sibling project, then **Check
-   my code & get feedback** for a review and **Mark drill complete**. A
-   **drills-completed-today: X / 1** meter auto-earns the section checkmark
-   (`DAILY_DRILL_GOAL`).
+   Java drill as a **3–6 part series**, one ~hour part per sitting; you
+   implement the current part by hand in the sibling project, then **Check my
+   code & get feedback** for a review and **Mark part N complete** to reveal
+   the next one. A **drill parts completed today: X / 1** meter auto-earns the
+   section checkmark (`DAILY_DRILL_GOAL`).
 
 The plain `/` route is the single-URL ingest form — paste a posting URL,
 fill in title/company/location, submit. The server auto-fetches the JD
@@ -288,30 +289,115 @@ The `/today` **Code drills** section keeps your hand-coding fluency sharp with
 short, interview-style Java exercises — the kind an interviewer describes out
 loud on a whiteboard/live screen.
 
-- **Generate new drill prompt** — Claude writes the next drill: a brief,
-  deliberately **underspecified** prompt plus a partial interface (method
-  names + params, **no return types** — deciding those is part of the drill).
-  It gives no hints about edge cases or what to watch for. Drills are numbered
-  in sequence (`Drill3`, `Drill4`, …) after whatever's already in the project.
-- The prompt renders as a **ready-to-paste Java class-description comment**
+**A drill is a series, worked one part per sitting.** Each generated drill is
+one small theme split into **3–6 parts**, each sized for about **an hour**
+including tests. Part 1 is the plain working version; every later part adds
+**exactly one** new gotcha — an ordering guarantee, eviction, defensive copies,
+thread safety, a no-rescanning-on-read requirement. You only ever see the part
+you're on: later parts show as *"not yet revealed"*, because seeing the whole
+spec at once is what turns an hour of practice into a four-hour block you put
+off and then rush.
+
+- **Generate new drill prompt** — Claude writes the next drill series. Each
+  sitting shows three layers, which together are enough to start typing:
+  1. **The drill** — a standing overview of what you're building, who calls it
+     and why. Same text every part.
+  2. **This part** — a brief, deliberately **underspecified** prompt plus
+     numbered *sitting tasks* ("Decide how bookings will be stored internally",
+     "Write the book and cancel methods and get them working end to end").
+  3. **The interface** — method names + params, **no return types** (deciding
+     those is part of the drill).
+
+  Underspecified means the *semantics* are yours to settle — case sensitivity,
+  tie-breaking, what happens on an overlap — never that the task is vague. No
+  hints about edge cases, and a part's twist is never flagged as a warning.
+  Drills are numbered in sequence (`Drill3`, `Drill4`, …) after whatever's
+  already in the project.
+- The current part renders as a **ready-to-paste Java class-description comment**
   (with a copy button) — drop it above the class you write. Implement
   `Drill<N>.java` + `Drill<N>Test.java` **by hand** in the sibling
-  `manual-code-drills` Maven project. **Open manual-code-drills** launches it in
-  your editor (VS Code by default; override `NEXTROLE_EDITOR_CMD`).
-- Regenerating while a drill is active **rerolls it at the same number** — the
-  number only advances once you **Mark drill complete**. Every generated prompt
-  (including rerolls) is recorded in the process log.
-- **Check my code & get feedback** — Claude reads your attempt + test and
-  returns an interview-style review (correctness, the ambiguities you resolved,
-  idiomatic Java, complexity, test quality, and signal an interviewer would
-  flag). The latest feedback shows inline.
-- **Mark drill complete** — counts toward the **drills-completed-today: X / 1**
-  meter (`DAILY_DRILL_GOAL`), which auto-earns the section's checkmark.
+  `manual-code-drills` Maven project. **All parts of a drill share that one
+  file** — later parts extend the class you already wrote. **Open
+  manual-code-drills** launches it in your editor (VS Code by default; override
+  `NEXTROLE_EDITOR_CMD`).
+- Regenerating **rerolls the drill at the same number only while no part is
+  done** — once you've banked a part, generating starts a fresh drill instead so
+  the work isn't thrown away. Every generated series (including rerolls) is
+  recorded in the process log.
+- **Finish part N — grade, answer & complete** — the one button you press when
+  a sitting is done. It grades your attempt, generates the reference answer
+  (appending Correct Code to your `.java` files), and marks the part complete,
+  revealing the next one. If you haven't written anything yet it fails and
+  leaves the part open; if only the reference answer fails, your grade and
+  completion still stand. Takes ~30-60s — it's two Claude calls.
+- **Undo finish of part N** — a small button beside the feedback header, for
+  when you press Finish on the wrong part. It reopens that part, discards its
+  grade, reference answer and last review, and puts your `.java` files back the
+  way they were — including restoring the previous part's Correct Code block,
+  which the mistaken finish had overwritten. **Your own code is never touched.**
+  It asks for confirmation first, and always names the part it will undo.
+- **Grade only (keep working)** — the same review *without* finishing, for when
+  you want feedback, a fix, and another look before committing the sitting.
+  Claude reads your attempt + test and
+  returns an interview-style review of **the current part** (correctness,
+  whether that part's requirement is really handled, regressions in earlier
+  parts, the ambiguities you resolved, idiomatic Java, complexity, test quality,
+  and signal an interviewer would flag). The latest feedback shows inline.
 
-next-role generates prompts and reviews attempts (Sonnet, same key as cover
-letters) — it never compiles or runs the Java; that's what the Maven project
-and `mvn test` are for. Drill state lives in `data/drills.json`. See *Code
-drills* in SETUP.md for the sibling-project layout and env vars.
+  The same call also **grades** the part — 0–5 on six skills (correctness, data
+  structures, idiomatic Java, complexity, tests, decomposition) plus a record of
+  which Java idioms you actually reached for. It's one call, not two: your code
+  is already in that prompt, so the grade costs only the few tokens the scores
+  take. Re-reviewing to check a fix overwrites the grade rather than adding a
+  second one, so it can't inflate your profile.
+- **Show correct answer** — a senior/staff reference solution for the class **as
+  of this part** (cumulative: this part plus every earlier one), with a design-
+  decisions block. It never reveals what later parts will ask for.
+
+  It's also **appended to your own files** — a clearly marked
+  `/* ===== CORRECT CODE — part N (reference) ===== */` block at the end of
+  `Drill<N>.java` (design notes + implementation) and `Drill<N>Test.java`
+  (tests), so the answer sits next to your attempt. It's a comment, so the file
+  still compiles; re-running replaces the block rather than stacking copies; and
+  it's stripped back out before any future review, so Claude never grades its
+  own answer as your work.
+- **Mark part N complete** — reveals the next part and counts toward the **drill
+  parts completed today: X / 1** meter (`DAILY_DRILL_GOAL`), which auto-earns the
+  section's checkmark. One sitting earns the day; completing the last part
+  finishes the drill.
+
+#### Proficiency and targeting
+
+Every grade feeds a **proficiency profile** — collapsible at the bottom of the
+section — that tracks two things separately, because they fail independently:
+
+- **Skills** — how well you're doing, averaged across every graded part. A skill
+  needs at least two graded parts before it counts as weak, so one bad sitting
+  is treated as noise.
+- **Idioms** — which parts of Java you actually reach for. You can score 5/5 on
+  every skill and still never once touch streams. That's a breadth gap, not a
+  quality gap, and only this axis can see it.
+
+The profile is **derived from the stored grades, never saved separately**, so
+re-reviewing a part just updates it — there's no stale copy to go wrong. It's
+also **recency-weighted**: a grade's influence halves every 5 graded parts, so
+improvement shows up and early rough drills don't anchor you forever. In
+practice a fixed weakness drops off the target list after about one drill's
+worth of better work. Idioms decay the same way, so something you used months
+ago but have since stopped reaching for comes back into the rotation.
+
+The next drill then reads it and aims at what's weak. Weak *skills* steer the
+theme; a rarely-used *idiom* becomes a **re-implementation part**: no new
+method, no new behaviour, just "rewrite the lookup logic entirely with the
+Streams API" or "redo this the way you'd have had to in Java 8 — no `var`, no
+records", with your existing tests kept passing unchanged as proof the rewrite
+is faithful. At most one such part per drill, and the panel says in plain words
+what the next drill will target, so it's never a black box.
+
+next-role generates prompts, reviews and grades attempts (Sonnet, same key as
+cover letters) — it never compiles or runs the Java; that's what the Maven
+project and `mvn test` are for. Drill state lives in `data/drills.json`. See
+*Code drills* in SETUP.md for the sibling-project layout and env vars.
 
 ---
 
@@ -392,8 +478,9 @@ prompt.
 | Generate cover letter | Sonnet 4.6 | ~$0.03 |
 | Generate comp estimate | Opus 4.7 | ~$0.15–0.20 |
 | Answer one application question | Sonnet 4.6 | ~$0.02–0.05 |
-| Generate a code drill | Sonnet 4.6 | ~$0.01 |
-| Review a code-drill attempt | Sonnet 4.6 | ~$0.02–0.05 |
+| Generate a code drill (3–6 part series) | Sonnet 4.6 | ~$0.01–0.02 |
+| Review a code-drill attempt (one part) | Sonnet 4.6 | ~$0.02–0.05 |
+| Reference solution for a part (cumulative) | Sonnet 4.6 | ~$0.03–0.06 |
 
 Bulk re-score under a new rubric:
 `python scripts/rescore_all.py --dry-run` prints a projected bill before
@@ -422,6 +509,7 @@ scripts/
   prefilter_staged.py   — relaxed pre-filter for LinkedIn-staged rows
   linkedin_fetch.py     — IMAP fetch of LinkedIn job-alert emails
   inbox_scan.py         — IMAP scan for rejection / interview replies to open applications
+  discard_ledger.py     — inspect/backfill/reset the crawl's discard ledger
   drills.py             — generate interview-prep code drills + review attempts (Sonnet)
   backup_data.py        — daily local snapshots of data/*.json (stray-delete recovery)
   dashboard.py          — terminal pipeline summary

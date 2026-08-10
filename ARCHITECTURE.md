@@ -32,6 +32,7 @@ Two cross-cutting rules govern most of the code and are referenced throughout:
 - [`scripts/prefilter_staged.py`](#scriptsprefilter_stagedpy) — relaxed pre-filter for staged LinkedIn rows
 - [`scripts/linkedin_fetch.py`](#scriptslinkedin_fetchpy) — IMAP fetch of LinkedIn job-alert emails
 - [`scripts/inbox_scan.py`](#scriptsinbox_scanpy) — IMAP scan for rejection / interview replies to open applications
+- [`scripts/discard_ledger.py`](#scriptsdiscard_ledgerpy) — inspect / backfill / reset the crawl's discard ledger (no Claude)
 - [`scripts/drills.py`](#scriptsdrillspy) — generate interview-prep code drills + review manual attempts (Sonnet)
 - [`scripts/backup_data.py`](#scriptsbackup_datapy) — daily local snapshots of the gitignored data/ files
 
@@ -119,12 +120,21 @@ file.
 | `PIPELINE_EXPIRY_DAYS` | `int` | An un-applied job (`active` / `cover_letter_ready`) older than N days (45) since ingest (`date_found`) auto-archives with reason `stale_pipeline` (see `scan_stale_jobs.archive_stale_jobs`, auto-run at end of crawl). Distinct from `STALENESS_TIERS` (scoring, keyed off `date_posted`) and `auto_age_application` (ages applications, not jobs). |
 | `REJECTION_REASONS` | `dict[str, str]` | SSOT for rejection-reason key → human label: `generic`, `position_filled`, `interview_failed`, `ghosted_timeout`. Consumed by serve.py status buttons, `metrics.py`, and the inbox scanner. |
 | `DAILY_APPLICATION_GOAL` | `int` | Applications-per-day target (10). The `/today` "Cover letters & apply" section auto-earns its green checkmark once this many applications are logged *today*. Derived from `application_tracker.date_applied`, so it resets daily. serve.py reads the constant; never hardcode the number. |
-| `DAILY_DRILL_GOAL` | `int` | Code-drills-per-day target (1). The `/today` "Code drills" section auto-earns its checkmark once this many drills are marked complete *today* (`drills_completed_today`). |
+| `DAILY_DRILL_GOAL` | `int` | Code-drill-**parts**-per-day target (1). The `/today` "Code drills" section auto-earns its checkmark once this many drill *parts* are marked complete *today* (`drills_completed_today`). Parts, not whole drills — one part is one sitting. |
+| `DRILL_PART_TARGET_MINUTES`, `DRILL_MIN_PARTS`, `DRILL_MAX_PARTS` | `int` | Sitting budget per drill part (60 min) and the number of parts a generated drill is split into (3–6 — each part is one method plus its tests, so a theme needs more of them). Read by `drills._GENERATE_SYSTEM` (which interpolates all three into the prompt) and by `serve.render_drills_body` for the "budget about N minutes" note. |
 | `DRILLS_STORE_PATH`, `MANUAL_CODE_DRILLS_DIR`, `EDITOR_CMD` | Path / str | Generated-drill store (`data/drills.json`); the sibling Maven project holding the code (default `../manual-code-drills`, override `NEXTROLE_DRILLS_DIR`); the editor CLI for the open button (`NEXTROLE_EDITOR_CMD`, default `"code"` for VS Code → file-manager fallback on failure). |
 | `DATA_BACKUP_DIR`, `DATA_BACKUP_RETAIN_DAYS` | Path / int | Daily-snapshot dir (default `data/backups/`; override with `NEXTROLE_BACKUP_DIR` to a path outside the repo so snapshots survive a full `data/` loss) and retention (7). See `scripts/backup_data.py`. |
-| Drill helpers | funcs | `drill_impl_path(n)` / `drill_test_path(n)` (→ `Drill<n>.java` / `Drill<n>Test.java` in the Maven project); `load_drills`/`save_drills`; `next_drill_number()` (max of on-disk `Drill<N>.java` + store numbers, +1); `current_drill()` (highest number); `drills_completed_today()`; `mark_drill_complete(n)`. |
+| `DRILL_SKILLS`, `DRILL_SKILL_MAX`, `DRILL_IDIOMS` | `dict[str,str]` / `int` | The two graded vocabularies and the score scale (0–5). `DRILL_SKILLS` = how *well* the work was done (correctness, data_structures, idiomatic_java, complexity, tests, decomposition); `DRILL_IDIOMS` = *which* parts of Java were reached for (streams, lambdas, optional, records, pattern_matching, collections_api, generics, polymorphism, concurrency, legacy_java8). Interpolated into `drills._REVIEW_SYSTEM` and used to sanitize what comes back, so the prompt, the stored assessment and the derived profile can't drift. |
+| `DRILL_GRADE_HALF_LIFE` | `int` | A grade's influence halves every this many graded parts (5). Applied to **both** axes by `_recency_weights`, so improvement surfaces and old grades stop anchoring — a lifetime average can't show progress. Weighted by **position, not wall-clock time**: a fortnight off shouldn't erase the profile, only further practice should move it. |
+| `DRILL_PROFICIENCY_MIN_SAMPLES`, `DRILL_WEAK_SKILL_THRESHOLD`, `DRILL_RARE_IDIOM_MAX_USES`, `DRILL_MAX_TARGET_SKILLS` | `int` / `float` / `int` / `int` | Profile thresholds: a skill needs ≥2 graded parts before it can be called weak (one bad sitting is noise), a mean under 3.5/5 is weak, an idiom used in ≤1 part is a breadth gap, and the generation brief names at most the 3 worst skills. The profile keeps the full truth; the **brief is a priority list** — a harsh reviewer flags every skill at once early on, and "everything is weak" gives the generator nothing to aim at. |
+| Proficiency helpers | funcs | `drill_assessments()` (every stored per-part grade, oldest first — one per part); `drill_proficiency()` (**derived, recency-weighted** profile: per-skill mean/count/weak, per-idiom uses/raw/rare, plus `weak_skills` worst-first and `rare_idioms` least-used-first — `mean` and `uses` are weighted, `count` and `raw` are honest sample counts); `_recency_weights(n)` (oldest-first half-life weights; newest always 1.0); `drill_proficiency_brief()` (plain-text summary for the generation prompt, `""` until something is graded). |
+| `CORRECT_CODE_BEGIN`, `CORRECT_CODE_END`, `strip_correct_code(text)` | str / func | Markers delimiting the reference solution that `drills.write_correct_code` appends to the operator's own `Drill<N>.java` / `Drill<N>Test.java`, and the function that removes it again. A **block comment**, so the file still compiles (two same-named classes can't coexist). Delimited for two reasons that both matter: re-running solve *replaces* the block instead of stacking copies, and `review_drill` **strips it before grading** — otherwise Claude reads its own reference answer as the candidate's work and the whole proficiency profile inflates. An unterminated block drops everything from its start, since the remainder can't be trusted to be the operator's code. |
+| `DISCARDED_URLS_PATH`, `DISCARD_REASONS` | Path / `dict[str,str]` | The discard ledger (`data/discarded_urls.json`) and its reason codes (`validation`, `location`, `ethics`, `no_sponsorship`, `work_model`). The codes are the reset selector — renaming one orphans existing entries. |
+| Discard-ledger helpers | funcs | `load_discarded_urls()` / `save_discarded_urls()`; `record_discarded_url(url, reason, detail, company, title)` (overwrites, never duplicates; ignores an empty URL); `is_url_discarded(url, ledger=None)`; `clear_discarded_urls(reason=None)` → count removed. **Why it exists:** a discard never reaches `job_pipeline.json`, so the crawl's URL dedup has no memory of it and re-processes it every run — and the work-model verdict costs a Sonnet call to reach. Measured at 860 wasted scoring calls / 10.1h across 7 runs. |
+| Drill helpers | funcs | `drill_impl_path(n)` / `drill_test_path(n)` (→ `Drill<n>.java` / `Drill<n>Test.java` in the Maven project — **one file per drill, shared by all its parts**); `load_drills`/`save_drills`; `next_drill_number()` (max of on-disk `Drill<N>.java` + store numbers, +1); `current_drill()` (highest number). Part-level: `drill_parts(drill)` (the parts list; **adapts a pre-parts record on read** into an equivalent one-part series, so no data migration was needed), `current_drill_part(drill)` (first not-yet-complete part, else the last), `find_drill_part(drill, part|None)` (`None` = current), `drill_part_progress(drill)` → `(complete, total)`, `drills_completed_today()` (counts **parts** completed today), `mark_drill_part_complete(n, part=None)` → updated record or `None` (completing the last part completes the drill, which is what frees `next_drill_number` to advance); `revert_drill_part(n, part=None)` → the misclick undo, reopening the most recently completed part (or a named one) and dropping its `assessment`, `solution` and last `feedback` entry. |
 | `INBOX_SCAN_WINDOW_DAYS` | `int` | Look-back window (14) for `scripts/inbox_scan.py` — INBOX messages received within this many days are scanned for rejection/interview replies, regardless of read state. |
-| `_NEEDS_REPLY_PATTERNS` / `_AUTOMATED_SENDER_RE` / `_ATS_SENDER_DOMAIN_RE` | `list[Pattern]` / `Pattern` / `Pattern` | Phrase rules for a human asking a question (relocation, sponsorship, salary, notice period, "could you confirm", a bare "?"), the automated-mailbox local-part test (`no-reply@`, `careers@`, `talent@`, …), and the **ATS platform domain** test (`myworkday.com`, `greenhouse.io`, `lever.co`, `icims.com`, …). Consumed via `detect_needs_reply` / `is_automated_sender`. The domain test exists because Workday sends as `salesforce@myworkday.com`, whose local part is just the company name and passes the first test. **Both** halves must hold — keyword matching alone fires on "Questions? Just reply to this email" in every automated acknowledgement. |
+| `_NEEDS_REPLY_PATTERNS` / `_AUTOMATED_SENDER_RE` / `_ATS_SENDER_DOMAIN_RE` | `list[Pattern]` / `Pattern` / `Pattern` | Phrase rules for a human asking a question (relocation, sponsorship, salary, notice period, "could you confirm", a bare "?"), the automated-mailbox local-part test (`no-reply@`, `careers@`, `talent@`, …), and the **ATS platform domain** test (`myworkday.com`, `greenhouse.io`, `greenhouse-mail.io`, `lever.co`, `icims.com`, …). Consumed via `detect_needs_reply` / `is_automated_sender` / `is_ats_sender`. **List the platform's RELAY domain, not just its apply-side one** — Greenhouse mails from `us.greenhouse-mail.io`, never `greenhouse.io`, so listing only the latter missed every message it actually sends. The domain test exists because Workday sends as `salesforce@myworkday.com`, whose local part is just the company name and passes the first test. **Both** halves must hold — keyword matching alone fires on "Questions? Just reply to this email" in every automated acknowledgement. |
+| `_ACKNOWLEDGEMENT_PATTERNS` / `_RECRUITING_RELEVANCE_RE` | `list[Pattern]` / `Pattern` | "Thank you for applying / we received your application" phrasing, consumed by `detect_acknowledgement`; and the job-application relevance test behind `looks_like_recruiting_mail`, used only by the inbox matcher. |
 | `_POSITION_FILLED_PATTERNS` / `_REJECTION_PATTERNS` / `_OFFER_PATTERNS` / `_INTERVIEW_PATTERNS` | `list[Pattern]` | Deterministic phrase rules for `classify_inbox_email`. Position-filled → rejection reason `position_filled`; general rejection → `generic`; offer → `offer`; advancement (recruiter screen / interview invitation) → signal `interview`. "invite" counts only when followed by an interview/call word (so "invite you to follow us on LinkedIn" is ignored). |
 | `_CONDITIONAL_LEAD_RE` | `Pattern` | Guard used by `_first_match_evidence(..., skip_conditional=True)` to skip rejection phrases embedded in a conditional clause ("If you are not selected …") — application-confirmation boilerplate, not a real rejection. |
 | `_ADVANCE_IN_PROGRESS` | `frozenset` | Statuses (`recruiter_screen`, `interview`) at which a rejection is an interview failure and a further advancement email promotes the screen. Consumed by `suggest_status_transition`. |
@@ -359,9 +369,21 @@ Deterministically classify an inbox email's *own signal*. Returns
 (an **advancement** signal — recruiter screen OR interview invitation), or
 `("needs_reply", None, …)`, or
 `(None, None, "")` when no signal is found (including application-received
-confirmations). Order is **rejection → offer → interview → needs_reply** so a
-rejection that mentions "interview"/"offer" isn't mislabeled, and a rejection or
-invitation containing a question keeps its stronger signal. This is only what the email says;
+confirmations). Order is **rejection → offer → acknowledgement bail-out →
+interview → needs_reply** so a rejection that mentions "interview"/"offer" isn't
+mislabeled, and a rejection or invitation containing a question keeps its
+stronger signal.
+
+The **acknowledgement bail-out** (`detect_acknowledgement`, gated on
+`is_automated_sender`) is what stops "thank you for applying" boilerplate faking
+the two weaker signals: its future-tense advancement line — *"if your experience
+is a match, one of our team members will contact you to schedule a call"* —
+surfaced a Ping Identity Greenhouse acknowledgement as a **Recruiter Screen**,
+and its "questions? just reply" line reads as a human question. Both guards are
+load-bearing: placing it **after** rejection/offer keeps real rejections (which
+routinely open with "thank you for applying"), and requiring an **automated
+sender** keeps a human recruiter's *"Thanks for applying! Are you open to
+relocating?"* — a real question the operator must answer. This is only what the email says;
 the concrete status the operator applies is resolved from the application's
 current status by `suggest_status_transition` (below). Per the "deterministic
 rules in code" principle, the phrase rules live here (the SSOT), never in a
@@ -370,6 +392,15 @@ review, so the rules bias toward recall. `_first_match_evidence(text, patterns,
 skip_conditional=False)` is the private helper returning a context snippet around
 the first matching pattern; `skip_conditional=True` ignores matches inside a
 conditional clause (the "If you are not selected …" confirmation boilerplate).
+
+#### `is_ats_sender(from_header) -> bool`
+True when the From header is an ATS platform's **relay** domain. Narrower than `is_automated_sender` (which also fires on `no-reply@`-style local parts): this one answers *"is a hiring system speaking for a company"*, which is what lets `inbox_scan.company_matches` trust a company name found in the subject line.
+
+#### `looks_like_recruiting_mail(subject, body) -> bool`
+Whether the message is about a job application at all — a relevance gate for inbox matching, never a status signal. Deliberately narrow: "offer" and "job" are excluded because marketing mail is full of both.
+
+#### `detect_acknowledgement(subject, body) -> str`
+SSOT for "this is an application-received confirmation, not a status change". Consumed only by `classify_inbox_email`, to suppress the interview and needs-reply signals — never a rejection or an offer, which are checked first.
 
 #### `is_automated_sender(from_header) -> bool` / `detect_needs_reply(subject, body, from_header) -> str`
 The **needs_reply** signal: a human asked something that wants an answer —
@@ -1431,7 +1462,7 @@ calling `linkedin_fetch._fetch_jd_text`.
 | `APPLICATION_TRACKER_PATH` | Local copy of the tracker path (also imported from `config.py`). |
 | `MIN_JD_LENGTH` | 200 — JD body length threshold (mirrors ingest). |
 | `DAILY_CHECKLIST_PATH`, `EMAIL_STAGED_PATH`, `INBOX_MATCHES_PATH` | Daily-checklist state, LinkedIn staged-rows file, and staged inbox rejection/interview matches (`data/inbox_matches.json`). |
-| `CHECKLIST_SECTIONS` | Ordered `(id, title, hint)` for the five `/today` sections (status_updates, crawl, linkedin_ingest, cover_letters, code_drills). The `cover_letters` checkmark is auto-earned once `applications_today_count()` reaches `config.DAILY_APPLICATION_GOAL`, and `code_drills` once `config.drills_completed_today()` reaches `config.DAILY_DRILL_GOAL` (see `section_done`); the others use the manual `/today/toggle`. Code-drills store + constants live in `config.py`. |
+| `CHECKLIST_SECTIONS` | Ordered `(id, title, hint)` for the five `/today` sections (status_updates, crawl, linkedin_ingest, cover_letters, code_drills). The `cover_letters` checkmark is auto-earned once `applications_today_count()` reaches `config.DAILY_APPLICATION_GOAL`, and `code_drills` once `config.drills_completed_today()` (drill **parts** completed today) reaches `config.DAILY_DRILL_GOAL` (see `section_done`); the others use the manual `/today/toggle`. Code-drills store + constants live in `config.py`. |
 | `STATUS_ACTION_MAP` | Button-value → `(status, rejection_reason \| None)` for status updates POSTed from `/today`. The reason key (SSOT `config.REJECTION_REASONS`) is passed to `update_status.py status --rejection-reason`; includes `rejected_interview_failed`. |
 | `CRAWL_TAIL_MAX`, `INGESTED_RE` | Background crawl: tail-line cap (50) + regex to capture `Ingested: N` from stdout. |
 | `crawl_state_lk`, `crawl_state` | Threading lock + state dict for the background crawl. |
@@ -1469,10 +1500,12 @@ calling `linkedin_fetch._fetch_jd_text`.
 #### `POST /today/cl/archive` — flip job to `archived` (e.g. closed posting).
 #### `POST /today/apply/log` — shell out to `update_status.py log`.
 #### `POST /today/toggle` — flip a section's done flag in `daily_checklist.json`.
-#### `POST /today/drill/generate` — shell out to `scripts/drills.py generate` (Claude): produce the next drill and append it to `data/drills.json`. Flashes the new drill number.
-#### `POST /today/drill/review` — shell out to `scripts/drills.py review --number N` (Claude): read the operator's `Drill<N>.java`+test from the Maven project, store + surface interview-style feedback.
-#### `POST /today/drill/solve` — shell out to `scripts/drills.py solve --number N` (Claude): generate the senior/staff-level reference "correct answer" from the prompt + interface (not the attempt), store it on the record's `solution`, and surface it inline.
-#### `POST /today/drill/complete` — mark drill `number` complete via `config.mark_drill_complete` (sets `status`/`completed_at`), counting toward `DAILY_DRILL_GOAL`.
+#### `POST /today/drill/generate` — shell out to `scripts/drills.py generate` (Claude): produce the next drill *series* (3–6 parts) and append it to `data/drills.json`. Flashes the new drill number.
+#### `POST /today/drill/review` — shell out to `scripts/drills.py review --number N [--part M]` (Claude): read the operator's `Drill<N>.java`+test from the Maven project, store + surface interview-style feedback for the posted part.
+#### `POST /today/drill/solve` — shell out to `scripts/drills.py solve --number N [--part M]` (Claude): generate the senior/staff-level reference "correct answer" as of that part (cumulative) from the prompts + interfaces (not the attempt), store it on the **part's** `solution`, and surface it inline.
+#### `POST /today/drill/revert` — undo a mis-clicked Finish: shell out to `scripts/drills.py revert --number N [--part M]`. No Claude call — it only removes what finish added. Surfaced as a small confirm-guarded **Undo finish of part N** button beside the feedback header, targeting the most recently completed part.
+#### `POST /today/drill/finish` — the **primary** action: shell out to `scripts/drills.py finish --number N [--part M]`, which grades the attempt, generates the reference answer (appending Correct Code to the operator's `.java` files) and marks the part complete, in one step. **Two** Claude calls back to back, so it passes `timeout=420` to `run_drill_command`. A grading failure aborts everything and leaves the part open (no attempt on disk = nothing to finish); a reference-answer failure is reported but completion still stands.
+#### `POST /today/drill/complete` — mark the posted `part` of drill `number` complete via `config.mark_drill_part_complete` (sets the part's `status`/`completed_at`; the drill's too once the last part lands), counting toward `DAILY_DRILL_GOAL`. Flashes either "part X of Y done, next part is now showing" or series-complete.
 #### `POST /today/drill/open-ide` — launch `config.EDITOR_CMD` (default `code`, VS Code) on `config.MANUAL_CODE_DRILLS_DIR`; resolves the launcher via `shutil.which` and routes `.cmd`/`.bat` (e.g. `code.cmd`) through `cmd /c`. Falls back to `os.startfile` (file manager) if the launch fails.
 #### `POST /today/status` — shell out to `update_status.py status`.
 #### `POST /today/inbox/scan` — shell out to `inbox_scan.py`; flash the new-match count.
@@ -1508,7 +1541,8 @@ Whether a checklist section counts as complete for its green badge. Most
 sections read the manual toggle in `state`; `cover_letters` **also**
 auto-completes once `apps_today >= config.DAILY_APPLICATION_GOAL`, and
 `code_drills` once `config.drills_completed_today() >= config.DAILY_DRILL_GOAL`
-(a manual toggle still forces either done early). Used by `daily_checklist_page`
+(drill **parts** completed today, not whole drills — one part is one sitting;
+a manual toggle still forces either done early). Used by `daily_checklist_page`
 for the badge, the done-count/progress bar, and the first-undone auto-open.
 
 #### `days_since_iso(iso_date: str) -> int`
@@ -1606,15 +1640,15 @@ backup failure can't block the daily-checklist page.
 - `_render_gov_company_block(company) -> str` / `_render_gov_job_block(job, company) -> str` — gov/defense screen surfacing. The first renders the company-level flag + evidence (empty for `none`); the second computes the per-role result via `config.gov_screen_result` and renders a card with flag, role exposure, result badge, the apply-rank effect (`flag` → −`GOV_SCREEN_FLAG_PENALTY_PCT`% penalty shown as `base → adj`; `fail` → "excluded"), and the interview questions when emitted (empty when there's nothing to surface). `_GOV_FLAG_LABEL` / `_GOV_RESULT_LABEL` are the shared badge label+color SSOT.
 - `job_detail_page(job_id) -> str` — full per-job view with score breakdown, JD viewer, comp panel, the company-research card, and the gov/defense screen card (`_render_gov_job_block`), pinned high (right under the header for non-interview status, right under the comp card for interview-stage).
 - `resume_page() -> str` — `/resume` view.
-- `render_section_body(sid, view='default') -> str` — dispatches to the per-section body renderer. A single `view` query param is shared across sections; only the open section interprets it (status_updates: `active`/`ghosted`; linkedin: `default`/`all`/`failing`; code_drills: `<drill-id>` / `reveal` / `<drill-id>:reveal`).
+- `render_section_body(sid, view='default') -> str` — dispatches to the per-section body renderer. A single `view` query param is shared across sections; only the open section interprets it (status_updates: `active`/`ghosted`; linkedin: `default`/`all`/`failing`). `code_drills` accepts the parameter for signature parity but ignores it — it always shows the current drill's current part.
 - `render_linkedin_body(view='default') -> str` — LinkedIn-ingest section body; `view` controls passing-only vs. all-rows filter. Every action form (fetch / pre-filter / bulk-discard / per-row) carries a hidden `view` field so the post-action redirect stays on the active view; the section's inline `<script>` also saves/restores `window.scrollY` via `sessionStorage` so acting on a row keeps the scroll position instead of jumping to the top.
 - `render_staged_row(row, view='default') -> str` — one staged-row card; embeds the hidden `view` field so Ingest/Fetch JD/Discard preserve the active view on redirect.
 - `render_crawl_body() -> str` — crawl-section body with the live status badge.
 - `render_status_updates_body(view='active') -> str` / `render_app_row(app) -> str` — status-updates section + per-app row with status-change buttons. Two sub-tabs: `active` (live applications, excludes ghosted) and `ghosted` (auto-flipped, awaiting the `ghosted_timeout` auto-rejection). `render_app_row` includes the `rejected_interview_failed` button. Prepends `render_inbox_matches_block(apps)`.
 - `render_inbox_matches_block(apps) -> str` / `render_inbox_match_row(m, current_status=None) -> str` — top-of-section panel for the inbox scanner: a "Scan inbox for replies" button (disabled when `linkedin_env_missing()`), plus any staged matches from `data/inbox_matches.json` whose application is still open, each with a one-click **Apply: <suggestion>** (posts to `/today/inbox/apply`) and **Dismiss** (`/today/inbox/dismiss`). The block passes each match's live application status into the row, which resolves the suggestion via `inbox_match_suggestion`. Rows show company, title, the resolved suggestion badge (recruiter screen / interview / offer / rejection reason), sender/subject, and the evidence snippet. Staged suggestions only — applying is always an explicit operator action.
 - `render_cover_letters_body() -> str` — top-N apply queue, ranked by `apply_rank_score` (full composite minus the gov-screen `flag` penalty), filtered by `company_block_reason` and `gov_screen_block_reason` (gov/defense `fail` roles hidden). Rows still display the pure composite via `job_score`. Renders the **Applications sent today: X / `DAILY_APPLICATION_GOAL`** meter (from `applications_today_count`), which turns green + shows "✓ goal met" once the goal is reached.
-- **Code drills** (`render_drills_body(view='default') -> str`) — the `code_drills` section. Reads the generated drills from `config.load_drills` and shows: a **drills-completed-today: X / `DAILY_DRILL_GOAL`** meter, the **current drill** (`config.current_drill` — highest number) with its prompt rendered by `drill_comment_block` as a **ready-to-paste Java class-description comment** (a readonly `<textarea>` + a "Copy prompt comment" button, self-contained inline JS) — the comment only, no class stub — and the actions **Open manual-code-drills** / **Generate new drill prompt** / **Check my code & get feedback** / **Show correct answer** / **Mark drill complete**. The latest review feedback renders inline; the reference solution (once generated) renders in a collapsible **Correct answer** `<details>`. `run_drill_command(*args)` shells out to `scripts/drills.py` (generate/review/solve, ~15-30s Claude call, 180s timeout); `set_drill_flash`/`pop_drill_flash` back the section's one-shot flash. Nothing here compiles or runs Java — the code lives in the sibling `manual-code-drills` Maven project (`config.MANUAL_CODE_DRILLS_DIR`).
-- `drill_comment_block(drill) -> str` — formats a drill as a `//`-commented, word-wrapped class-description comment (prompt + interface, return types omitted). Comment only — no class stub — so it drops in above whatever class declaration you write. Matches the hand-written Drill1/Drill2 comment style; derived on render from the stored plain-text prompt/interface (nothing extra stored).
+- **Code drills** (`render_drills_body(view='default') -> str`) — the `code_drills` section. Reads the generated drills from `config.load_drills` and shows: a **drill parts completed today: X / `DAILY_DRILL_GOAL`** meter, the **current drill** (`config.current_drill` — highest number), a **series stepper**, and that drill's **current part only** (`config.current_drill_part`) rendered by `drill_comment_block` as a **ready-to-paste Java class-description comment** (a readonly `<textarea>` + a "Copy prompt comment" button, self-contained inline JS) — the comment only, no class stub — plus the actions **Finish part N — grade, answer & complete** (primary, one click) / **Open manual-code-drills** / **Grade only (keep working)** / **Generate new drill prompt**. The standalone *mark complete* and *show correct answer* buttons are gone — both are folded into Finish; *Grade only* remains for iterating on feedback before committing the sitting. Review / solve / complete all post the current `part` alongside `number`. The stepper shows completed parts with a ✓ and their titles, the current part highlighted, and **later parts as "not yet revealed" — numbers only, never titles or prompts**, since naming the upcoming gotcha would hand it over early and put the series back into one sitting. Feedback and the grade fall back to `_latest_reviewed_part` when the current part has none of its own — finishing advances the view to the *next* part, which would otherwise hide the grade just earned; the older part's block is badged **completed**. The feedback renders inline, followed by its **grade** (`_render_assessment_html` — a bar per skill plus the idioms actually reached for); its reference solution (once generated) renders in a collapsible **Correct answer** `<details>`. A collapsible **Proficiency** panel (`_render_proficiency_html`) closes the section with the cross-drill profile from `config.drill_proficiency`, and states in plain words what the next drill will target, so the targeting is never a black box. The **Generate** button is labelled *Regenerate* only while no part is banked (matching `drills.generate_drill`'s reroll rule). `run_drill_command(*args)` shells out to `scripts/drills.py` (generate/review/solve, ~15-30s Claude call, 180s timeout); `set_drill_flash`/`pop_drill_flash` back the section's one-shot flash. Nothing here compiles or runs Java — the code lives in the sibling `manual-code-drills` Maven project (`config.MANUAL_CODE_DRILLS_DIR`).
+- `drill_comment_block(drill, part) -> str` — formats **one part** as a `//`-commented, word-wrapped class-description comment, in the three layers needed to start typing: header (`Drill N: Title — part M of K: Part title`), a **`The drill:`** block carrying the series `premise` (the standing brief, repeated every part), a **`Part M — <title>:`** block with that part's prompt, a numbered **`This sitting:`** block from its `tasks`, then the methods that part introduces (return types omitted, labelled "Methods this part adds" from part 2 on). Legacy parts have no premise or tasks and simply render prompt + interface under `This sitting:`. Comment only — no class stub — so it drops in above whatever class declaration you write, or gets appended when a later part extends an existing class. Later parts are never included. Matches the hand-written Drill1/Drill2 comment style; derived on render from the stored plain-text fields (nothing extra stored).
 - `_fmt_currency(value, currency) -> str` — `"CAD 245,000"` formatting.
 - `render_comp_panel(comp_record, job_id) -> str` — comp-estimate accordion inside a cover-letter row.
 - `render_cl_row(job, co_by_id=None, comp_record=None, apps=None) -> str` — one cover-letter row in the apply queue. When `apps` is supplied, runs `config.find_duplicate_application`; on a hit it renders an "⚠ already applied" badge and gates Mark Applied behind a confirm dialog that posts `force=1`. Also renders a `gov/defense: flag` badge showing the apply-rank penalty (`rank N/130`) when the gov-screen result is `flag`; `fail` roles are excluded upstream so they don't reach this renderer. The row still displays the pure composite via `job_score`, but the apply queue is ordered by `apply_rank_score`.
@@ -1987,8 +2021,8 @@ subprocess 300s. Two properties keep it inside that:
 - `_extract_text(msg) -> str` — message body as plain text (prefer `text/plain`, else strip HTML).
 - `_received_date(msg) -> str` — `Date:` header → `YYYY-MM-DD`.
 - `_company_core_tokens(name)` / `_company_slug(name)` / `_sender_domain_label(from_header)` — normalization helpers for matching.
-- `company_matches(company_name, from_header, subject) -> bool` — company-name phrase match in From/Subject, or slug overlap with the sender domain label (covers ATS relays, which name the company in the From-display/subject).
-- `_title_tokens(title)` / `match_application(open_apps, from_header, subject, body) -> dict | None` — pick the open application the message relates to; when several open apps share the matched company, prefer the one whose title tokens appear in the subject/body.
+- `company_matches(company_name, from_header, subject) -> bool` — **the message must come FROM the employer**, via one of three sender-anchored routes: (1) the sender's own domain is the company (`no-reply@samsara.com`, `…@email.careers.microsoft.com`); (2) an ATS relay (`is_ats_sender`) names the company in From/Subject — Greenhouse identifies the employer only in the text; (3) the company appears in the From **display name**, covering a recruiter at a personal or agency address. A name in the SUBJECT alone is deliberately not a route: it matched a Quora Digest headed *"Are Google interviews harder than … Amazon and Microsoft?"* to a Microsoft application. `_from_display_name` splits the header.
+- `_title_tokens(title)` / `match_application(open_apps, from_header, subject, body) -> dict | None` — pick the open application the message relates to; when several open apps share the matched company, prefer the one whose title tokens appear in the subject/body. Gated first by `config.looks_like_recruiting_mail`: a plausible sender is not enough on its own, because Microsoft Rewards mails from `microsoftrewards.com` — whose domain label contains "microsoft" — and a prize-draw promo cleared the sender test.
 - `_message_key(mid, from_header, subject, received) -> str` — stable dedup key (Message-ID, else a content digest).
 - `build_match(...) -> dict` — assemble one staged-match record (see DATA.md `inbox_matches.json`).
 - `_since_date(window_days) -> str` — IMAP `SINCE` token (DD-Mon-YYYY).
@@ -2011,46 +2045,169 @@ completes — so the next scan redoes it.
 
 ---
 
+## `scripts/discard_ledger.py`
+
+**Role.** Operator tool for `data/discarded_urls.json` — the crawl's memory of
+postings it already judged and threw away. No Claude calls.
+
+**Three modes.**
+
+- *(default)* summarise the ledger by reason code.
+- `--backfill` — rebuild entries from `job_discarded` events in
+  `process_log.json`. Those events have always carried `source_url`, so the
+  memory is recoverable retroactively instead of relearned one expensive crawl
+  at a time. Only ever **adds**; an existing entry is left alone (the live one is
+  more precise). `reason_for_detail` maps the log's prose back to a reason code,
+  work-model patterns first since their wording also contains "role".
+- `--reason <code>` / `--all`, with `--apply` — delete entries. Dry-run by
+  default, and the dry run warns that each cleared URL costs a fresh JD fetch +
+  Claude call on the next crawl.
+
+**When a reset is mandatory.** Loosening the policy that caused the discards.
+Widen `US_ACCEPTED_WORK_MODELS` to accept `"hybrid"` and every `work_model` entry
+is a role the operator would now take but the crawl will never look at again:
+`python scripts/discard_ledger.py --reason work_model --apply`. This is the
+ledger's parallel of the `scan_no_sponsorship.py` / `scan_foreign_locations.py`
+sweeps.
+
+**CLI.** Machine-readable last line: `LEDGER: <total>`, `BACKFILLED: <n>`,
+`CLEARED: <n>`, or `WOULD_CLEAR: <n>`.
+
+---
+
 ## `scripts/drills.py`
 
 **Role.** Backs the `/today` "Code drills" section with three Claude-driven
-actions (Java only). The store, numbering, and completion helpers live in
+actions (Java only). The store, numbering, and part helpers live in
 `config.py`; this script adds the LLM calls. Uses `CL_MODEL` (Sonnet), the same
 key/model as cover letters / answer-questions. **Never compiles or runs Java** —
 the code + JUnit tests live in the sibling Maven project
 (`config.MANUAL_CODE_DRILLS_DIR`).
 
+**A drill is a multi-part series.** One small theme is split into
+`config.DRILL_MIN_PARTS`..`DRILL_MAX_PARTS` (3–6) parts, each sized for a single
+~`config.DRILL_PART_TARGET_MINUTES` sitting: part 1 is the plain working
+version, and every later part adds **exactly one** new gotcha. All parts extend
+the **same** `Drill<N>.java` / `Drill<N>Test.java`, so `review` and `solve` are
+**cumulative** — they judge / write the class as of the current part.
+
 **Functions.**
 
-- `generate_drill(language='java') -> dict` — asks Claude for a drill: a short,
-  deliberately **underspecified** interview-style prompt plus a partial
-  interface (method names + params, **no return types**, **no hints** about edge
-  cases / pitfalls). The system prompt (`_GENERATE_SYSTEM`) enforces those
-  constraints and passes prior drill titles to avoid repeats. **The number does
-  not advance while the current drill is still active** — if `config.current_drill`
-  is `active`, generation reuses that number and *replaces* the record (a
-  reroll); only once it's marked complete (or there is none) does it take
-  `config.next_drill_number`. **Every** generated prompt — including
-  regenerations — is written to the process log (`drill_generated`, with the full
-  `prompt`/`interface` and a `regenerated` flag), so there's a durable record of
-  all drills created even though the store keeps only the latest active version.
-- `review_drill(number) -> str` — reads the operator's `Drill<N>.java` +
-  `Drill<N>Test.java` from the Maven project and asks Claude
-  (`_REVIEW_SYSTEM`) for an interview-style review (correctness, the
-  ambiguities the prompt left open, idiomatic Java, complexity, test quality,
-  interview signal). Appends `{at, text}` to the record's `feedback` and returns
-  it. Raises `FileNotFoundError` if no attempt exists yet.
-- `solve_drill(number) -> str` — asks Claude (`_SOLVE_SYSTEM`) for the reference
-  "correct answer": a senior/staff-level `Drill<N>` implementation + JUnit test
-  with an explicit design-decisions block, derived from the **prompt + interface
-  only** (it does not read the operator's attempt). Stores it on the record's
-  `solution` (`{at, text}`, overwritten on regenerate) and returns the Markdown.
-- `_call_claude`, `_extract_json`, `_append_log` — helpers mirroring
-  `answer_questions.py`.
+- `generate_drill(language='java') -> dict` — asks Claude for a drill *series*
+  in three layers, which is what makes a part actionable on its own: a
+  drill-level `premise` (**the overview** — 3–5 sentences on what's being built,
+  who calls it and why, and that it's one class extended across sittings), then
+  3–6 parts, each with a short, deliberately **underspecified** interview-style
+  `prompt`, a `tasks` list (≤3 imperative steps — what to *do* this sitting,
+  last one always the tests), and a partial interface (method names + params,
+  **no return types**, **no hints** about edge cases / pitfalls, and only the
+  methods **that part** introduces). `_GENERATE_SYSTEM` interpolates the three
+  `DRILL_*` constants and enforces the sizing rules (part 1 plain, **≤3
+  methods**, finishable in the sitting including tests; one twist per later
+  part; a part that only changes existing behaviour is ideal) plus three
+  coherence rules: the overview may not restate the current part, foreshadow a
+  later part, or use performance/ordering/concurrency/immutability language; it
+  may not name the class (always `Drill<N>`); and every operation the prompt or
+  tasks mention must be reachable through a method of this or an earlier part —
+  describing an action with no method (*"open a session"*) reads as a missing
+  requirement rather than an ambiguity to resolve. Prior drill titles are passed
+  to avoid repeats, with distinctness defined as a different **domain and core
+  data-structure problem**, not a reworded title. When
+  `config.drill_proficiency_brief` is non-empty it's appended as a
+  **`## Targeting`** section, and the prompt then requires a theme that
+  exercises the weak skills plus **exactly one re-implementation part** forcing
+  a rare idiom: a part that adds no method and no behaviour, asking instead for
+  a rewrite of existing code using the required idiom with the existing tests
+  kept passing unchanged as proof the rewrite is faithful. Its `interface` is
+  empty, so it satisfies the one-method cap trivially. Never more than one per
+  drill, and never an idiom the Targeting section doesn't name; with nothing
+  graded the section is omitted and generation is untargeted. **A reroll replaces the current drill at the same number
+  only while none of its parts are complete** — once a sitting is banked a
+  reroll would discard that work, so generation takes
+  `config.next_drill_number` instead (as it also does when the drill is finished
+  or the store is empty). **Every** generated series — including rerolls — is
+  written to the process log (`drill_generated`, with `premise`, the full
+  `parts` array, and a `regenerated` flag), so there's a durable record of all
+  drills created even though the store keeps only the latest active version.
+  Raises `ValueError` if Claude returns no parts.
+- `review_drill(number, part=None) -> tuple[int, str]` — reviews ONE part
+  (default: the current one). Reads the operator's `Drill<N>.java` +
+  `Drill<N>Test.java` — the whole file, since every part extends the same class
+  — and asks Claude (`_REVIEW_SYSTEM`) for an interview-style review scoped to
+  that part (correctness, whether **this part's** requirement is genuinely
+  handled, **regressions** in earlier parts, the ambiguities the prompt left
+  open, idiomatic Java, complexity, test quality, interview signal). Appends
+  `{at, text}` to **the part's** `feedback` and returns `(part number,
+  feedback)`. Raises `FileNotFoundError` if no attempt exists yet.
+  The same call **also grades the work**: the prose is followed by an
+  `---ASSESSMENT---` sentinel and a JSON object of per-skill scores +
+  `idioms_used`, split out by `_split_assessment` and stored on the part as
+  `assessment`. One call, not two — the candidate's code is already in that
+  prompt, so grading costs only the JSON's output tokens. The **latest grade
+  overwrites**, so re-reviewing to check a fix contributes one sample, not
+  three. `_REVIEW_SYSTEM` **must stay an f-string**: it interpolates the
+  sentinel and both vocabularies from `config`.
+- `_split_assessment(text) -> (prose, assessment | None)` — splits the review on
+  the sentinel. Anything unparseable degrades to `(whole text, None)`: a
+  malformed grade must never cost the operator their written feedback, and an
+  ungraded part simply doesn't reach the profile. Unknown skill/idiom keys are
+  dropped and scores clamped to `0..DRILL_SKILL_MAX`, so a hallucinated
+  dimension can't enter the vocabulary through the back door.
+- `revert_part(number, part=None) -> dict` — undo a finish, in the store **and**
+  on disk. Reopens the part via `config.revert_drill_part`, then
+  `restore_correct_code` strips the appended reference and **re-appends the one
+  belonging to the latest still-complete part**. That re-append is the subtle
+  half: `write_correct_code` replaces rather than stacks, so finishing part 2
+  overwrote part 1's reference — merely stripping would silently cost the
+  operator an answer they had legitimately earned. The operator's own code is
+  never touched. Logged as `drill_part_reverted`.
+- `finish_part(number, part=None) -> dict` — one sitting, one step: grade →
+  reference answer → mark complete, returning
+  `{part, feedback, solution, written, completed}`. Grading and completing were
+  always the same intent in practice, and the separate *mark complete* click was
+  the one that got forgotten, leaving parts open and under-counting the daily
+  goal. **Order and failure policy are deliberate:** grading runs first and its
+  failure aborts (the part stays open); the reference answer is a bonus, so its
+  failure prints a `WARNING:` line but the part is still graded and completed.
+- `write_correct_code(number, part_no, solution_md) -> list[Path]` — appends the
+  reference solution to the operator's own `Drill<N>.java` (design notes + impl)
+  and `Drill<N>Test.java` (tests), as a delimited block comment at the end of
+  each. Idempotent — strips any previous block first. Only touches files that
+  already exist, so it never creates one in the Maven project. `*/` inside the
+  reference is defanged to `* /`, since Java block comments don't nest and a
+  nested one would close the comment early and break the build (javadoc in the
+  reference hits this routinely). `_split_solution_blocks` pulls the notes and
+  the two ```java blocks out of the solve response.
+- `_has_written_code(number) -> bool` — whether the operator has written
+  anything of their own into `Drill<N>.java`, ignoring any appended reference.
+  Guards the in-place reroll: **work exists before it's marked complete**, so a
+  drill with code but zero ticked-off parts must not be replaced.
+- `solve_drill(number, part=None) -> tuple[int, str, list[Path]]` — asks Claude
+  (`_SOLVE_SYSTEM`) for the reference "correct answer" as of one part: a
+  senior/staff-level `Drill<N>` implementation + JUnit test with an explicit
+  design-decisions block, **cumulative** (this part plus every earlier one),
+  derived from the **prompts + interfaces only** (it does not read the
+  operator's attempt). Stores it on **the part's** `solution` (`{at, text}`,
+  overwritten on regenerate) and returns `(part number, markdown)`. Uses
+  `SOLVE_MAX_TOKENS` (4000) rather than `MAX_TOKENS` — a late part's solution
+  carries the whole series.
+- `_series_context(record, part) -> str` — the Markdown recap handed to both
+  review and solve: the overview, the earlier parts already built into the
+  class, then the current part with its sitting tasks. **Everything after the
+  current part is withheld** — a reviewer or reference solution that knew the
+  later twists would design for them, handing over exactly the head start the
+  split exists to withhold.
+- `_load_for_part(number, part) -> (drills, record, part)` — resolves a part
+  (`None` = current) and materializes a legacy record's adapted part into
+  `parts` so the caller's mutation persists. `_iface_lines` / `_task_lines`
+  format the interface and sitting-task lists.
+- `_call_claude(system, user, max_tokens=MAX_TOKENS)`, `_extract_json`,
+  `_append_log` — helpers mirroring `answer_questions.py`.
 
-**CLI.** `python scripts/drills.py generate` / `... review --number N` / `... solve
---number N`. Prints a machine-readable last line for `serve.py`: `GENERATED: <n>`,
-`REVIEWED: <n>`, `SOLVED: <n>`, or `ERROR: <message>`.
+**CLI.** `python scripts/drills.py generate` / `... review --number N [--part M]`
+/ `... solve --number N [--part M]`. `--part` defaults to the current part.
+Prints a machine-readable last line for `serve.py`: `GENERATED: <n>`,
+`REVIEWED: <n>.<part>`, `SOLVED: <n>.<part>`, or `ERROR: <message>`.
 
 ---
 
