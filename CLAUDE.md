@@ -580,6 +580,7 @@ operator recreates that, even if each individual part is still small.
 | One-step finish (grade + answer + complete) | `scripts/drills.py:finish_part`, `POST /today/drill/finish` |
 | Undo a mis-clicked finish | `scripts/config.py:revert_drill_part`, `scripts/drills.py:revert_part`, `POST /today/drill/revert` |
 | Rewrite the Java files on finish | `scripts/drills.py:install_reference_code` / `capture_attempt` / `restore_attempt` |
+| Mid-sitting clarification | `scripts/drills.py:clarify_part` (+ `_CLARIFY_SYSTEM`, `_full_series_context`), `POST /today/drill/clarify` |
 | Context handed to review/solve | `scripts/drills.py:_series_context` |
 | Graded vocabularies + scale | `scripts/config.py:DRILL_SKILLS`, `DRILL_IDIOMS`, `DRILL_SKILL_MAX` (5) |
 | Profile thresholds | `scripts/config.py:DRILL_PROFICIENCY_MIN_SAMPLES` (2), `DRILL_WEAK_SKILL_THRESHOLD` (3.5), `DRILL_RARE_IDIOM_MAX_USES` (1), `DRILL_MAX_TARGET_SKILLS` (3) |
@@ -771,7 +772,29 @@ operator recreates that, even if each individual part is still small.
     stores and displays only. Overwriting an attempt merely because the answer
     was generated would destroy work mid-session.
 
-23. **Tuning:** `DRILL_GRADE_HALF_LIFE` for how fast old grades fade,
+23. **Hiding later parts needs a release valve, and `clarify_part` is it.**
+    Concealing the rest of the series is what keeps a sitting to an hour, but it
+    also means a design decision made in part 1 can be silently foreclosed by an
+    interface the operator is not allowed to see — they then spend the sitting on
+    a dead end. `_full_series_context` is the ONLY place the whole series is
+    exposed to a model, and it marks each part HAS SEEN / HAS NOT SEEN. Answers
+    must give the constraint, never the later parts' methods, titles or twists.
+    Review and solve stay blind — never reach for `_full_series_context` there.
+
+24. **A clarification must not become a trap.** Stored `clarifications` are
+    passed to `review_drill`, because a reviewer that can't see them will
+    penalise an assumption the tool itself sanctioned — marking down "you
+    assumed names are unique" when that is exactly what the answer instructed.
+    And when a question identifies a genuine gap in the given interface, the
+    reviewer is told to credit it: spotting that in a real design review is
+    senior behaviour. Keep both halves; either alone makes the feature unfair.
+
+25. **Identity is data model, not a twist.** If any part identifies an entity by
+    a field, the OVERVIEW must say so ("passengers are identified by name").
+    This is the same rule as pinning time/range shapes, and it was the gap that
+    produced the UUID dead end — no gotcha is revealed by naming the key.
+
+26. **Tuning:** `DRILL_GRADE_HALF_LIFE` for how fast old grades fade,
     `DRILL_PART_TARGET_MINUTES` for sitting length,
     `DRILL_MIN_PARTS`/`DRILL_MAX_PARTS` for series length,
     `DRILL_WEAK_SKILL_THRESHOLD` / `DRILL_PROFICIENCY_MIN_SAMPLES` for how
