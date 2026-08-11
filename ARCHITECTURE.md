@@ -2155,12 +2155,11 @@ the **same** `Drill<N>.java` / `Drill<N>Test.java`, so `review` and `solve` are
   dimension can't enter the vocabulary through the back door.
 - `revert_part(number, part=None) -> dict` — undo a finish, in the store **and**
   on disk. Reopens the part via `config.revert_drill_part`, then
-  `restore_correct_code` strips the appended reference and **re-appends the one
-  belonging to the latest still-complete part**. That re-append is the subtle
-  half: `write_correct_code` replaces rather than stacks, so finishing part 2
-  overwrote part 1's reference — merely stripping would silently cost the
-  operator an answer they had legitimately earned. The operator's own code is
-  never touched. Logged as `drill_part_reverted`.
+  `restore_attempt` writes the archived `attempt` back over the files. Without
+  that restore the revert would be destructive rather than an undo: finishing
+  replaced the files with the reference, so merely reopening the part would
+  leave the reference sitting where the attempt used to be and the operator
+  would have nothing to revise. Logged as `drill_part_reverted`.
 - `finish_part(number, part=None) -> dict` — one sitting, one step: grade →
   reference answer → mark complete, returning
   `{part, feedback, solution, written, completed}`. Grading and completing were
@@ -2169,20 +2168,29 @@ the **same** `Drill<N>.java` / `Drill<N>Test.java`, so `review` and `solve` are
   goal. **Order and failure policy are deliberate:** grading runs first and its
   failure aborts (the part stays open); the reference answer is a bonus, so its
   failure prints a `WARNING:` line but the part is still graded and completed.
-- `write_correct_code(number, part_no, solution_md) -> list[Path]` — appends the
-  reference solution to the operator's own `Drill<N>.java` (design notes + impl)
-  and `Drill<N>Test.java` (tests), as a delimited block comment at the end of
-  each. Idempotent — strips any previous block first. Only touches files that
-  already exist, so it never creates one in the Maven project. `*/` inside the
-  reference is defanged to `* /`, since Java block comments don't nest and a
-  nested one would close the comment early and break the build (javadoc in the
-  reference hits this routinely). `_split_solution_blocks` pulls the notes and
-  the two ```java blocks out of the solve response.
+- `install_reference_code(number, part_no, solution_md) -> list[Path]` —
+  **replaces** `Drill<N>.java` / `Drill<N>Test.java` with the reference solution
+  as real, compilable code. Replacing rather than appending is the point: the
+  file used to accumulate one pasted instruction block per sitting *plus* a
+  commented copy of the reference, so by part 6 that is ~150 lines of stale
+  prose above any code, in a class the operator has to work in. Rewriting leaves
+  a clean, correct base for the next sitting and keeps exactly one instruction
+  block in the file — the one they paste for the part in hand. Design notes ride
+  along as a header comment. The generated reference carries its own imports but
+  no package declaration, so `_package_line` re-attaches the existing one.
+  `_split_solution_blocks` pulls the notes and the two ```java blocks out of the
+  solve response.
+- `capture_attempt(number) -> dict` — snapshots the operator's own `impl`/`test`
+  **before** the rewrite, stored on the part as `attempt`. This is what makes a
+  finish reversible rather than destructive.
 - `_has_written_code(number) -> bool` — whether the operator has written
   anything of their own into `Drill<N>.java`, ignoring any appended reference.
   Guards the in-place reroll: **work exists before it's marked complete**, so a
   drill with code but zero ticked-off parts must not be replaced.
-- `solve_drill(number, part=None) -> tuple[int, str, list[Path]]` — asks Claude
+- `solve_drill(number, part=None) -> tuple[int, str]` — **stores and returns
+  only; never touches the Java files.** Installing the reference belongs to
+  *finishing* a sitting; overwriting an attempt merely because the answer was
+  generated would destroy work mid-session. — asks Claude
   (`_SOLVE_SYSTEM`) for the reference "correct answer" as of one part: a
   senior/staff-level `Drill<N>` implementation + JUnit test with an explicit
   design-decisions block, **cumulative** (this part plus every earlier one),

@@ -579,6 +579,7 @@ operator recreates that, even if each individual part is still small.
 | Completion + daily goal | `scripts/config.py:mark_drill_part_complete`, `drills_completed_today` |
 | One-step finish (grade + answer + complete) | `scripts/drills.py:finish_part`, `POST /today/drill/finish` |
 | Undo a mis-clicked finish | `scripts/config.py:revert_drill_part`, `scripts/drills.py:revert_part`, `POST /today/drill/revert` |
+| Rewrite the Java files on finish | `scripts/drills.py:install_reference_code` / `capture_attempt` / `restore_attempt` |
 | Context handed to review/solve | `scripts/drills.py:_series_context` |
 | Graded vocabularies + scale | `scripts/config.py:DRILL_SKILLS`, `DRILL_IDIOMS`, `DRILL_SKILL_MAX` (5) |
 | Profile thresholds | `scripts/config.py:DRILL_PROFICIENCY_MIN_SAMPLES` (2), `DRILL_WEAK_SKILL_THRESHOLD` (3.5), `DRILL_RARE_IDIOM_MAX_USES` (1), `DRILL_MAX_TARGET_SKILLS` (3) |
@@ -750,7 +751,27 @@ operator recreates that, even if each individual part is still small.
     part has no feedback, badging it *completed*. Without that, the review the
     operator just paid for disappears on the post-finish redirect.
 
-21. **Tuning:** `DRILL_GRADE_HALF_LIFE` for how fast old grades fade,
+21. **Finishing REWRITES the Java files with the reference; it never appends.**
+    The file previously accumulated one pasted instruction block per sitting plus
+    a commented copy of the answer — ~150 lines of stale prose above any code by
+    part 6, in the class the operator works in, growing with every part. The
+    rewrite keeps the file flat and correct. Three obligations come with it:
+    - `capture_attempt` runs **before** the rewrite and `restore_attempt` on
+      revert. Replacing work without a restorable snapshot is data loss, not a
+      workflow.
+    - `_package_line` re-attaches the existing `package …;`. The generated
+      reference carries imports but no package declaration, so a naive write
+      produces a file that doesn't compile.
+    - `review_drill` must hand the reviewer the **previous part's reference as a
+      labelled baseline**. From part 2 on the file legitimately contains code the
+      operator was given; without the label the grade — and therefore the whole
+      proficiency profile — inflates on work they didn't do.
+
+22. **Installing the reference belongs to FINISH, not to solve.** `solve_drill`
+    stores and displays only. Overwriting an attempt merely because the answer
+    was generated would destroy work mid-session.
+
+23. **Tuning:** `DRILL_GRADE_HALF_LIFE` for how fast old grades fade,
     `DRILL_PART_TARGET_MINUTES` for sitting length,
     `DRILL_MIN_PARTS`/`DRILL_MAX_PARTS` for series length,
     `DRILL_WEAK_SKILL_THRESHOLD` / `DRILL_PROFICIENCY_MIN_SAMPLES` for how

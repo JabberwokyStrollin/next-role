@@ -1067,6 +1067,7 @@ Each entry in `parts`:
 | `status` | `"active"` / `"complete"` | `complete` once marked done. |
 | `completed_at` | ISO datetime / `null` | Set by `mark_drill_part_complete`; its date drives the daily goal. |
 | `feedback` | list[object] | Review history for this part: `{"at": ISO, "text": <markdown feedback>}`, appended by each review. |
+| `attempt` | object / absent | The operator's own code as it stood when the part was finished: `{"at": ISO, "impl": <Drill<N>.java>, "test": <Drill<N>Test.java>}`. Captured because finishing **replaces** those files with the reference solution — this snapshot is what makes the undo an undo rather than a deletion. Written by `drills.finish_part`, consumed by `drills.restore_attempt`, and dropped once the part is reverted. |
 | `assessment` | object / absent | The **grade**, from the same review call: `{"at": ISO, "skills": {<key>: 0-5}, "idioms_used": [<key>, …]}`, keyed by `config.DRILL_SKILLS` / `config.DRILL_IDIOMS`. **Overwritten, not appended** — a part reviewed three times contributes one sample, so re-reviewing a fix can't inflate the profile. Absent when the part hasn't been reviewed or the grade failed to parse (the prose feedback survives either way). This is the sole input to the derived proficiency profile. |
 | `solution` | object / absent | The reference "correct answer" as of this part (**cumulative** — this part plus every earlier one): `{"at": ISO, "text": <markdown: design notes + Java impl + test>}`. Written by `drills.solve_drill`, overwritten on regenerate; absent until first requested. |
 
