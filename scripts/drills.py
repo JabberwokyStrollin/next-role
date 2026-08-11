@@ -173,7 +173,10 @@ part's one method doesn't actually use MUST NOT appear at all.
 - Part 1 is: decide how the data will be stored, write the single core \
 write/ingest method, test it. Nothing else. Because there is no query method \
 yet, part 1's method must be observable on its own — its return value or a \
-thrown exception has to be enough to write real tests against.
+thrown exception has to be enough to write real tests against. That last point \
+is a DESIGN CONSTRAINT ON YOU when choosing the method, never text to put in \
+the prompt: telling the candidate "make sure your return value is observable \
+enough to test" is coaching, and it hands them a decision that is theirs.
 - Do not ask for custom exception types, a value/record type, or an interface \
 in part 1. If the candidate wants one they can introduce it; requiring it turns \
 a one-method sitting into a design exercise.
@@ -222,6 +225,14 @@ needed overlap logic or plain equality. That is not productive ambiguity, it is 
 an unanswerable question, and it costs an hour before any code is written. \
 Leave the SEMANTICS open (case sensitivity, tie-breaking, what happens on a \
 clash); never leave the SHAPE OF THE DATA open.
+- **State the IDENTITY MODEL in the overview whenever the series relies on \
+one.** If any part identifies an entity by a field — a name, an id, a code — the \
+overview must say so plainly ("passengers are identified by name"). This reveals \
+no gotcha; it is a data-model fact, exactly like pinning down what a slot is. \
+Omitting it is worse than ambiguous, it is a trap: a candidate who sees only \
+`claim(String passenger, int seat)` reasonably notices that two passengers can \
+share a name, designs an id-returning API to fix it, and only discovers hours \
+later that a hidden method takes the name — a dead end your silence created.
 - Give each part's interface as method names WITH their parameters, but WITHOUT \
 return types and WITHOUT full signatures — choosing the return shape is part of \
 the exercise. Example: "add(String text)", "topN(int n)", "get(String key)".
@@ -287,7 +298,11 @@ earlier structure should have been reshaped for this part rather than bolted on.
 6. Complexity — time/space, and any needless rework.
 7. The tests — do they actually pin down the behaviour, including edge cases?
 8. Interview signal — what would make an interviewer raise an eyebrow even if \
-the code works.
+the code works. If they identified a genuine gap in the interface they were \
+given — one that cannot express something the part requires — say so and count \
+it in their favour: spotting that in a real design review is senior behaviour, \
+not an excuse. Distinguish it from merely disliking a decision that was theirs \
+to make.
 
 End with a one-line verdict: would this part clear a senior bar? Keep it tight \
 — Markdown, no preamble. Do not speculate about, or hint at, what later parts \
@@ -458,6 +473,94 @@ def generate_drill(language: str = "java") -> dict:
                  "premise": record["premise"], "parts": parts,
                  "regenerated": regen})
     return record
+
+
+_CLARIFY_MAX_TOKENS = 600
+
+_CLARIFY_SYSTEM = """You are the interviewer who set this drill, answering a \
+question from the candidate mid-exercise.
+
+You can see the WHOLE series, including parts the candidate has not been shown. \
+They can see only the drill overview and the current part. Your answer must \
+respect that: give them the CONSTRAINT they need, never a later part's methods, \
+title or twist. "Passengers are identified by name for this whole drill" is \
+fine; "part 4 hands you swap(String, String)" is not.
+
+Decide which of three cases the question falls into, and answer accordingly.
+
+1. THEIRS TO DECIDE — the answer is one of the ambiguities the drill \
+deliberately leaves open (tie-breaking, case sensitivity, null/empty handling, \
+what to return on a clash). Do NOT decide it for them. Say it's their call, name \
+the trade-off in one line, and tell them to record the decision.
+
+2. A CONSTRAINT THEY CANNOT SEE — the design they're considering is foreclosed \
+by something later in the series. Say so plainly and state the constraint, so \
+they stop exploring a dead end. Do not say which part imposes it or how.
+
+3. A GENUINE FLAW IN THE DRILL — the given interface cannot express something \
+the part actually requires, or the prompt contradicts itself. Say plainly that \
+it's a flaw rather than a puzzle, tell them how to proceed (usually: change the \
+return type or add what's missing, and note it), and tell them it will count in \
+their favour at review. Do not defend a bad interface.
+
+Be brief — a short paragraph, no preamble, no headings. Never write their \
+implementation for them, and never hand over a decision that is case 1."""
+
+
+def _full_series_context(record: dict, current: dict) -> str:
+    """The WHOLE series — including parts the candidate hasn't reached — marked
+    up so the model knows what they can and cannot see. For `clarify_part` only:
+    judging whether an interface is genuinely broken requires the parts that
+    constrain it. Never used for review or solve, which must stay blind to what
+    comes next."""
+    parts = drill_parts(record)
+    idx   = int(current.get("part", 1))
+    out   = [f"## Drill {record.get('number')}: {record.get('title','')} "
+             f"({len(parts)} parts)"]
+    if record.get("premise"):
+        out.append(f"## Overview (the candidate HAS seen this)\n{record['premise']}")
+    for p in parts:
+        i    = int(p.get("part", 0))
+        seen = ("HAS SEEN" if i <= idx else
+                "HAS NOT SEEN — do not reveal")
+        out.append(f"## Part {i}: {p.get('title','')} [{seen}]\n"
+                   f"{p.get('prompt','')}\n\n"
+                   f"Methods it introduces:\n{_iface_lines(p)}")
+    out.append(f"The candidate is working on part {idx}.")
+    return "\n\n".join(out)
+
+
+def clarify_part(number: int, question: str, part: int | None = None) -> tuple:
+    """Answer a candidate's question about the part they're on, and store the
+    exchange. Returns ``(part number, answer)``.
+
+    This exists because hiding later parts — which is what keeps a sitting to an
+    hour — means a design decision made in part 1 can be silently foreclosed by
+    an interface the candidate isn't allowed to see. Without a release valve
+    they burn the sitting on a dead end. Real case: `claim(String, int)` can't
+    distinguish two passengers with the same name, so returning a UUID looks
+    right, but nothing later in the series accepts one.
+
+    Cheap by design — the series and the question, never the candidate's code."""
+    drills, record, target = _load_for_part(number, part)
+    pnum = int(target.get("part", 1))
+    q    = (question or "").strip()
+    if not q:
+        raise ValueError("Ask an actual question.")
+
+    user = (f"{_full_series_context(record, target)}\n\n"
+            f"## The candidate's question about part {pnum}\n{q}")
+    answer = _call_claude(_CLARIFY_SYSTEM, user,
+                          max_tokens=_CLARIFY_MAX_TOKENS).strip()
+
+    target.setdefault("clarifications", []).append(
+        {"at": now_utc(), "question": q, "answer": answer})
+    save_drills(drills)
+    _append_log({"event_type": "drill_clarified", "entity_type": "drill",
+                 "entity_id": str(number), "entity_name": record.get("title", ""),
+                 "part": pnum, "question": q,
+                 "detail": f"Answered a question on Drill {number} part {pnum}."})
+    return pnum, answer
 
 
 def _iface_lines(part: dict) -> str:
@@ -673,9 +776,23 @@ def review_drill(number: int, part: int | None = None) -> tuple[int, str]:
             f"what they added or altered on top of it.\n\n"
             f"```java\n{b_impl}\n```\n\n```java\n{b_test}\n```\n\n")
 
+    # Anything they asked and were told this sitting. Without this the reviewer
+    # can penalise an assumption it sanctioned — marking down "you assumed names
+    # are unique" when that is precisely what the clarification instructed.
+    clar = ""
+    rows = target.get("clarifications") or []
+    if rows:
+        clar = "## Clarifications the candidate asked for, and the answers given\n"
+        for c in rows:
+            clar += f"\nQ: {c.get('question','')}\nA: {c.get('answer','')}\n"
+        clar += ("\nDo not penalise them for following these answers. If one of "
+                 "their questions identified a genuine gap in the given "
+                 "interface, treat that as senior signal and say so.\n\n")
+
     user = (
         f"{_series_context(record, target)}\n\n"
         f"{baseline}"
+        f"{clar}"
         f"## Candidate's Drill{number}.java\n```java\n{impl_code}\n```\n\n"
         f"## Candidate's Drill{number}Test.java\n```java\n{test_code}\n```\n")
 
@@ -841,6 +958,11 @@ def main() -> None:
     s.add_argument("--part", type=int, default=None,
                    help="Part to solve up to (default: the current part).")
 
+    c = sub.add_parser("clarify", help="Ask a question about the current part.")
+    c.add_argument("--number", type=int, required=True)
+    c.add_argument("--part", type=int, default=None)
+    c.add_argument("--question", required=True)
+
     v = sub.add_parser("revert", help="Undo a finish/complete for one part.")
     v.add_argument("--number", type=int, required=True)
     v.add_argument("--part", type=int, default=None,
@@ -866,6 +988,10 @@ def main() -> None:
             pnum, sol = solve_drill(args.number, args.part)
             print(sol)
             print(f"SOLVED: {args.number}.{pnum}")
+        elif args.cmd == "clarify":
+            pnum, ans = clarify_part(args.number, args.question, args.part)
+            print(ans)
+            print(f"CLARIFIED: {args.number}.{pnum}")
         elif args.cmd == "revert":
             r = revert_part(args.number, args.part)
             print(f"Reverted Drill {args.number} part {r['part']} to active.")

@@ -330,6 +330,15 @@ off and then rush.
   revealing the next one. If you haven't written anything yet it fails and
   leaves the part open; if only the reference answer fails, your grade and
   completion still stand. Takes ~30-60s — it's two Claude calls.
+- **Ask about this part** — a box under the prompt for when something doesn't
+  add up: an interface that can't express what the part needs, an ambiguity you
+  can't resolve. Claude can see the whole series, so it answers with the
+  *constraint* you need without revealing the later parts. It will tell you
+  plainly when the drill is at fault rather than defending a bad interface — and
+  when it's a decision that's genuinely yours, it names the trade-off and leaves
+  it to you. Ask early: the point is to save the sitting, not to explain it
+  afterwards. Your questions are shown to the reviewer, so an assumption it told
+  you to make is never marked down.
 - **Undo finish of part N** — a small button beside the feedback header, for
   when you press Finish on the wrong part. It reopens that part, discards its
   grade, reference answer and last review, and puts your `.java` files back the

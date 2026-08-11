@@ -2963,6 +2963,48 @@ def drill_comment_block(drill: dict, part: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_clarify_block(num: int, part: dict) -> str:
+    """The mid-sitting "Ask about this part" box, plus any answers so far.
+
+    Sits with the prompt rather than with the actions because its value is
+    entirely in the timing: hiding later parts is what keeps a sitting to an
+    hour, but it also means a design decision can be foreclosed by an interface
+    the operator isn't allowed to see. Asking at minute five saves the sitting;
+    finding out at grading time does not. Answers give the constraint, never the
+    later parts."""
+    from html import escape as esc
+    pnum = int(part.get("part", 1))
+    rows = part.get("clarifications") or []
+
+    out = [f'<details style="margin-top:10px"{" open" if rows else ""}>'
+           f'<summary style="cursor:pointer;font-size:12px;color:#0366d6">'
+           f'Ask about this part'
+           f'{f" ({len(rows)} asked)" if rows else " — stuck on an ambiguity?"}'
+           f'</summary>']
+    for c in rows:
+        out.append(
+            f'<div style="margin-top:8px;font-size:12px">'
+            f'<div style="color:#666"><strong>You:</strong> '
+            f'{esc(c.get("question",""))}</div>'
+            f'<div class="notice notice-info" style="white-space:pre-wrap;'
+            f'margin-top:4px">{esc(c.get("answer",""))}</div></div>')
+    out.append(
+        f'<form method="POST" action="/today/drill/clarify" style="margin-top:8px">'
+        f'<input type="hidden" name="number" value="{num}">'
+        f'<input type="hidden" name="part" value="{pnum}">'
+        f'<textarea name="question" rows="2" required placeholder="e.g. claim() '
+        f'only takes a name, so two passengers with the same name are '
+        f'indistinguishable — should it return an id instead?" '
+        f'style="width:100%;box-sizing:border-box;font-size:12px;padding:6px;'
+        f'border:1px solid #e1e4e8;border-radius:6px"></textarea>'
+        f'<button class="btn btn-secondary" style="margin-top:4px;padding:2px 10px;'
+        f'font-size:12px">Ask</button>'
+        f'<span style="font-size:11px;color:#888;margin-left:8px">Answers give '
+        f'you the constraint, never the later parts. Shown to the reviewer so a '
+        f'sanctioned assumption is never marked down.</span></form></details>')
+    return "".join(out)
+
+
 def _latest_reviewed_part(drill: dict) -> dict | None:
     """The part reviewed most recently, or None if none has been. Used so the
     grade stays on screen after finishing a part advances the view to the next
@@ -3190,6 +3232,8 @@ def render_drills_body(view: str = "default") -> str:
         f'try{{document.execCommand("copy");ok();}}catch(e){{}}}});}}'
         f'else{{try{{document.execCommand("copy");ok();}}catch(e){{}}}}'
         f'}});}})();</script>')
+
+    parts.append(_render_clarify_block(num, part))
 
     # Where to write the attempt. All parts share one file — later parts extend
     # the class part 1 created rather than starting a new one.
@@ -5692,6 +5736,26 @@ class Handler(BaseHTTPRequestHandler):
                     tail = "; ".join([l for l in out.splitlines() if l.strip()][-2:])
                     set_drill_flash("warn", f"Finish failed — {tail or 'see server log'}. "
                                             f"The part is still open.")
+            self.redirect_or_today(params, "code_drills")
+            return
+
+        if path == "/today/drill/clarify":
+            length = int(self.headers.get("Content-Length", 0))
+            params = parse_qs(self.rfile.read(length).decode("utf-8"))
+            number   = params.get("number", [""])[0].strip()
+            part     = params.get("part", [""])[0].strip()
+            question = params.get("question", [""])[0].strip()
+            if not number or not question:
+                set_drill_flash("warn", "Ask failed — missing question.")
+            else:
+                args = (["clarify", "--number", number, "--question", question]
+                        + (["--part", part] if part else []))
+                ok, out = run_drill_command(*args, timeout=120)
+                if ok:
+                    set_drill_flash("ok", "Answered — see below the prompt.")
+                else:
+                    tail = "; ".join([l for l in out.splitlines() if l.strip()][-2:])
+                    set_drill_flash("warn", f"Ask failed — {tail or 'see server log'}")
             self.redirect_or_today(params, "code_drills")
             return
 
