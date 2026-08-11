@@ -5652,15 +5652,10 @@ class Handler(BaseHTTPRequestHandler):
                 ok, out = run_drill_command(*args)
                 if ok:
                     where = f" part {part}" if part else ""
-                    # solve also appends the reference to the operator's own
-                    # .java files; name them so the write is never a surprise.
-                    files = [l.split(" to ", 1)[1].strip() for l in out.splitlines()
-                             if l.startswith("Appended Correct Code to ")]
-                    extra = (" Appended to " +
-                             ", ".join(f.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
-                                       for f in files) + ".") if files else ""
+                    # solve only stores + displays; the .java files are rewritten
+                    # by Finish, never by generating the answer on its own.
                     set_drill_flash("ok", f"Correct answer ready for Drill "
-                                          f"{number}{where} (below).{extra}")
+                                          f"{number}{where} (below).")
                 else:
                     tail = "; ".join([l for l in out.splitlines() if l.strip()][-2:])
                     set_drill_flash("warn", f"Correct answer failed — {tail or 'see server log'}")
@@ -5680,11 +5675,13 @@ class Handler(BaseHTTPRequestHandler):
                 args = ["finish", "--number", number] + (["--part", part] if part else [])
                 ok, out = run_drill_command(*args, timeout=420)
                 if ok:
-                    files = [l.split(" to ", 1)[1].strip() for l in out.splitlines()
-                             if l.startswith("Appended Correct Code to ")]
-                    extra = (" Correct Code appended to " +
-                             ", ".join(f.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
-                                       for f in files) + ".") if files else ""
+                    files = [l.split(": ", 1)[1].strip() for l in out.splitlines()
+                             if l.startswith("Rewrote with reference solution: ")]
+                    extra = (" " + ", ".join(f.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+                                             for f in files)
+                             + " rewritten with the reference solution — a clean "
+                               "base for the next part. Your attempt is saved and "
+                               "restorable via Undo.") if files else ""
                     warn = [l for l in out.splitlines() if l.startswith("WARNING:")]
                     set_drill_flash(
                         "ok" if not warn else "warn",

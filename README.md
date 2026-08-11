@@ -354,13 +354,18 @@ off and then rush.
   of this part** (cumulative: this part plus every earlier one), with a design-
   decisions block. It never reveals what later parts will ask for.
 
-  It's also **appended to your own files** — a clearly marked
-  `/* ===== CORRECT CODE — part N (reference) ===== */` block at the end of
-  `Drill<N>.java` (design notes + implementation) and `Drill<N>Test.java`
-  (tests), so the answer sits next to your attempt. It's a comment, so the file
-  still compiles; re-running replaces the block rather than stacking copies; and
-  it's stripped back out before any future review, so Claude never grades its
-  own answer as your work.
+  Finishing also **rewrites your `.java` files with that reference** as real,
+  compilable code. That's deliberate: the file used to gather one pasted
+  instruction block per sitting plus a commented copy of the answer, so by part 6
+  you'd scroll past ~150 lines of stale prose to reach any code — in the very
+  class you have to work in. Rewriting leaves a clean, correct base for the next
+  part, and the file stays the same size at part 6 as at part 1.
+
+  **Your attempt isn't lost.** It's snapshotted into `data/drills.json` first and
+  written back by **Undo**. And because the file then contains code you were
+  given, the next review is handed that baseline explicitly and told not to
+  credit you for it — otherwise your proficiency scores would drift upward on
+  work you didn't do.
 - **Mark part N complete** — reveals the next part and counts toward the **drill
   parts completed today: X / 1** meter (`DAILY_DRILL_GOAL`), which auto-earns the
   section's checkmark. One sitting earns the day; completing the last part
