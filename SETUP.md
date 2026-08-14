@@ -79,6 +79,7 @@ Edit these files in `profile/`:
 | `cover_letter_rules.md` | Tone, section structure, projects to reference, work-authorization paragraphs. |
 | `scoring_rubric.md` | Claude system prompt for JD scoring — your seniority and domain criteria, plus the gov-screen role-exposure classification. |
 | `stack_keywords.yaml` | Keyword weights for mechanical stack scoring **and** the crawl pre-filter. |
+| `drill_focus_<language>.md` | **Optional.** Aims code-drill generation at one upcoming interview (domains, question style, gotchas to use as twists). One per language — `drill_focus_java.md`, `drill_focus_python.md`. Absent = untargeted drills. See *Code drills* below. |
 
 > **profile/ is gitignored.** Your resume and personal scoring criteria
 > never leave your machine. Back up the directory externally (OneDrive,
@@ -86,30 +87,57 @@ Edit these files in `profile/`:
 
 ### Code drills (optional)
 
-The `/today` **Code drills** section generates interview-prep Java drills
-with Claude and reviews your manual attempts. There's nothing to author —
-click **Generate new drill prompt** and Claude produces a **3–6 part series**
+The `/today` **Code drills** section generates interview-prep drills in
+**Java or Python** with Claude and reviews your manual attempts. There's nothing
+to author — pick a language tab, click **Generate new … drill prompt** and Claude
+produces a **3–6 part series**
 on one small theme. Each part gives you an overview of the whole drill, a
 short deliberately underspecified prompt for that part, numbered tasks for
 the sitting, and a partial interface (method names + params, no return types
 — deciding those is part of the drill). You work **one part per sitting**
-(about an hour each): implement it by hand, click **Check my code & get
-feedback**, then **Mark part N complete** to reveal the next one.
+(about an hour each): implement it by hand, then click **Finish part N — grade,
+answer & complete**, which grades it and reveals the next part.
 
-It expects a **sibling Maven project** where the code + JUnit tests live:
+It expects a **sibling drills project** where your code + tests live, split into
+one subdirectory per language:
 
 ```
 applications/
-  next-role/            ← this repo
-  manual-code-drills/   ← sibling: Drill1.java, Drill2.java, … + tests
+  next-role/                ← this repo
+  manual-code-drills/       ← sibling
+    java/                   ← Maven: pom.xml + src/
+      src/main/java/drills/JavaDrill1.java, JavaDrill2.java, …
+      src/test/java/drills/JavaDrill1Test.java, …
+    python/                 ← flat: no package, no config
+      python_drill1.py, test_python_drill1.py, …
 ```
 
 - The default location is `../manual-code-drills` (override with the
   `NEXTROLE_DRILLS_DIR` env var). Generated drills continue the numbering
-  after the highest `Drill<N>.java` already there.
-- **All parts of a drill share one `Drill<N>.java` / `Drill<N>Test.java`** —
-  later parts extend the class the earlier ones built, so there's one file
-  per drill, not one per part.
+  **per language**, after the highest impl file already in that language's
+  directory — so the two tracks never leave gaps in each other.
+- **All parts of a drill share one impl + test file** — later parts extend the
+  class the earlier ones built, so there's one file per drill, not one per part.
+- **Java** needs Maven + a JDK (run tests with `cd java && mvn test`).
+  **Python** needs pytest once — `pip install pytest` — and is deliberately flat:
+  no package, no `__init__.py`, no `pytest.ini`, because pytest's default import
+  mode puts the directory on `sys.path` so `from python_drill1 import
+  PythonDrill1` resolves with zero config. Keep the `test_` prefix on test files
+  or `pytest` silently collects nothing. Standard library only.
+- **Migrating an older layout.** If your `manual-code-drills` still has
+  `pom.xml`/`src/` at the top level and `Drill<N>.java` names, run
+  `python scripts/migrate_drill_layout.py` (dry run) then `--apply`. It moves the
+  Maven project into `java/`, creates `python/`, renames the sources, and rewrites
+  the stored attempt snapshots + reference solutions in `data/drills.json` so
+  Undo still produces code that compiles.
+- **Aiming drills at one interview (optional).** Create
+  `profile/drill_focus_<language>.md` — e.g. `profile/drill_focus_python.md` —
+  describing the domains to draw themes from, the style of question the company
+  asks, and gotchas worth using as later-part twists. It's injected into the
+  generation prompt while the file exists; delete it to go back to untargeted
+  drills. HTML comments in the file are stripped, so you can keep notes-to-self at
+  the top. A focus only changes *what* is chosen — it can't relax part sizing, add
+  hints, or leak later parts.
 - Sitting length and series length are tunable in `scripts/config.py`:
   `DRILL_PART_TARGET_MINUTES` (60), `DRILL_MIN_PARTS` / `DRILL_MAX_PARTS`
   (3–6). They're interpolated straight into the generation prompt.
@@ -127,7 +155,7 @@ applications/
   If the launch fails, the button falls back to opening the folder in File
   Explorer.
 - Generation + review use the same `ANTHROPIC_API_KEY` and Sonnet model as
-  cover letters; next-role never compiles or runs the Java itself. Drill
+  cover letters; next-role never compiles, runs or lints your code. Drill
   state is stored in `data/drills.json` (gitignored).
 
 ### Resume tips

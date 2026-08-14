@@ -286,8 +286,28 @@ python scripts/inbox_scan.py --reset         # clear staged matches + dedup stat
 ### Code drills (interview prep)
 
 The `/today` **Code drills** section keeps your hand-coding fluency sharp with
-short, interview-style Java exercises — the kind an interviewer describes out
+short, interview-style exercises — the kind an interviewer describes out
 loud on a whiteboard/live screen.
+
+**Two language tracks: Java and Python.** The section opens on **Java**; the
+`Java | Python` tabs at the top switch between them, each showing how many drills
+are still active so an unfinished series is easy to spot. The tracks are fully
+independent — **separate numbering** (Java can be on drill 9 while Python is on
+drill 1), separate files, and a **separate proficiency profile**, since neither
+the skills nor the idioms transfer between languages. Switching tabs never
+disturbs the other track, and the daily parts goal counts sittings across both.
+
+**Aiming drills at a specific interview.** Drop a
+`profile/drill_focus_<language>.md` file in and generation is steered by it — the
+domains to draw themes from, the style of question the company asks, the gotchas
+worth using as twists. `profile/drill_focus_python.md` currently aims the Python
+track at a Wealthsimple STAR-team round (ledger/statement/tax-slip domains,
+`Decimal` money, practical-not-LeetCode framing, and Python's runtime gotchas as
+the later-part twists). Delete the file to go back to untargeted drills, or edit
+it for the next company — no code change either way. When a focus file is
+active, the section says so, so its influence is never mysterious. A focus can
+only change *what* gets chosen: it can't relax part sizing, add hints, or leak
+later parts.
 
 **A drill is a series, worked one part per sitting.** Each generated drill is
 one small theme split into **3–6 parts**, each sized for about **an hour**
@@ -311,22 +331,33 @@ off and then rush.
   Underspecified means the *semantics* are yours to settle — case sensitivity,
   tie-breaking, what happens on an overlap — never that the task is vague. No
   hints about edge cases, and a part's twist is never flagged as a warning.
-  Drills are numbered in sequence (`Drill3`, `Drill4`, …) after whatever's
-  already in the project.
-- The current part renders as a **ready-to-paste Java class-description comment**
-  (with a copy button) — drop it above the class you write. Implement
-  `Drill<N>.java` + `Drill<N>Test.java` **by hand** in the sibling
-  `manual-code-drills` Maven project. **All parts of a drill share that one
-  file** — later parts extend the class you already wrote. **Open
-  manual-code-drills** launches it in your editor (VS Code by default; override
-  `NEXTROLE_EDITOR_CMD`).
+  Drills are numbered in sequence **per language**, after whatever's already in
+  that language's directory.
+- The current part renders as a **ready-to-paste class-description comment** in
+  the drill's own language (`//` for Java, `#` for Python, with a copy button) —
+  drop it above the class you write. Implement the impl + test file **by hand** in
+  the sibling `manual-code-drills` project:
+
+  | | Java | Python |
+  |---|---|---|
+  | Implementation | `java/src/main/java/drills/JavaDrill<N>.java` | `python/python_drill<N>.py` |
+  | Tests | `java/src/test/java/drills/JavaDrill<N>Test.java` | `python/test_python_drill<N>.py` |
+  | Class | `JavaDrill<N>` | `PythonDrill<N>` |
+  | Run | `cd java && mvn test` | `cd python && pytest` |
+
+  **All parts of a drill share that one file** — later parts extend the class you
+  already wrote. **Open manual-code-drills** launches the project root (both
+  tracks in one window) in your editor (VS Code by default; override
+  `NEXTROLE_EDITOR_CMD`). The Python side needs `pip install pytest` once; it
+  isn't a next-role dependency, because next-role never runs your code.
 - Regenerating **rerolls the drill at the same number only while no part is
   done** — once you've banked a part, generating starts a fresh drill instead so
   the work isn't thrown away. Every generated series (including rerolls) is
   recorded in the process log.
 - **Finish part N — grade, answer & complete** — the one button you press when
   a sitting is done. It grades your attempt, generates the reference answer
-  (appending Correct Code to your `.java` files), and marks the part complete,
+  (**rewriting** your impl + test files with it, after snapshotting what you
+  wrote), and marks the part complete,
   revealing the next one. If you haven't written anything yet it fails and
   leaves the part open; if only the reference answer fails, your grade and
   completion still stand. Takes ~30-60s — it's two Claude calls.
@@ -341,21 +372,23 @@ off and then rush.
   you to make is never marked down.
 - **Undo finish of part N** — a small button beside the feedback header, for
   when you press Finish on the wrong part. It reopens that part, discards its
-  grade, reference answer and last review, and puts your `.java` files back the
-  way they were — including restoring the previous part's Correct Code block,
-  which the mistaken finish had overwritten. **Your own code is never touched.**
+  grade, reference answer and last review, and puts your source files back the
+  way they were, from the snapshot Finish took. **Your own code is never lost.**
   It asks for confirmation first, and always names the part it will undo.
 - **Grade only (keep working)** — the same review *without* finishing, for when
   you want feedback, a fix, and another look before committing the sitting.
   Claude reads your attempt + test and
   returns an interview-style review of **the current part** (correctness,
   whether that part's requirement is really handled, regressions in earlier
-  parts, the ambiguities you resolved, idiomatic Java, complexity, test quality,
-  and signal an interviewer would flag). The latest feedback shows inline.
+  parts, the ambiguities you resolved, idiomatic use of the language, complexity,
+  test quality, and signal an interviewer would flag). The latest feedback shows
+  inline.
 
   The same call also **grades** the part — 0–5 on six skills (correctness, data
-  structures, idiomatic Java, complexity, tests, decomposition) plus a record of
-  which Java idioms you actually reached for. It's one call, not two: your code
+  structures, idiomatic Java *or* Python, complexity, tests, decomposition) plus a
+  record of which of that language's idioms you actually reached for (Java:
+  streams, Optional, records, …; Python: comprehensions, generators, dataclasses,
+  `itertools`/`functools`, dunder methods, exact `Decimal` arithmetic, …). It's one call, not two: your code
   is already in that prompt, so the grade costs only the few tokens the scores
   take. Re-reviewing to check a fix overwrites the grade rather than adding a
   second one, so it can't inflate your profile.
@@ -363,8 +396,8 @@ off and then rush.
   of this part** (cumulative: this part plus every earlier one), with a design-
   decisions block. It never reveals what later parts will ask for.
 
-  Finishing also **rewrites your `.java` files with that reference** as real,
-  compilable code. That's deliberate: the file used to gather one pasted
+  Finishing also **rewrites your source files with that reference** as real,
+  runnable code. That's deliberate: the file used to gather one pasted
   instruction block per sitting plus a commented copy of the answer, so by part 6
   you'd scroll past ~150 lines of stale prose to reach any code — in the very
   class you have to work in. Rewriting leaves a clean, correct base for the next
@@ -524,7 +557,8 @@ scripts/
   linkedin_fetch.py     — IMAP fetch of LinkedIn job-alert emails
   inbox_scan.py         — IMAP scan for rejection / interview replies to open applications
   discard_ledger.py     — inspect/backfill/reset the crawl's discard ledger
-  drills.py             — generate interview-prep code drills + review attempts (Sonnet)
+  drills.py             — generate interview-prep code drills (Java/Python) + review attempts (Sonnet)
+  migrate_drill_layout.py — one-off: split the drills project into java/ + python/
   backup_data.py        — daily local snapshots of data/*.json (stray-delete recovery)
   dashboard.py          — terminal pipeline summary
   update_status.py      — application logging + status transitions
