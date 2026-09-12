@@ -24,6 +24,7 @@ Usage:
     python scripts/inbox_scan.py
     python scripts/inbox_scan.py --dry-run          # parse only, no state/matches write
     python scripts/inbox_scan.py --window-days 30    # override the look-back window
+    python scripts/inbox_scan.py --recheck           # re-classify the window (keeps matches)
     python scripts/inbox_scan.py --sample FILE       # classify a local .eml (no IMAP)
     python scripts/inbox_scan.py --reset             # clear matches + processed state
 
@@ -195,6 +196,25 @@ def _company_slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (name or "").lower())
 
 
+def _token_runs(tokens: list[str]) -> set[str]:
+    """Every contiguous run of core tokens, concatenated — "Sun Life Financial"
+    → {sun, sunlife, sunlifefinancial, life, lifefinancial, financial}.
+
+    This is what a domain label is allowed to equal. A plain substring test
+    ("is the label anywhere in the name?") matched ``@mail3.guide.co`` to
+    **Guidepoint** — "guide" is a substring of "guidepoint" — and so attributed
+    a MongoDB recruiter screen to the wrong employer. Runs keep the legitimate
+    cases (``sunlife.com`` → Sun Life Financial, ``disney.com`` → The Walt
+    Disney Company) while requiring the label to end on a word boundary."""
+    runs: set[str] = set()
+    for i in range(len(tokens)):
+        acc = ""
+        for tok in tokens[i:]:
+            acc += tok
+            runs.add(acc)
+    return runs
+
+
 def _sender_domain_label(from_header: str) -> str:
     """Registrable-ish label of the sender domain (second-to-last dotted part)."""
     m = re.search(r"@([a-z0-9.\-]+)", (from_header or "").lower())
@@ -226,19 +246,22 @@ def company_matches(company_name: str, from_header: str, subject: str) -> bool:
          ``…@email.careers.microsoft.com``, ``…@recruiting.yahooinc.com``);
       2. an ATS relay is speaking for them, and the company is named in the
          From/Subject — Greenhouse mails as ``no-reply@us.greenhouse-mail.io``
-         and identifies the employer only in the text;
+         and identifies the employer only in the text, and MongoDB's recruiter
+         mails through Guide as ``notifications@mail3.guide.co``;
       3. the company is named in the From DISPLAY NAME, which covers a recruiter
          mailing from a personal or agency address.
 
     A name in the subject alone is deliberately NOT a route."""
-    slug = _company_slug(company_name)
-    if not slug or len(slug) < 3:
-        return False
     core = _company_core_tokens(company_name)
+    core_slug = "".join(core)
+    if len(core_slug) < 3:
+        return False
 
-    # 1. sender's own domain
+    # 1. sender's own domain — the label must be a whole run of the company's
+    #    name tokens, never just a substring of one (see `_token_runs`), or a
+    #    superstring of the whole name (`yahooinc` for Yahoo).
     dom_label = _sender_domain_label(from_header)
-    if len(dom_label) >= 4 and (dom_label in slug or slug in dom_label):
+    if len(dom_label) >= 4 and (dom_label in _token_runs(core) or core_slug in dom_label):
         return True
 
     def _named_in(text: str) -> bool:
@@ -261,7 +284,12 @@ def match_application(open_apps: list[dict], from_header: str, subject: str,
                       body: str) -> dict | None:
     """Pick the open application this message relates to, or None. When several
     open applications share the matched company, prefer the one whose title
-    tokens appear in the subject/body; otherwise the first candidate.
+    tokens appear in the subject/body, and break a tie on the most recently
+    applied. The tie-break matters for a follow-up in a thread: only the FIRST
+    message names the role ("your application to our Atlas Search Systems
+    role"), so a later "Re:" has zero title overlap against three open MongoDB
+    applications — file order then picked one at random. The newest application
+    is the likeliest subject of fresh recruiter contact.
 
     A sender that looks like the employer is still not enough on its own —
     the message must also read as being about a job application. Microsoft
@@ -279,12 +307,9 @@ def match_application(open_apps: list[dict], from_header: str, subject: str,
 
     text = f"{subject}\n{body}".lower()
     text_norm = set(re.sub(r"[^a-z0-9]+", " ", text).split())
-    best, best_overlap = candidates[0], -1
-    for a in candidates:
-        overlap = len(_title_tokens(a.get("title", "")) & text_norm)
-        if overlap > best_overlap:
-            best, best_overlap = a, overlap
-    return best
+    return max(candidates,
+               key=lambda a: (len(_title_tokens(a.get("title", "")) & text_norm),
+                              a.get("date_applied") or ""))
 
 
 def _message_key(mid: str, from_header: str, subject: str, received: str) -> str:
@@ -359,16 +384,24 @@ def _fetch_header_batch(M: imaplib.IMAP4, seq_nums: list[bytes]) -> dict[bytes, 
     return out
 
 
-def scan_via_imap(window_days: int, dry_run: bool = False) -> int:
+def scan_via_imap(window_days: int, dry_run: bool = False,
+                  recheck: bool = False) -> int:
     """Scan INBOX for rejection/interview replies to open applications.
-    Returns the count of new matches staged."""
+    Returns the count of new matches staged.
+
+    ``recheck`` ignores the processed-Message-ID list for this run, so every
+    message in the window is classified again under the current rules. That is
+    the obligation that comes with changing the classifier: a message the old
+    rules swallowed is marked processed and would otherwise never be looked at
+    again — the fix would only ever apply to mail that hasn't arrived yet.
+    Already-staged matches are still skipped, so nothing duplicates."""
     open_apps = load_open_applications()
     if not open_apps:
         print("No open applications to match against.")
         print("SCANNED: 0")
         return 0
 
-    processed     = load_processed_ids()
+    processed     = set() if recheck else load_processed_ids()
     matches       = load_matches()
     matched_ids   = {m.get("message_id") for m in matches if m.get("message_id")}
     seen_keys     = processed | matched_ids
@@ -536,6 +569,10 @@ def main() -> None:
                         help="Classify a local .eml file instead of connecting to IMAP.")
     parser.add_argument("--reset", action="store_true",
                         help="Clear staged matches and processed-Message-ID state.")
+    parser.add_argument("--recheck", action="store_true",
+                        help="Re-classify every message in the window, ignoring the "
+                             "processed-Message-ID list (keeps staged matches). Run "
+                             "this after changing the classification rules.")
     args = parser.parse_args()
 
     if args.reset:
@@ -548,7 +585,8 @@ def main() -> None:
         scan_from_sample(Path(args.sample), dry_run=args.dry_run)
     else:
         try:
-            scan_via_imap(args.window_days, dry_run=args.dry_run)
+            scan_via_imap(args.window_days, dry_run=args.dry_run,
+                          recheck=args.recheck)
         except (TimeoutError, OSError, imaplib.IMAP4.abort) as e:
             # A stall partway through the scan trips IMAP_TIMEOUT_SECONDS (or the
             # server drops us). Report it on the machine-readable ERROR line
