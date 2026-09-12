@@ -1363,7 +1363,11 @@ _INTERVIEW_PATTERNS: list[_re.Pattern] = [
     _re.compile(r"\bset\s+up\s+(?:a|an|some)\s+(?:call|time|interview|chat|conversation)\b", _re.I),
     _re.compile(r"\byour\s+availabilit(?:y|ies)\b", _re.I),
     _re.compile(r"\b(?:are|when\s+are)\s+you\s+available\b", _re.I),
-    _re.compile(r"\b(?:phone|recruiter|technical|initial|hiring\s+manager)\s+screen\b", _re.I),
+    # …"screen" OR "interview": a calendar invitation titles itself "Recruiter
+    # Phone Interview with <company>" and says nothing else — none of the
+    # scheduling phrases above appear in one, because the scheduling already
+    # happened.
+    _re.compile(r"\b(?:phone|recruiter|technical|initial|onsite|hiring\s+manager)\s+(?:screen|interview)\b", _re.I),
     _re.compile(r"\b(?:book|find|pick)\s+a\s+time\b", _re.I),
     _re.compile(r"\bcalendly\b", _re.I),
     _re.compile(r"\bmov(?:e|ing)\s+(?:you\s+)?forward\s+to\s+(?:the\s+)?(?:next|interview)\b", _re.I),
@@ -1388,6 +1392,40 @@ _ACKNOWLEDGEMENT_PATTERNS: list[_re.Pattern] = [
     _re.compile(r"\bapplication\s+(?:has\s+been\s+)?received\b", _re.I),
     _re.compile(r"\bthis\s+(?:email|message)\s+confirms\b[^.!?\n]{0,40}?\bapplication\b", _re.I),
 ]
+
+
+# A DIRECT invitation beats the acknowledgement bail-out. A genuine screen
+# invite routinely OPENS with the very sentence that identifies boilerplate —
+# "Thanks for your application to our Senior Software Engineer role" — and then
+# invites you; a MongoDB recruiter screen was dropped on exactly that, because
+# the bail-out returned "no signal" before the interview patterns ever ran.
+#
+# What makes these safe to check first is that every one of them is addressed to
+# the reader in the PRESENT tense. An acknowledgement's advancement language is
+# always conditional future — "if your experience is a match, one of our team
+# members will contact you to schedule a call" — so it can't fake them. Keep
+# that line when adding a pattern: "a recruiter will reach out to schedule an
+# initial phone screen" belongs in `_INTERVIEW_PATTERNS` (suppressible), NOT
+# here, or the Ping Identity false positive comes straight back.
+_DIRECT_INVITATION_PATTERNS: list[_re.Pattern] = [
+    _re.compile(r"\b(?:i|we)(?:'d|\s+would)\s+(?:love|like)\s+to\s+(?:chat|speak|talk|connect|meet)\b", _re.I),
+    _re.compile(r"\bself[-\s]?schedule\b", _re.I),
+    _re.compile(r"\brequesting\s+that\s+you\s+schedule\b", _re.I),
+    _re.compile(r"\bschedule\s+(?:your|an?)\s+(?:interview|screen|phone\s+(?:call|screen|interview))\b", _re.I),
+    _re.compile(r"\byour\s+availabilit(?:y|ies)\b", _re.I),
+    _re.compile(r"\bcalendly\b", _re.I),
+]
+
+
+def detect_direct_invitation(subject: str, body: str) -> str:
+    """Matched snippet if the message invites the candidate to talk *now*, else "".
+
+    SSOT for "this is a real invitation, whatever else the message says". Checked
+    by `classify_inbox_email` BEFORE the acknowledgement bail-out — see the
+    banner above."""
+    return _first_match_evidence(f"{subject or ''}\n{body or ''}",
+                                 _DIRECT_INVITATION_PATTERNS,
+                                 skip_conditional=True) or ""
 
 
 def detect_acknowledgement(subject: str, body: str) -> str:
@@ -1468,10 +1506,15 @@ _AUTOMATED_SENDER_RE: _re.Pattern = _re.compile(
 # `greenhouse.io`. Listing only the apply-side domain silently misses every
 # message they actually send, which is how a Greenhouse acknowledgement reached
 # the needs-reply and status detectors. When adding a platform, add its relay.
+# Interview-SCHEDULING platforms belong here too, for the same reason: MongoDB's
+# recruiter mails through Guide (`notifications@mail3.guide.co`) and names the
+# employer only in the subject, so without the relay listed here
+# `inbox_scan.company_matches` has no route to the company at all — which is how
+# a recruiter screen went unmatched.
 _ATS_SENDER_DOMAIN_RE: _re.Pattern = _re.compile(
     r"@(?:[a-z0-9-]+\.)*(?:"
     r"myworkday\.com|workday\.com|greenhouse\.io|greenhouse-mail\.io"
-    r"|greenhousemail\.io|lever\.co|ashbyhq\.com"
+    r"|greenhousemail\.io|lever\.co|ashbyhq\.com|guide\.co|goodtime\.io"
     r"|icims\.com|taleo\.net|successfactors\.com|smartrecruiters\.com"
     r"|workable\.com|jobvite\.com|bamboohr\.com|breezy\.hr|teamtailor\.com"
     r"|applytojob\.com|recruitee\.com|hire\.lever\.co|myworkdayjobs\.com"
@@ -1606,8 +1649,10 @@ def classify_inbox_email(subject: str, body: str,
     apply — e.g. an "interview" signal becomes ``recruiter_screen`` for a still-
     ``applied`` role but ``interview`` for one already in a screen — is resolved
     from the application's current status by ``suggest_status_transition``.
-    Order is rejection → offer → interview so a rejection mentioning
-    "interview"/"offer" isn't mislabeled. The evidence snippet is display-only.
+    Order is rejection → offer → direct invitation → acknowledgement bail-out →
+    interview → needs_reply, so a rejection mentioning "interview"/"offer" isn't
+    mislabeled, and an invitation that opens with "thanks for your application"
+    isn't read as an acknowledgement. The evidence snippet is display-only.
     """
     haystack = f"{subject or ''}\n{body or ''}"
 
@@ -1624,8 +1669,14 @@ def classify_inbox_email(subject: str, body: str,
         return "offer", None, ev
 
     # Everything below is a WEAK signal that acknowledgement boilerplate fakes
-    # convincingly, so bail out here once the message is identified as one.
-    # Two guards, both load-bearing:
+    # convincingly — but a real invitation OPENS with that same boilerplate, so
+    # the direct-invitation test goes FIRST or the bail-out below eats it.
+    ev = detect_direct_invitation(subject, body)
+    if ev:
+        return "interview", None, ev
+
+    # Now bail out once the message is identified as an acknowledgement. Two
+    # guards, both load-bearing:
     #   * only AFTER rejection/offer — a real rejection commonly opens with
     #     "thank you for applying";
     #   * only for an AUTOMATED sender — an acknowledgement is automated by

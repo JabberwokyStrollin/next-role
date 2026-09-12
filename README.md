@@ -276,10 +276,18 @@ application with. Later runs are a few seconds: the dedup state records each
 message it examined, so only new mail is downloaded. (`--reset` clears that,
 so the next scan is a slow one again.)
 
+That memory has one consequence worth knowing: a message the rules got *wrong*
+is still recorded as examined, so tightening or widening the phrase rules only
+ever affects mail that hasn't arrived yet. `--recheck` re-classifies everything
+in the window under the current rules while keeping your staged queue — run it
+after any change to the matching or classification rules, the same way a
+policy change calls for `scan_no_sponsorship.py`.
+
 ```bash
 python scripts/inbox_scan.py                 # scan + stage matches
 python scripts/inbox_scan.py --dry-run       # classify only, write nothing
 python scripts/inbox_scan.py --window-days 30  # widen the look-back window
+python scripts/inbox_scan.py --recheck       # re-classify the window under current rules
 python scripts/inbox_scan.py --reset         # clear staged matches + dedup state
 ```
 
