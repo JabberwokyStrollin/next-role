@@ -61,6 +61,7 @@ from config import (  # noqa: E402
     apply_queue_order,
     apply_rank_score,
     derive_country,
+    COVER_LETTER_FALLBACK_COUNTRY,
     gov_screen_block_reason,
     load_json,
     save_json,
@@ -390,10 +391,12 @@ def generate_cover_letters(top_n: int = 5, auto: bool = False) -> None:
             # US citizen — no work-authorization paragraph expected; omit --country.
             run_node("generate_cl.js", "--job-id", job["job_id"])
         else:
-            # Ambiguous-location remote roles (OTHER) fall back to CA, the
-            # operator's default market.
+            # Ambiguous-location remote roles (OTHER) fall back to the
+            # sponsorship market named by config.COVER_LETTER_FALLBACK_COUNTRY.
+            # Read it from config — don't hardcode a country here; serve.py has
+            # the same branch and the two silently diverged before.
             if country == "OTHER":
-                country = "CA"
+                country = COVER_LETTER_FALLBACK_COUNTRY
             run_node("generate_cl.js", "--job-id", job["job_id"], "--country", country)
 
 

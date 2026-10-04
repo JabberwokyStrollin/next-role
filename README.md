@@ -91,11 +91,13 @@ SETUP.md.
    you like.
 4. **Cover letters & apply** — ranked apply queue. For each job:
    generate a cover letter, optionally generate a comp estimate, open
-   the `.docx`, log the application. An **Applications sent today: X / 10**
+   the `.docx`, log the application. An **Applications sent today: X / N**
    meter tracks the day's submissions; this section auto-earns its green
-   checkmark once you hit the daily goal (10 by default —
-   `DAILY_APPLICATION_GOAL` in `scripts/config.py`). The count is derived
-   from that day's logged applications, so it resets every day. The
+   checkmark once you hit the daily goal. `DAILY_APPLICATION_GOAL` is
+   **derived** from `APPLY_QUEUE_COUNTRY_QUOTAS` (currently `IE:4 + US:8` = 12)
+   so the target and the queue shape can't drift apart; it falls back to
+   `DAILY_APPLICATION_GOAL_DEFAULT` (10) under pure ranking. The count is
+   derived from that day's logged applications, so it resets every day. The
    **Answer Questions** button on each row opens `/answer-questions?job_id=…`
    for ad-hoc application prompts ("Why this company?", "Tell us about a time
    you…") — paste the question, hit Generate, copy the result.
@@ -474,23 +476,36 @@ get weighted into the composite total. All weights live in
 **No other file may duplicate them** — see `CLAUDE.md` for the SSOT
 convention.
 
-### Target geographies (US is optional)
+### Target geographies
 
-next-role targets **Canada** and **Ireland** (where the operator needs visa
-sponsorship) plus, as an **optional remote-only stop-gap**, the **US**. Active
-geographies live in `scripts/geography.py:TARGET_COUNTRIES` (currently
-`{"CA","IE","US"}` — remove `"US"` to disable). When US is enabled:
+next-role targets the **US** (remote only) and **Ireland** (any work model).
+Active geographies live in `scripts/geography.py:TARGET_COUNTRIES` — currently
+`{"IE","US"}`. Country is derived on the fly from `location` by
+`geography.derive_country`; nothing stores it.
 
-- Only **remote** US roles enter the pipeline (onsite/hybrid US is gated out).
-- US JDs that say "no sponsorship" are **kept** (the operator is a US citizen),
-  whereas that language still discards CA/IE roles.
-- US roles get a deliberately **low sponsorship score**
-  (`US_SPONSORSHIP_SCORE`, default 3/15) so CA/IE roles generally outrank them —
-  but a strong-stack US role can still beat a weak CA/IE one (thumb-on-scale,
-  not a hard tier).
+**Canada was dropped on 2026-10-03.** The operator pivoted to a primarily
+US-remote search after Canadian employers went unresponsive once sponsorship was
+disclosed. The country codes still *derive* (`"Toronto, ON"` → `CA`), they're
+just no longer targeted, so the geography gate drops them.
 
-Turn US back off (remove `"US"` from `TARGET_COUNTRIES`) and behavior reverts
-exactly — CA/IE composites are unchanged.
+| | **US** | **Ireland** |
+|---|---|---|
+| Work model | **remote only** — `US_ACCEPTED_WORK_MODELS` is `{"remote"}`; hybrid, onsite *and* `unstated` are discarded after scoring | **any** — in-office, hybrid and remote all pass; it's a relocation target, so a commute is fine |
+| Sponsorship | not needed (operator is a US citizen), so `composite_score` substitutes `US_SPONSORSHIP_SCORE` (15/15 — no handicap) | the researched per-company `sponsorship_score` applies |
+| JD "no sponsorship" text | **kept** — not disqualifying for a citizen | still discards the posting |
+| Cover-letter visa paragraph | none | the locked Ireland paragraph |
+| Daily apply quota | 8, **plus** any slot Ireland can't fill | 4 |
+
+Ambiguous-location roles (`OTHER` — "Worldwide", "Americas") still ingest unless
+pinned to a foreign region, and take Ireland's visa paragraph via
+`config.COVER_LETTER_FALLBACK_COUNTRY`.
+
+**Changing the set is more than one edit.** `TARGET_COUNTRIES` governs the gates
+and the ranking, but the pre-filter allowlist (`profile/stack_keywords.yaml`
+`location_allow`) and `config.APPLY_QUEUE_COUNTRY_QUOTAS` are separate, and rows
+already in the pipeline are not swept by the gate. Run
+`python scripts/scan_geography_policy.py --apply` as part of the change — see
+the "Geography / US target toggle" section of `CLAUDE.md` for the full checklist.
 
 ### Two-stage workflow
 
@@ -577,6 +592,8 @@ scripts/
   rescore_all.py        — bulk re-score under a new rubric
   scan_no_sponsorship.py — retroactive no-sponsorship sweep
   scan_foreign_locations.py — retroactive foreign-pinned-location sweep
+  scan_geography_policy.py — retroactive sweep for TARGET_COUNTRIES /
+                             US_ACCEPTED_WORK_MODELS policy changes
   resync_tracker_country.py — re-derive stored country on logged applications
   scan_duplicate_postings.py — collapse the same role posted once per office
   scan_company_overflow.py — cap active rows per company (keeps top N by composite)

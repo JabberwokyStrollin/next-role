@@ -56,7 +56,7 @@ CRAWL_CONFIG_DEFAULTS = {
     "title_exclude":              ["solutions architect", "delivery architect",
                                    "sales engineer", "customer success",
                                    "professional services"],
-    "location_allow":             ["remote", "canada", "ireland"],
+    "location_allow":             ["remote", "ireland"],
     "aggregator_tag_groups":      [["kafka", "flink", "java"]],
     "aggregator_keyword_groups":  ["kafka flink java"],
     "min_pre_filter_score":       3,

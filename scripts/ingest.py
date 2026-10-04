@@ -12,7 +12,7 @@ or if the registry record is older than 30 days.
 Usage:
     python scripts/ingest.py --url "https://boards.greenhouse.io/stripe/jobs/123"
     python scripts/ingest.py --url "https://..." --company "Stripe"
-    cat jd.txt | python scripts/ingest.py --paste --company "Stripe" --title "Staff Engineer" --location "Remote Canada" --apply-url "https://..."
+    cat jd.txt | python scripts/ingest.py --paste --company "Stripe" --title "Staff Engineer" --location "Remote - United States" --apply-url "https://..."
 """
 
 import argparse
@@ -422,7 +422,7 @@ def main():
 
     parser.add_argument("--company",   metavar="NAME", help="Company name (required for --paste, optional override for --url)")
     parser.add_argument("--title",     metavar="TITLE", help="Job title (required for --paste)")
-    parser.add_argument("--location",  metavar="LOC",   help="Location string e.g. 'Remote Canada' (required for --paste)")
+    parser.add_argument("--location",  metavar="LOC",   help="Location string e.g. 'Remote - United States' (required for --paste)")
     parser.add_argument("--apply-url", metavar="URL",   help="Apply URL (required for --paste)")
     parser.add_argument("--posted",    metavar="DATE",  help="Date posted YYYY-MM-DD (optional)")
     args = parser.parse_args()
@@ -438,7 +438,7 @@ def main():
 
         # Derive title and location from args or prompt user
         title    = args.title    or input("Job title: ").strip()
-        location = args.location or input("Location (e.g. Remote Canada): ").strip()
+        location = args.location or input("Location (e.g. Remote - United States): ").strip()
         company  = args.company  or input("Company name: ").strip()
         source   = "direct_scrape"
 

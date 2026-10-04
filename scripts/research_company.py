@@ -40,10 +40,16 @@ from config import (
 
 TIER1_SYSTEM = """
 You are a company research assistant helping a Staff Software Engineer evaluate
-potential employers for remote roles in Canada or Ireland. Answer from your
+potential employers for remote roles in the United States or Ireland. Answer
+from your
 training knowledge. Return ONLY valid JSON — no preamble, no markdown fences.
 
 ## Sponsorship score (0-15)
+(Vintage note: Canada left TARGET_COUNTRIES on 2026-10-03 and this prompt now
+asks about US/Ireland. Scores researched earlier were judged against "Canada
+or Ireland". They stay usable -- willingness to sponsor is largely
+market-independent, and composite_score substitutes US_SPONSORSHIP_SCORE for
+US-derived roles regardless, so a stale score only moves Irish ranking.)
 13-15: Explicitly advertises sponsorship; documented history within 2 years
 9-12:  Multiple credible third-party confirmations
 5-8:   Some signal, unconfirmed or older than 2 years
@@ -51,7 +57,7 @@ training knowledge. Return ONLY valid JSON — no preamble, no markdown fences.
 0:     Documented refusal or too small to realistically sponsor
 
 ## Remote fit (0-5)
-5: Explicitly remote-first, confirmed roles in Canada or Ireland
+5: Explicitly remote-first, confirmed roles in the US or Ireland
 4: Remote-friendly, some fully remote roles in target countries
 3: Hybrid, some office presence required
 1-2: Mostly in-office
@@ -200,7 +206,7 @@ def research_company(name: str, model: str = CLAUDE_MODEL_FAST) -> dict:
             "role": "user",
             "content": (
                 f"Research this company for a Staff Software Engineer targeting "
-                f"remote roles in Canada or Ireland:\n\nCompany: {name}\n\n"
+                f"remote roles in the United States or Ireland:\n\nCompany: {name}\n\n"
                 f"User-flagged regions for ethics screening (ISO codes): "
                 f"{', '.join(GOV_SCREEN_FLAGGED_REGIONS) or '(none)'}"
             )
