@@ -121,17 +121,19 @@ file.
 | `REJECTION_REASONS` | `dict[str, str]` | SSOT for rejection-reason key → human label: `generic`, `position_filled`, `interview_failed`, `ghosted_timeout`. Consumed by serve.py status buttons, `metrics.py`, and the inbox scanner. |
 | `DAILY_APPLICATION_GOAL` | `int` | Applications-per-day target (10). The `/today` "Cover letters & apply" section auto-earns its green checkmark once this many applications are logged *today*. Derived from `application_tracker.date_applied`, so it resets daily. serve.py reads the constant; never hardcode the number. |
 | `DAILY_DRILL_GOAL` | `int` | Code-drill-**parts**-per-day target (1). The `/today` "Code drills" section auto-earns its checkmark once this many drill *parts* are marked complete *today* (`drills_completed_today`). Parts, not whole drills — one part is one sitting. |
-| `DRILL_PART_TARGET_MINUTES`, `DRILL_MIN_PARTS`, `DRILL_MAX_PARTS` | `int` | Sitting budget per drill part (60 min) and the number of parts a generated drill is split into (3–6 — each part is one method plus its tests, so a theme needs more of them). Read by `drills._GENERATE_SYSTEM` (which interpolates all three into the prompt) and by `serve.render_drills_body` for the "budget about N minutes" note. |
-| `DRILLS_STORE_PATH`, `MANUAL_CODE_DRILLS_DIR`, `EDITOR_CMD` | Path / str | Generated-drill store (`data/drills.json`); the sibling Maven project holding the code (default `../manual-code-drills`, override `NEXTROLE_DRILLS_DIR`); the editor CLI for the open button (`NEXTROLE_EDITOR_CMD`, default `"code"` for VS Code → file-manager fallback on failure). |
+| `DRILL_PART_TARGET_MINUTES`, `DRILL_MIN_PARTS`, `DRILL_MAX_PARTS` | `int` | Sitting budget per drill part (60 min) and the number of parts a generated drill is split into (3–6 — each part is one method plus its tests, so a theme needs more of them). Read by `drills._generate_system(language)` (which interpolates all three into the prompt) and by `serve.render_drills_body` for the "budget about N minutes" note. |
+| `DRILLS_STORE_PATH`, `MANUAL_CODE_DRILLS_DIR`, `EDITOR_CMD` | Path / str | Generated-drill store (`data/drills.json`); the sibling project holding the code (default `../manual-code-drills`, override `NEXTROLE_DRILLS_DIR`) — **one subdirectory per language** (`java/`, `python/`), with the editor opened on the ROOT so one window holds every track; the editor CLI for the open button (`NEXTROLE_EDITOR_CMD`, default `"code"` for VS Code → file-manager fallback on failure). |
 | `DATA_BACKUP_DIR`, `DATA_BACKUP_RETAIN_DAYS` | Path / int | Daily-snapshot dir (default `data/backups/`; override with `NEXTROLE_BACKUP_DIR` to a path outside the repo so snapshots survive a full `data/` loss) and retention (7). See `scripts/backup_data.py`. |
-| `DRILL_SKILLS`, `DRILL_SKILL_MAX`, `DRILL_IDIOMS` | `dict[str,str]` / `int` | The two graded vocabularies and the score scale (0–5). `DRILL_SKILLS` = how *well* the work was done (correctness, data_structures, idiomatic_java, complexity, tests, decomposition); `DRILL_IDIOMS` = *which* parts of Java were reached for (streams, lambdas, optional, records, pattern_matching, collections_api, generics, polymorphism, concurrency, legacy_java8). Interpolated into `drills._REVIEW_SYSTEM` and used to sanitize what comes back, so the prompt, the stored assessment and the derived profile can't drift. |
+| `DRILL_LANGUAGES`, `DEFAULT_DRILL_LANGUAGE`, `DrillLanguage` | `dict[str,DrillLanguage]` / str / dataclass | **Drill-language SSOT.** One frozen record per language holding everything that varies: `key`, `label`, `subdir`, `impl_rel`/`test_rel` (filename templates, `{n}` = drill number), `class_tmpl`/`test_class_tmpl`, `comment` (line-comment prefix), `fence` (markdown code fence), `test_framework`, and the two graded vocabularies. Currently `java` (`java/src/main/java/drills/JavaDrill{n}.java`, JUnit 5) and `python` (flat `python/python_drill{n}.py` + `test_python_drill{n}.py`, pytest). Default is `java` because every pre-split drill lacks a `language` field and must read as Java or its history detaches from its files. Each language is its own **numbering track**. Filenames carry the language prefix — redundant inside a directory but not in an editor tab strip — spelled each language's own way (PascalCase class-per-file for Java, snake_case module for Python), since `idiomatic_<language>` is a graded skill and these files are the practice material. |
+| `DRILL_SKILL_MAX`, per-language `skills`/`idioms` | `int` / `dict[str,str]` | The score scale (0–5) and the two graded vocabularies, which now live **on the language spec** and are read through `drill_skills(language)` / `drill_idioms(language)`. Java: how *well* (correctness, data_structures, **idiomatic_java**, complexity, tests, decomposition) and *which* idioms (streams, lambdas, optional, records, pattern_matching, collections_api, generics, polymorphism, concurrency, legacy_java8) — **these keys must not be renamed**, they are the keys in every existing stored assessment and `_split_assessment` drops unknown keys, so a rename would silently erase graded history rather than fail loudly. Python swaps in **idiomatic_python** and its own 13 idioms (comprehensions, generators, dataclasses, collections_module, itertools_functools, context_managers, type_hints, dunder_methods, exceptions_eafp, decimal_exact, unpacking, sorting_keys, legacy_python) — `decimal_exact` is an *idiom* rather than a correctness check because reaching for `Decimal` on money is a habit, and the idiom axis is what measures habits reached for at all. Interpolated into `drills._review_system(language)` and used to sanitize what comes back, so the prompt, the stored assessment and the derived profile can't drift. |
 | `DRILL_GRADE_HALF_LIFE` | `int` | A grade's influence halves every this many graded parts (5). Applied to **both** axes by `_recency_weights`, so improvement surfaces and old grades stop anchoring — a lifetime average can't show progress. Weighted by **position, not wall-clock time**: a fortnight off shouldn't erase the profile, only further practice should move it. |
 | `DRILL_PROFICIENCY_MIN_SAMPLES`, `DRILL_WEAK_SKILL_THRESHOLD`, `DRILL_RARE_IDIOM_MAX_USES`, `DRILL_MAX_TARGET_SKILLS` | `int` / `float` / `int` / `int` | Profile thresholds: a skill needs ≥2 graded parts before it can be called weak (one bad sitting is noise), a mean under 3.5/5 is weak, an idiom used in ≤1 part is a breadth gap, and the generation brief names at most the 3 worst skills. The profile keeps the full truth; the **brief is a priority list** — a harsh reviewer flags every skill at once early on, and "everything is weak" gives the generator nothing to aim at. |
-| Proficiency helpers | funcs | `drill_assessments()` (every stored per-part grade, oldest first — one per part); `drill_proficiency()` (**derived, recency-weighted** profile: per-skill mean/count/weak, per-idiom uses/raw/rare, plus `weak_skills` worst-first and `rare_idioms` least-used-first — `mean` and `uses` are weighted, `count` and `raw` are honest sample counts); `_recency_weights(n)` (oldest-first half-life weights; newest always 1.0); `drill_proficiency_brief()` (plain-text summary for the generation prompt, `""` until something is graded). |
-| `CORRECT_CODE_BEGIN`, `CORRECT_CODE_END`, `strip_correct_code(text)` | str / func | Markers delimiting the reference solution that `drills.write_correct_code` appends to the operator's own `Drill<N>.java` / `Drill<N>Test.java`, and the function that removes it again. A **block comment**, so the file still compiles (two same-named classes can't coexist). Delimited for two reasons that both matter: re-running solve *replaces* the block instead of stacking copies, and `review_drill` **strips it before grading** — otherwise Claude reads its own reference answer as the candidate's work and the whole proficiency profile inflates. An unterminated block drops everything from its start, since the remainder can't be trusted to be the operator's code. |
+| Proficiency helpers | funcs | All **scoped to one language**, because neither axis transfers — `idiomatic_java` and `idiomatic_python` are different dimensions and an idiom vocabulary is meaningless across languages, so pooling them would report a Python track as never having reached for `streams` and aim its next drill at a Java idiom that doesn't exist. `drill_skills(language)` / `drill_idioms(language)` (the vocabularies — the **only** way to read them, so nothing can grade an attempt against the wrong language's list); `drill_assessments(drills, language)` (every stored per-part grade on that track, oldest first — one per part); `drill_proficiency(drills, language)` (**derived, recency-weighted** profile: per-skill mean/count/weak, per-idiom uses/raw/rare, plus `weak_skills` worst-first and `rare_idioms` least-used-first — `mean` and `uses` are weighted, `count` and `raw` are honest sample counts); `_recency_weights(n)` (oldest-first half-life weights; newest always 1.0); `drill_proficiency_brief(drills, language)` (plain-text summary for the generation prompt, `""` until something is graded **on that track**, so a newly added language starts untargeted). |
+| `drill_focus_path(language)`, `drill_focus(language)` | funcs | Optional per-language generation steer at `profile/drill_focus_<language>.md`: the domains to draw themes from and the gotchas worth using as later-part twists, for one specific upcoming interview. Absent file = untargeted generation, which is the right default once an interview has passed. A **file** rather than prompt text because a focus is temporary by nature and a file the operator deletes beats prompt text someone has to remember to rip back out — editing it needs no code and no doc change. HTML comments (including multi-line) are stripped, so instructions-to-self at the top of the file never reach the model. What a focus may and may not do is enforced in the generation prompt: it constrains the CHOICE of theme and twist and can **never** relax the part sizing, the one-method cap, the line budget, the no-coaching rule or the ban on foreshadowing later parts — otherwise a focus file becomes a way to quietly undo the sitting budget. |
+| `CORRECT_CODE_BEGIN`/`_END`, `CORRECT_CODE_BEGIN_PY`/`_END_PY`, `strip_correct_code(text)` | str / func | Markers delimiting a reference solution appended **into** the operator's own files, and the function that removes it again. **Legacy-only now** — finishing a part *rewrites* the files (`drills.install_reference_code`) instead of appending, so nothing writes these any more; but files and stored `attempt` snapshots from before that change still carry the block, and grading it as the candidate's own work would inflate the profile exactly as it did then. `review_drill` therefore still **strips it before grading**. Java's form is a block comment so the file still compiles (two same-named classes can't coexist); Python has no block comment, so its form is line comments. `strip_correct_code` handles **both** marker styles rather than taking a `language` — they can't collide (a Java block comment isn't valid Python and vice versa), and threading a language through `capture_attempt`/`review_drill` purely for legacy data would be noise. An unterminated block drops everything from its start, since the remainder can't be trusted to be the operator's code. |
 | `DISCARDED_URLS_PATH`, `DISCARD_REASONS` | Path / `dict[str,str]` | The discard ledger (`data/discarded_urls.json`) and its reason codes (`validation`, `location`, `ethics`, `no_sponsorship`, `work_model`). The codes are the reset selector — renaming one orphans existing entries. |
 | Discard-ledger helpers | funcs | `load_discarded_urls()` / `save_discarded_urls()`; `record_discarded_url(url, reason, detail, company, title)` (overwrites, never duplicates; ignores an empty URL); `is_url_discarded(url, ledger=None)`; `clear_discarded_urls(reason=None)` → count removed. **Why it exists:** a discard never reaches `job_pipeline.json`, so the crawl's URL dedup has no memory of it and re-processes it every run — and the work-model verdict costs a Sonnet call to reach. Measured at 860 wasted scoring calls / 10.1h across 7 runs. |
-| Drill helpers | funcs | `drill_impl_path(n)` / `drill_test_path(n)` (→ `Drill<n>.java` / `Drill<n>Test.java` in the Maven project — **one file per drill, shared by all its parts**); `load_drills`/`save_drills`; `next_drill_number()` (max of on-disk `Drill<N>.java` + store numbers, +1); `current_drill()` (highest number). Part-level: `drill_parts(drill)` (the parts list; **adapts a pre-parts record on read** into an equivalent one-part series, so no data migration was needed), `current_drill_part(drill)` (first not-yet-complete part, else the last), `find_drill_part(drill, part|None)` (`None` = current), `drill_part_progress(drill)` → `(complete, total)`, `drills_completed_today()` (counts **parts** completed today), `mark_drill_part_complete(n, part=None)` → updated record or `None` (completing the last part completes the drill, which is what frees `next_drill_number` to advance); `revert_drill_part(n, part=None)` → the misclick undo, reopening the most recently completed part (or a named one) and dropping its `assessment`, `solution` and last `feedback` entry. |
+| Drill helpers | funcs | `drill_lang(language)` → the `DrillLanguage` spec (tolerant: unknown/None → default, since the key arrives from a URL query string and a stored record as well as the CLI, and a typo should show the default track rather than 500 `/today`); `drill_language_of(record)` (absent field = java); `drill_lang_root(language)`; `drill_impl_path(n, language)` / `drill_test_path(n, language)` (**one file per drill, shared by all its parts**); `drill_class_name(n, language)` / `drill_test_class_name(n, language)` (named in the prompts *and* in the generated reference, so they must come from the same place as the filename that has to contain them); `drills_in_language(drills, language)`; `find_drill(drills, n, language)` (the `(language, number)` pair is what identifies a drill now); `load_drills`/`save_drills`; `next_drill_number(language)` (max of that language's on-disk impl files — matched by turning `impl_rel` into a capture pattern so the scan can't drift from the naming — plus that language's store numbers, +1; **scoped per language so each directory reads as an unbroken sequence**, which is why Java at 9 doesn't push the first Python drill to 10); `current_drill(drills, language)` (highest number **on that track**, so a new Python drill can't make an unfinished Java series unreachable). Part-level: `drill_parts(drill)` (the parts list; **adapts a pre-parts record on read** into an equivalent one-part series, so no data migration was needed), `current_drill_part(drill)` (first not-yet-complete part, else the last), `find_drill_part(drill, part|None)` (`None` = current), `drill_part_progress(drill)` → `(complete, total)`, `drills_completed_today()` (counts **parts** completed today), `mark_drill_part_complete(n, part=None, language=None)` → updated record or `None` (completing the last part completes the drill, which is what frees `next_drill_number` to advance); `revert_drill_part(n, part=None, language=None)` → the misclick undo, reopening the most recently completed part (or a named one) and dropping its `assessment`, `solution` and last `feedback` entry. |
 | `INBOX_SCAN_WINDOW_DAYS` | `int` | Look-back window (14) for `scripts/inbox_scan.py` — INBOX messages received within this many days are scanned for rejection/interview replies, regardless of read state. |
 | `_NEEDS_REPLY_PATTERNS` / `_AUTOMATED_SENDER_RE` / `_ATS_SENDER_DOMAIN_RE` | `list[Pattern]` / `Pattern` / `Pattern` | Phrase rules for a human asking a question (relocation, sponsorship, salary, notice period, "could you confirm", a bare "?"), the automated-mailbox local-part test (`no-reply@`, `careers@`, `talent@`, …), and the **ATS platform domain** test (`myworkday.com`, `greenhouse.io`, `greenhouse-mail.io`, `lever.co`, `icims.com`, `guide.co`, `goodtime.io`, …). Consumed via `detect_needs_reply` / `is_automated_sender` / `is_ats_sender`. **List the platform's RELAY domain, not just its apply-side one** — Greenhouse mails from `us.greenhouse-mail.io`, never `greenhouse.io`, so listing only the latter missed every message it actually sends. **Interview-scheduling platforms belong here too**: MongoDB's recruiter mails through Guide (`notifications@mail3.guide.co`) naming the employer only in the subject, and with the relay unlisted `company_matches` had no route to the company at all — a recruiter screen went unmatched. The domain test exists because Workday sends as `salesforce@myworkday.com`, whose local part is just the company name and passes the first test. **Both** halves must hold — keyword matching alone fires on "Questions? Just reply to this email" in every automated acknowledgement. |
 | `_ACKNOWLEDGEMENT_PATTERNS` / `_RECRUITING_RELEVANCE_RE` | `list[Pattern]` / `Pattern` | "Thank you for applying / we received your application" phrasing, consumed by `detect_acknowledgement`; and the job-application relevance test behind `looks_like_recruiting_mail`, used only by the inbox matcher. |
@@ -1506,14 +1508,14 @@ calling `linkedin_fetch._fetch_jd_text`.
 #### `POST /today/cl/archive` — flip job to `archived` (e.g. closed posting).
 #### `POST /today/apply/log` — shell out to `update_status.py log`.
 #### `POST /today/toggle` — flip a section's done flag in `daily_checklist.json`.
-#### `POST /today/drill/generate` — shell out to `scripts/drills.py generate` (Claude): produce the next drill *series* (3–6 parts) and append it to `data/drills.json`. Flashes the new drill number.
-#### `POST /today/drill/review` — shell out to `scripts/drills.py review --number N [--part M]` (Claude): read the operator's `Drill<N>.java`+test from the Maven project, store + surface interview-style feedback for the posted part.
-#### `POST /today/drill/solve` — shell out to `scripts/drills.py solve --number N [--part M]` (Claude): generate the senior/staff-level reference "correct answer" as of that part (cumulative) from the prompts + interfaces (not the attempt), store it on the **part's** `solution`, and surface it inline.
-#### `POST /today/drill/clarify` — shell out to `scripts/drills.py clarify --number N --part M --question "…"` (one small Claude call). Stores the exchange on the part and surfaces it under the prompt.
-#### `POST /today/drill/revert` — undo a mis-clicked Finish: shell out to `scripts/drills.py revert --number N [--part M]`. No Claude call — it only removes what finish added. Surfaced as a small confirm-guarded **Undo finish of part N** button beside the feedback header, targeting the most recently completed part.
-#### `POST /today/drill/finish` — the **primary** action: shell out to `scripts/drills.py finish --number N [--part M]`, which grades the attempt, generates the reference answer (appending Correct Code to the operator's `.java` files) and marks the part complete, in one step. **Two** Claude calls back to back, so it passes `timeout=420` to `run_drill_command`. A grading failure aborts everything and leaves the part open (no attempt on disk = nothing to finish); a reference-answer failure is reported but completion still stands.
-#### `POST /today/drill/complete` — mark the posted `part` of drill `number` complete via `config.mark_drill_part_complete` (sets the part's `status`/`completed_at`; the drill's too once the last part lands), counting toward `DAILY_DRILL_GOAL`. Flashes either "part X of Y done, next part is now showing" or series-complete.
-#### `POST /today/drill/open-ide` — launch `config.EDITOR_CMD` (default `code`, VS Code) on `config.MANUAL_CODE_DRILLS_DIR`; resolves the launcher via `shutil.which` and routes `.cmd`/`.bat` (e.g. `code.cmd`) through `cmd /c`. Falls back to `os.startfile` (file manager) if the launch fails.
+#### `POST /today/drill/generate` — shell out to `scripts/drills.py generate --language L` (Claude): produce the next drill *series* (3–6 parts) on that language's track and append it to `data/drills.json`. Flashes the new drill number. **Every `/today/drill/*` route takes a posted `language`** (resolved through `config.drill_lang`, so an unknown value falls back to the default rather than erroring) and redirects back with `view=<language>` so the tab you were working in survives the action.
+#### `POST /today/drill/review` — shell out to `scripts/drills.py review --number N --language L [--part M]` (Claude): read the operator's impl+test file from that language's directory, store + surface interview-style feedback for the posted part.
+#### `POST /today/drill/solve` — shell out to `scripts/drills.py solve --number N --language L [--part M]` (Claude): generate the senior/staff-level reference "correct answer" as of that part (cumulative) from the prompts + interfaces (not the attempt), store it on the **part's** `solution`, and surface it inline.
+#### `POST /today/drill/clarify` — shell out to `scripts/drills.py clarify --number N --part M --language L --question "…"` (one small Claude call). Stores the exchange on the part and surfaces it under the prompt.
+#### `POST /today/drill/revert` — undo a mis-clicked Finish: shell out to `scripts/drills.py revert --number N --language L [--part M]`. No Claude call — it only removes what finish added. Surfaced as a small confirm-guarded **Undo finish of part N** button beside the feedback header, targeting the most recently completed part.
+#### `POST /today/drill/finish` — the **primary** action: shell out to `scripts/drills.py finish --number N --language L [--part M]`, which grades the attempt, generates the reference answer (**rewriting** the operator's impl+test files with it, after snapshotting their attempt) and marks the part complete, in one step. **Two** Claude calls back to back, so it passes `timeout=420` to `run_drill_command`. A grading failure aborts everything and leaves the part open (no attempt on disk = nothing to finish); a reference-answer failure is reported but completion still stands.
+#### `POST /today/drill/complete` — mark the posted `part` of drill `number` (on the posted `language`) complete via `config.mark_drill_part_complete` (sets the part's `status`/`completed_at`; the drill's too once the last part lands), counting toward `DAILY_DRILL_GOAL`. Flashes either "part X of Y done, next part is now showing" or series-complete.
+#### `POST /today/drill/open-ide` — launch `config.EDITOR_CMD` (default `code`, VS Code) on `config.MANUAL_CODE_DRILLS_DIR` — the **root**, not the per-language subdirectory, so one editor window holds every track; resolves the launcher via `shutil.which` and routes `.cmd`/`.bat` (e.g. `code.cmd`) through `cmd /c`. Falls back to `os.startfile` (file manager) if the launch fails.
 #### `POST /today/status` — shell out to `update_status.py status`.
 #### `POST /today/inbox/scan` — shell out to `inbox_scan.py`; flash the new-match count.
 #### `POST /today/inbox/apply` — apply a staged inbox match by `match_id`: resolves the match's raw email signal against the application's **live** status via `inbox_match_suggestion` → `config.suggest_status_transition`, maps the result onto a `STATUS_ACTION_MAP` key, and shells out to `update_status.py status` (reusing the manual pipeline), then removes the match.
@@ -1654,7 +1656,7 @@ backup failure can't block the daily-checklist page.
 - `render_status_updates_body(view='active') -> str` / `render_app_row(app) -> str` — status-updates section + per-app row with status-change buttons. Two sub-tabs: `active` (live applications, excludes ghosted) and `ghosted` (auto-flipped, awaiting the `ghosted_timeout` auto-rejection). `render_app_row` includes the `rejected_interview_failed` button. Prepends `render_inbox_matches_block(apps)`.
 - `render_inbox_matches_block(apps) -> str` / `render_inbox_match_row(m, current_status=None) -> str` — top-of-section panel for the inbox scanner: a "Scan inbox for replies" button (disabled when `linkedin_env_missing()`), plus any staged matches from `data/inbox_matches.json` whose application is still open, each with a one-click **Apply: <suggestion>** (posts to `/today/inbox/apply`) and **Dismiss** (`/today/inbox/dismiss`). The block passes each match's live application status into the row, which resolves the suggestion via `inbox_match_suggestion`. Rows show company, title, the resolved suggestion badge (recruiter screen / interview / offer / rejection reason), sender/subject, and the evidence snippet. Staged suggestions only — applying is always an explicit operator action.
 - `render_cover_letters_body() -> str` — top-N apply queue, ranked by `apply_rank_score` (full composite minus the gov-screen `flag` penalty), filtered by `company_block_reason` and `gov_screen_block_reason` (gov/defense `fail` roles hidden). Rows still display the pure composite via `job_score`. Renders the **Applications sent today: X / `DAILY_APPLICATION_GOAL`** meter (from `applications_today_count`), which turns green + shows "✓ goal met" once the goal is reached.
-- **Code drills** (`render_drills_body(view='default') -> str`) — the `code_drills` section. Reads the generated drills from `config.load_drills` and shows: a **drill parts completed today: X / `DAILY_DRILL_GOAL`** meter, the **current drill** (`config.current_drill` — highest number), a **series stepper**, and that drill's **current part only** (`config.current_drill_part`) rendered by `drill_comment_block` as a **ready-to-paste Java class-description comment** (a readonly `<textarea>` + a "Copy prompt comment" button, self-contained inline JS) — the comment only, no class stub — plus the actions **Finish part N — grade, answer & complete** (primary, one click) / **Open manual-code-drills** / **Grade only (keep working)** / **Generate new drill prompt**. The standalone *mark complete* and *show correct answer* buttons are gone — both are folded into Finish; *Grade only* remains for iterating on feedback before committing the sitting. Review / solve / complete all post the current `part` alongside `number`. The stepper shows completed parts with a ✓ and their titles, the current part highlighted, and **later parts as "not yet revealed" — numbers only, never titles or prompts**, since naming the upcoming gotcha would hand it over early and put the series back into one sitting. `_render_clarify_block` renders the **Ask about this part** box with the prompt (not with the actions — its value is entirely in the timing) plus any answers so far. Feedback and the grade fall back to `_latest_reviewed_part` when the current part has none of its own — finishing advances the view to the *next* part, which would otherwise hide the grade just earned; the older part's block is badged **completed**. The feedback renders inline, followed by its **grade** (`_render_assessment_html` — a bar per skill plus the idioms actually reached for); its reference solution (once generated) renders in a collapsible **Correct answer** `<details>`. A collapsible **Proficiency** panel (`_render_proficiency_html`) closes the section with the cross-drill profile from `config.drill_proficiency`, and states in plain words what the next drill will target, so the targeting is never a black box. The **Generate** button is labelled *Regenerate* only while no part is banked (matching `drills.generate_drill`'s reroll rule). `run_drill_command(*args)` shells out to `scripts/drills.py` (generate/review/solve, ~15-30s Claude call, 180s timeout); `set_drill_flash`/`pop_drill_flash` back the section's one-shot flash. Nothing here compiles or runs Java — the code lives in the sibling `manual-code-drills` Maven project (`config.MANUAL_CODE_DRILLS_DIR`).
+- **Code drills** (`render_drills_body(view='default') -> str`) — the `code_drills` section. **`view` IS the language key** (`java`/`python`; `"default"` and anything unrecognized mean `config.DEFAULT_DRILL_LANGUAGE`), rendered as **language sub-tabs** using the same `lk-views` pattern as the status-updates tabs, each labelled with its count of **active** drills — which is the thing worth knowing before switching, since it's how an unfinished series announces itself. Reads the generated drills from `config.load_drills` and shows: a **drill parts completed today: X / `DAILY_DRILL_GOAL`** meter (counted across **all** languages — a sitting is a sitting), the **current drill on the selected track** (`config.current_drill(drills, language)`), a **series stepper**, and that drill's **current part only** (`config.current_drill_part`) rendered by `drill_comment_block` as a **ready-to-paste class-description comment in the drill's own language** (`//` for Java, `#` for Python) (a readonly `<textarea>` + a "Copy prompt comment" button, self-contained inline JS) — the comment only, no class stub — plus the actions **Finish part N — grade, answer & complete** (primary, one click) / **Open manual-code-drills** / **Grade only (keep working)** / **Generate new <Language> drill prompt**. Every one of those forms carries a hidden `language` field, since `(language, number)` is what identifies a drill. The standalone *mark complete* and *show correct answer* buttons are gone — both are folded into Finish; *Grade only* remains for iterating on feedback before committing the sitting. Review / solve / complete all post the current `part` and `language` alongside `number`. The stepper shows completed parts with a ✓ and their titles, the current part highlighted, and **later parts as "not yet revealed" — numbers only, never titles or prompts**, since naming the upcoming gotcha would hand it over early and put the series back into one sitting. `_render_clarify_block` renders the **Ask about this part** box with the prompt (not with the actions — its value is entirely in the timing) plus any answers so far. Feedback and the grade fall back to `_latest_reviewed_part` when the current part has none of its own — finishing advances the view to the *next* part, which would otherwise hide the grade just earned; the older part's block is badged **completed**. The feedback renders inline, followed by its **grade** (`_render_assessment_html` — a bar per skill plus the idioms actually reached for); its reference solution (once generated) renders in a collapsible **Correct answer** `<details>`. A collapsible **<Language> proficiency** panel (`_render_proficiency_html(language)`) closes the section with that track's profile from `config.drill_proficiency(None, language)`, and states in plain words what the next drill will target, so the targeting is never a black box — scoped per language, so a fresh Python track reads as untargeted no matter how much Java history exists. When `profile/drill_focus_<language>.md` exists, a one-line notice names it: a focus file aimed at a specific interview is invisible otherwise, and an operator who forgot it exists would read its steer as the generator misbehaving. The **Generate** button is labelled *Regenerate* only while no part is banked (matching `drills.generate_drill`'s reroll rule). `run_drill_command(*args)` shells out to `scripts/drills.py` (generate/review/solve, ~15-30s Claude call, 180s timeout); `set_drill_flash`/`pop_drill_flash` back the section's one-shot flash. Nothing here compiles, runs or lints the operator's code — it lives in the sibling `manual-code-drills` project (`config.MANUAL_CODE_DRILLS_DIR`), under `java/` and `python/`.
 - `drill_comment_block(drill, part) -> str` — formats **one part** as a `//`-commented, word-wrapped class-description comment, in the three layers needed to start typing: header (`Drill N: Title — part M of K: Part title`), a **`The drill:`** block carrying the series `premise` (the standing brief, repeated every part), a **`Part M — <title>:`** block with that part's prompt, a numbered **`This sitting:`** block from its `tasks`, then the methods that part introduces (return types omitted, labelled "Methods this part adds" from part 2 on). Legacy parts have no premise or tasks and simply render prompt + interface under `This sitting:`. Comment only — no class stub — so it drops in above whatever class declaration you write, or gets appended when a later part extends an existing class. Later parts are never included. Matches the hand-written Drill1/Drill2 comment style; derived on render from the stored plain-text fields (nothing extra stored).
 - `_fmt_currency(value, currency) -> str` — `"CAD 245,000"` formatting.
 - `render_comp_panel(comp_record, job_id) -> str` — comp-estimate accordion inside a cover-letter row.
@@ -2086,21 +2088,68 @@ sweeps.
 ## `scripts/drills.py`
 
 **Role.** Backs the `/today` "Code drills" section with three Claude-driven
-actions (Java only). The store, numbering, and part helpers live in
-`config.py`; this script adds the LLM calls. Uses `CL_MODEL` (Sonnet), the same
-key/model as cover letters / answer-questions. **Never compiles or runs Java** —
-the code + JUnit tests live in the sibling Maven project
-(`config.MANUAL_CODE_DRILLS_DIR`).
+actions. The store, numbering, paths, naming and part helpers live in
+`config.py`; this script adds the LLM calls and owns the per-language **prompt
+wording**. Uses `CL_MODEL` (Sonnet), the same key/model as cover letters /
+answer-questions. **Never compiles, runs or lints the operator's code** — it
+lives in the sibling drills project (`config.MANUAL_CODE_DRILLS_DIR`), one
+subdirectory per language.
+
+**Multi-language.** Every action takes `--language` (see
+`config.DRILL_LANGUAGES`: `java`, `python`). Each language is its own
+**numbering track** with its own graded vocabularies, so `--number` alone no
+longer identifies a drill — the pair `(language, number)` does. `--language`
+defaults to `config.DEFAULT_DRILL_LANGUAGE` (`java`), which is also what a
+record with no `language` field means, so pre-split drills stay attached to
+their files.
 
 **A drill is a multi-part series.** One small theme is split into
 `config.DRILL_MIN_PARTS`..`DRILL_MAX_PARTS` (3–6) parts, each sized for a single
 ~`config.DRILL_PART_TARGET_MINUTES` sitting: part 1 is the plain working
 version, and every later part adds **exactly one** new gotcha. All parts extend
-the **same** `Drill<N>.java` / `Drill<N>Test.java`, so `review` and `solve` are
-**cumulative** — they judge / write the class as of the current part.
+the **same** impl + test file (`config.drill_impl_path` /
+`drill_test_path`), so `review` and `solve` are **cumulative** — they judge /
+write the class as of the current part.
+
+**Per-language prompt fragments.** `_LangPrompt` (frozen dataclass) +
+`_LANG_PROMPTS` hold everything the prompts phrase differently per language:
+`solution_lines` (line budget — 60–90 Java, 50–80 Python, because the same
+exercise lands in fewer Python lines and reusing Java's budget would quietly
+license a bigger part), `part1_bans`, `twist_menu`, `idiom_examples`,
+`iface_note`/`iface_examples`, `idiom_calibr`, `solve_style`, `design_block`,
+and `language_notes`. `_lp(language)` resolves one. The **Java fragments
+reproduce the original single-language prompt verbatim** — a live Java series
+was mid-flight and drill sizing has regressed before from small prompt edits, so
+the port must not perturb Java generation at all.
+
+Python's `language_notes` is the pedagogical core of that track: it states that
+the candidate is a senior engineer whose primary language is *not* Python, so
+drills must exercise **core language mechanics** (dicts/sets/lists/tuples,
+slicing, unpacking, comprehensions, iteration, exceptions, dunder methods,
+sorting keys) rather than library trivia, must use the **standard library only**
+(no pandas/numpy — the file has to run under a bare interpreter), and should draw
+later-part twists from Python's **well-known runtime gotchas** (mutable default
+args, late binding in loop closures, shallow vs deep copy, `is` vs `==`, mutation
+during iteration, single-use generators, `defaultdict` inserting on read, shared
+mutable class attributes, `__eq__` without `__hash__`, float money, truthiness) —
+introduced as a plain requirement, never named as a trap.
+
+**Prompt builders** (functions, not constants, since they interpolate the
+language): `_generate_system(language)`, `_review_system(language)`,
+`_solve_system(number, language)`. `_review_system` **must** stay interpolated —
+it was briefly a plain string and the model echoed the literal sentinel
+placeholder and invented its own skill keys, silently ungraded because the
+sanitizer drops unknown keys. `_solve_system` takes the *number* too, because the
+reference must declare the exact class the operator's file has to contain (Java
+won't compile otherwise, and a mismatched Python class breaks the test's import).
+`_CLARIFY_SYSTEM` is language-neutral and stays a constant.
 
 **Functions.**
 
+- `_log_id(number, language) -> str` — the process-log `entity_id`,
+  `"<language>:<number>"`. Qualified because a bare `"9"` now matches two
+  drills. Nothing reads these events back (write-only audit trail), but an
+  ambiguous id would defeat the one purpose the log has.
 - `generate_drill(language='java') -> dict` — asks Claude for a drill *series*
   in three layers, which is what makes a part actionable on its own: a
   drill-level `premise` (**the overview** — 3–5 sentences on what's being built,
@@ -2109,36 +2158,51 @@ the **same** `Drill<N>.java` / `Drill<N>Test.java`, so `review` and `solve` are
   `prompt`, a `tasks` list (≤3 imperative steps — what to *do* this sitting,
   last one always the tests), and a partial interface (method names + params,
   **no return types**, **no hints** about edge cases / pitfalls, and only the
-  methods **that part** introduces). `_GENERATE_SYSTEM` interpolates the three
-  `DRILL_*` constants and enforces the sizing rules (part 1 plain, **≤3
+  methods **that part** introduces). `_generate_system(language)` interpolates
+  the three `DRILL_*` constants and enforces the sizing rules (part 1 plain, **≤3
   methods**, finishable in the sitting including tests; one twist per later
   part; a part that only changes existing behaviour is ideal) plus three
   coherence rules: the overview may not restate the current part, foreshadow a
   later part, or use performance/ordering/concurrency/immutability language; it
-  may not name the class (always `Drill<N>`); and every operation the prompt or
+  may not name the class (always the language's `class_tmpl` — `JavaDrill<N>` /
+  `PythonDrill<N>`); and every operation the prompt or
   tasks mention must be reachable through a method of this or an earlier part —
   describing an action with no method (*"open a session"*) reads as a missing
   requirement rather than an ambiguity to resolve. Prior drill titles are passed
-  to avoid repeats, with distinctness defined as a different **domain and core
-  data-structure problem**, not a reworded title. When
-  `config.drill_proficiency_brief` is non-empty it's appended as a
-  **`## Targeting`** section, and the prompt then requires a theme that
+  to avoid repeats — **only those on the same language track**, since a Java
+  theme isn't "already used" for Python and listing it would rule out a
+  perfectly good first Python drill — with distinctness defined as a different
+  **domain and core data-structure problem**, not a reworded title. When
+  `config.drill_proficiency_brief(drills, language)` is non-empty it's appended
+  as a **`## Targeting`** section, and the prompt then requires a theme that
   exercises the weak skills plus **exactly one re-implementation part** forcing
   a rare idiom: a part that adds no method and no behaviour, asking instead for
   a rewrite of existing code using the required idiom with the existing tests
   kept passing unchanged as proof the rewrite is faithful. Its `interface` is
   empty, so it satisfies the one-method cap trivially. Never more than one per
   drill, and never an idiom the Targeting section doesn't name; with nothing
-  graded the section is omitted and generation is untargeted. **A reroll replaces the current drill at the same number
-  only while none of its parts are complete** — once a sitting is banked a
-  reroll would discard that work, so generation takes
-  `config.next_drill_number` instead (as it also does when the drill is finished
-  or the store is empty). **Every** generated series — including rerolls — is
-  written to the process log (`drill_generated`, with `premise`, the full
-  `parts` array, and a `regenerated` flag), so there's a durable record of all
+  graded the section is omitted and generation is untargeted — and because the
+  brief is language-scoped, a **newly added language starts untargeted no matter
+  how much history the other track has**. When
+  `config.drill_focus(language)` is non-empty (i.e.
+  `profile/drill_focus_<language>.md` exists) it's appended as a **`## Focus`**
+  section, aiming the drill at one specific upcoming interview; the prompt states
+  that a focus constrains *what* is chosen and **cannot** relax the part sizing,
+  the one-method cap, the line budget, the no-coaching rule or the ban on
+  foreshadowing — if a focus seems to want a bigger part, the model is told to
+  split it into more parts instead. **A reroll replaces the current drill at the
+  same number only while none of its parts are complete** — once a sitting is
+  banked a reroll would discard that work, so generation takes
+  `config.next_drill_number(language)` instead (as it also does when the drill is
+  finished or the store is empty); the reroll check, the numbering and the
+  already-used list are all scoped to the one track, so generating a Python drill
+  can neither reroll nor renumber an in-flight Java series. **Every** generated
+  series — including rerolls — is written to the process log (`drill_generated`,
+  with `premise`, the full `parts` array, `language`, a `focused` flag and a
+  `regenerated` flag), so there's a durable record of all
   drills created even though the store keeps only the latest active version.
   Raises `ValueError` if Claude returns no parts.
-- `clarify_part(number, question, part=None) -> tuple[int, str]` — answer a
+- `clarify_part(number, question, part=None, language=None) -> tuple[int, str]` — answer a
   question about the part in hand and store the exchange on the part as
   `clarifications`. **Why it exists:** hiding later parts is what keeps a sitting
   to an hour, but it also means a design decision made in part 1 can be silently
@@ -2153,13 +2217,15 @@ the **same** `Drill<N>.java` / `Drill<N>Test.java`, so `review` and `solve` are
   series marked HAS SEEN / HAS NOT SEEN — the only place that happens; review and
   solve stay blind to what comes next. Cheap: the series and the question, never
   the code.
-- `review_drill(number, part=None) -> tuple[int, str]` — reviews ONE part
-  (default: the current one). Reads the operator's `Drill<N>.java` +
-  `Drill<N>Test.java` — the whole file, since every part extends the same class
-  — and asks Claude (`_REVIEW_SYSTEM`) for an interview-style review scoped to
+- `review_drill(number, part=None, language=None) -> tuple[int, str]` — reviews
+  ONE part (default: the current one). Reads the operator's impl + test file —
+  the whole file, since every part extends the same class
+  — and asks Claude (`_review_system(language)`) for an interview-style review
+  scoped to
   that part (correctness, whether **this part's** requirement is genuinely
   handled, **regressions** in earlier parts, the ambiguities the prompt left
-  open, idiomatic Java, complexity, test quality, interview signal). Appends
+  open, idiomatic use of the language, complexity, test quality, interview
+  signal). Appends
   `{at, text}` to **the part's** `feedback` and returns `(part number,
   feedback)`. Raises `FileNotFoundError` if no attempt exists yet.
   The same call **also grades the work**: the prose is followed by an
@@ -2168,22 +2234,25 @@ the **same** `Drill<N>.java` / `Drill<N>Test.java`, so `review` and `solve` are
   `assessment`. One call, not two — the candidate's code is already in that
   prompt, so grading costs only the JSON's output tokens. The **latest grade
   overwrites**, so re-reviewing to check a fix contributes one sample, not
-  three. `_REVIEW_SYSTEM` **must stay an f-string**: it interpolates the
-  sentinel and both vocabularies from `config`.
-- `_split_assessment(text) -> (prose, assessment | None)` — splits the review on
+  three. `_review_system` **must stay interpolated**: it carries the
+  sentinel and both vocabularies from `config`, **for that language** — grading a
+  Python attempt against Java's keys would drop every skill and leave the part
+  silently ungraded.
+- `_split_assessment(text, language=None) -> (prose, assessment | None)` — splits the review on
   the sentinel. Anything unparseable degrades to `(whole text, None)`: a
   malformed grade must never cost the operator their written feedback, and an
   ungraded part simply doesn't reach the profile. Unknown skill/idiom keys are
   dropped and scores clamped to `0..DRILL_SKILL_MAX`, so a hallucinated
-  dimension can't enter the vocabulary through the back door.
-- `revert_part(number, part=None) -> dict` — undo a finish, in the store **and**
+  dimension can't enter the vocabulary through the back door. The vocabularies
+  validated against are **the language's**.
+- `revert_part(number, part=None, language=None) -> dict` — undo a finish, in the store **and**
   on disk. Reopens the part via `config.revert_drill_part`, then
   `restore_attempt` writes the archived `attempt` back over the files. Without
   that restore the revert would be destructive rather than an undo: finishing
   replaced the files with the reference, so merely reopening the part would
   leave the reference sitting where the attempt used to be and the operator
   would have nothing to revise. Logged as `drill_part_reverted`.
-- `finish_part(number, part=None) -> dict` — one sitting, one step: grade →
+- `finish_part(number, part=None, language=None) -> dict` — one sitting, one step: grade →
   reference answer → mark complete, returning
   `{part, feedback, solution, written, completed}`. Grading and completing were
   always the same intent in practice, and the separate *mark complete* click was
@@ -2191,31 +2260,36 @@ the **same** `Drill<N>.java` / `Drill<N>Test.java`, so `review` and `solve` are
   goal. **Order and failure policy are deliberate:** grading runs first and its
   failure aborts (the part stays open); the reference answer is a bonus, so its
   failure prints a `WARNING:` line but the part is still graded and completed.
-- `install_reference_code(number, part_no, solution_md) -> list[Path]` —
-  **replaces** `Drill<N>.java` / `Drill<N>Test.java` with the reference solution
-  as real, compilable code. Replacing rather than appending is the point: the
+- `install_reference_code(number, part_no, solution_md, language=None) -> list[Path]` —
+  **replaces** the drill's impl + test file with the reference solution
+  as real, runnable code. Replacing rather than appending is the point: the
   file used to accumulate one pasted instruction block per sitting *plus* a
   commented copy of the reference, so by part 6 that is ~150 lines of stale
   prose above any code, in a class the operator has to work in. Rewriting leaves
   a clean, correct base for the next sitting and keeps exactly one instruction
   block in the file — the one they paste for the part in hand. Design notes ride
-  along as a header comment. The generated reference carries its own imports but
-  no package declaration, so `_package_line` re-attaches the existing one.
-  `_split_solution_blocks` pulls the notes and the two ```java blocks out of the
-  solve response.
-- `capture_attempt(number) -> dict` — snapshots the operator's own `impl`/`test`
+  along as a header comment, using the language's line-comment prefix. Whatever
+  the file needs in order to still build is re-attached by
+  `_preamble(path, language)` — Java's existing `package …;` (the generated
+  reference carries imports but never a package line), and nothing for Python,
+  whose flat directory has no package and where inventing one would break the
+  test's import. `_split_solution_blocks(markdown, language)` pulls the notes and
+  the two fenced blocks (via `_code_block_re`) out of the solve response. Creates
+  the per-language directory if the first drill in a language lands there.
+- `capture_attempt(number, language=None) -> dict` — snapshots the operator's own `impl`/`test`
   **before** the rewrite, stored on the part as `attempt`. This is what makes a
   finish reversible rather than destructive.
-- `_has_written_code(number) -> bool` — whether the operator has written
-  anything of their own into `Drill<N>.java`, ignoring any appended reference.
+- `_has_written_code(number, language=None) -> bool` — whether the operator has written
+  anything of their own into the drill's impl file, ignoring any appended reference.
   Guards the in-place reroll: **work exists before it's marked complete**, so a
   drill with code but zero ticked-off parts must not be replaced.
-- `solve_drill(number, part=None) -> tuple[int, str]` — **stores and returns
-  only; never touches the Java files.** Installing the reference belongs to
+- `solve_drill(number, part=None, language=None) -> tuple[int, str]` — **stores and returns
+  only; never touches the source files.** Installing the reference belongs to
   *finishing* a sitting; overwriting an attempt merely because the answer was
   generated would destroy work mid-session. — asks Claude
-  (`_SOLVE_SYSTEM`) for the reference "correct answer" as of one part: a
-  senior/staff-level `Drill<N>` implementation + JUnit test with an explicit
+  (`_solve_system(number, language)`) for the reference "correct answer" as of one
+  part: a senior/staff-level implementation of the language's class
+  (`JavaDrill<N>` / `PythonDrill<N>`) + its test suite, with an explicit
   design-decisions block, **cumulative** (this part plus every earlier one),
   derived from the **prompts + interfaces only** (it does not read the
   operator's attempt). Stores it on **the part's** `solution` (`{at, text}`,
@@ -2228,17 +2302,69 @@ the **same** `Drill<N>.java` / `Drill<N>Test.java`, so `review` and `solve` are
   current part is withheld** — a reviewer or reference solution that knew the
   later twists would design for them, handing over exactly the head start the
   split exists to withhold.
-- `_load_for_part(number, part) -> (drills, record, part)` — resolves a part
-  (`None` = current) and materializes a legacy record's adapted part into
+- `_load_for_part(number, part, language=None) -> (drills, record, part)` —
+  resolves a drill by `(language, number)` via `config.find_drill` and a part
+  (`None` = current), and materializes a legacy record's adapted part into
   `parts` so the caller's mutation persists. `_iface_lines` / `_task_lines`
   format the interface and sitting-task lists.
+- `restore_attempt(number, part, language=None) -> list[Path]` — writes the
+  archived `attempt` snapshot back over the installed reference on revert.
+  Creates the per-language directory if needed.
 - `_call_claude(system, user, max_tokens=MAX_TOKENS)`, `_extract_json`,
   `_append_log` — helpers mirroring `answer_questions.py`.
 
-**CLI.** `python scripts/drills.py generate` / `... review --number N [--part M]`
-/ `... solve --number N [--part M]`. `--part` defaults to the current part.
+**CLI.** `python scripts/drills.py generate [--language L]` /
+`... review --number N [--part M] [--language L]` / `... solve …` /
+`... clarify … --question "…"` / `... revert …` / `... finish …`. Every
+subcommand takes `--language` (choices from `config.DRILL_LANGUAGES`, default
+`config.DEFAULT_DRILL_LANGUAGE`); `--part` defaults to the current part.
 Prints a machine-readable last line for `serve.py`: `GENERATED: <n>`,
-`REVIEWED: <n>.<part>`, `SOLVED: <n>.<part>`, or `ERROR: <message>`.
+`REVIEWED: <n>.<part>`, `SOLVED: <n>.<part>`, `CLARIFIED: <n>.<part>`,
+`REVERTED: <n>.<part>`, `FINISHED: <n>.<part>`, or `ERROR: <message>`. These stay
+**number-only on purpose** — the caller always supplies the language, so
+qualifying them would break `serve.py`'s parse for no gain.
+
+---
+
+## `scripts/migrate_drill_layout.py`
+
+**Role.** **One-off.** Moves the sibling drills project to the per-language
+layout and renames the Java drills to the language-prefixed scheme. Run once,
+when the drill system gained a second language. **Idempotent and re-runnable** —
+every step checks whether it has already been done, and the identifier regex has
+a negative lookbehind on `Java` so a second run can't produce `JavaJavaDrill8`.
+Dry run by default; `--apply` to act.
+
+**Steps.**
+
+1. Moves `pom.xml`, `src/` and `target/` into `java/`. `pom.xml` needs **no
+   edit** — it uses the standard Maven layout with no `<sourceDirectory>`
+   override, so it keeps working from its new home.
+2. Creates `python/` with a README on running pytest (`_PY_README`).
+3. Renames `Drill<N>.java` → `JavaDrill<N>.java` and `Drill<N>Test.java` →
+   `JavaDrill<N>Test.java`, rewriting the class identifiers and every cross-file
+   reference inside them. Java requires the public class name to match the
+   filename, so **the rename and the identifier rewrite are one operation** —
+   doing either alone leaves a project that doesn't compile.
+4. Rewrites the same identifiers inside `data/drills.json`. **This is the step
+   that's easy to miss and expensive to skip:**
+   - `attempt` is what `drills.revert_part` writes back over the installed
+     reference. A snapshot still saying `class Drill9` restored into
+     `JavaDrill9.java` produces a file that doesn't compile — so Undo would be
+     *broken*, not merely stale.
+   - `solution` text is handed to the reviewer as the *baseline you were GIVEN*
+     from part 2 on. If it names a class the file no longer declares, the
+     reviewer compares against the wrong thing.
+
+   Historical `feedback` prose is deliberately left alone — a record of what was
+   said at the time, not something read back as code.
+
+**Functions.** `rewrite_identifiers(text)` (`_IDENT_RE` — one pattern covers both
+`Drill12` and `Drill12Test`, since there's no word boundary after the digits);
+`plan_moves` / `plan_renames` / `plan_store_edits` (the dry-run plan);
+`apply_store_edits(drills)` → fields changed.
+
+**Verify after applying:** `cd java && mvn -q test-compile`.
 
 ---
 

@@ -620,11 +620,13 @@ forensics.
 | `application_question_generated` | `answer_questions.generate_answer` | `"class=<motivation\|behavioral> version=<n> chars=<n> tokens_in=<n> tokens_out=<n>"` |
 | `application_question_edited` | `answer_questions.save_edit` | `"version=<n> chars=<n>"` |
 | `application_question_finalized` | `answer_questions.finalize_answer` | `"version=<n> chars=<n>"` |
-| `drill_generated` | `drills.generate_drill` | `"<Generated\|Regenerated> Drill <n> (java): <title> — <k> parts"`. Also carries the `premise`, the full `parts` array (each with its `title`/`prompt`/`interface`), and a `regenerated` bool on the event — the durable record of every drill series created (the `drills.json` store keeps only the latest active version). |
-| `drill_clarified` | `drills.clarify_part` | `"Answered a question on Drill <n> part <m>."` Carries `part` and the `question`. |
-| `drill_part_reverted` | `drills.revert_part` | `"Reverted Drill <n> part <m> to active (grade, reference answer and last review dropped)."` Carries `part` and the `files` rewritten in the Maven project. The undo for a mis-clicked Finish — parallel to `application_reverted`. |
-| `drill_reviewed` | `drills.review_drill` | `"Reviewed Drill <n> part <m> (<skill> <s>/5, …)."` Carries the `part` number and the full `assessment` object (`null` when the grade didn't parse) — the durable record of every grade, since `drills.json` keeps only the latest per part. |
-| `drill_solved` | `drills.solve_drill` | `"Generated reference solution for Drill <n> part <m>; appended Correct Code to <files>."` Carries the `part` number and `wrote_correct_code` (the paths appended to in the Maven project, `[]` when none existed). |
+| `drill_generated` | `drills.generate_drill` | `"<Generated\|Regenerated> Drill <n> (<language>): <title> — <k> parts"`. Also carries the `premise`, the full `parts` array (each with its `title`/`prompt`/`interface`), `language`, a `focused` bool (whether a `profile/drill_focus_<language>.md` steered it) and a `regenerated` bool on the event — the durable record of every drill series created (the `drills.json` store keeps only the latest active version). |
+
+**`entity_id` on drill events is `"<language>:<number>"`**, not the bare number: each language numbers its own track, so `"9"` alone matches two different drills. Nothing reads these events back — the log is a write-only audit trail — but an ambiguous id would defeat the one purpose it has. Every drill event also carries a `language` field.
+| `drill_clarified` | `drills.clarify_part` | `"Answered a question on Drill <n> (<language>) part <m>."` Carries `part`, `language` and the `question`. |
+| `drill_part_reverted` | `drills.revert_part` | `"Reverted Drill <n> (<language>) part <m> to active (grade, reference answer and last review dropped)."` Carries `part`, `language` and the `files` rewritten in the drills project (the operator's own attempt, restored over the installed reference). The undo for a mis-clicked Finish — parallel to `application_reverted`. |
+| `drill_reviewed` | `drills.review_drill` | `"Reviewed Drill <n> (<language>) part <m> (<skill> <s>/5, …)."` Carries the `part` number, `language`, and the full `assessment` object (`null` when the grade didn't parse) — the durable record of every grade, since `drills.json` keeps only the latest per part. Skill/idiom keys are **the language's**. |
+| `drill_solved` | `drills.solve_drill` | `"Generated reference solution for Drill <n> (<language>) part <m>."` Carries the `part` number and `language`. **Stores only** — the source files are rewritten by `finish`, never by generating the answer on its own. |
 
 ### Example
 
@@ -1001,11 +1003,17 @@ into 3–6 parts (`config.DRILL_MIN_PARTS`..`DRILL_MAX_PARTS`), each a short,
 deliberately underspecified prompt with a partial interface (method names +
 params, **no return types**) sized for a single
 ~`config.DRILL_PART_TARGET_MINUTES` sitting. Part 1 is the plain working
-version; each later part adds exactly one gotcha. The actual `Drill<N>.java` +
-`Drill<N>Test.java` live in the sibling Maven project
-(`config.MANUAL_CODE_DRILLS_DIR`, default `../manual-code-drills`), **not** here
-— **one file per drill, shared and extended by all its parts**. This file only
-holds the generated prompts, per-part status, and review feedback.
+version; each later part adds exactly one gotcha. The actual source files live
+in the sibling drills project (`config.MANUAL_CODE_DRILLS_DIR`, default
+`../manual-code-drills`) under **one subdirectory per language**, **not** here —
+**one impl + test file per drill, shared and extended by all its parts**. This
+file only holds the generated prompts, per-part status, and review feedback.
+
+**One numbering track per language.** Each language in
+`config.DRILL_LANGUAGES` numbers its own drills, so `number` alone is **not** a
+primary key — `(language, number)` is. Java drill 9 and Python drill 1 coexist,
+and each language's directory reads as an unbroken sequence. Look a drill up with
+`config.find_drill(drills, number, language)`, never by number alone.
 
 **Lifecycle.**
 
@@ -1014,21 +1022,28 @@ holds the generated prompts, per-part status, and review feedback.
   while none of its parts are complete** — once a sitting is banked, a reroll
   would discard that work, so a new record takes the next number instead (as it
   also does when the drill is finished). The next number is one past the highest
-  `Drill<N>.java` in the Maven project and the highest number in the store
-  (`config.next_drill_number`). The store therefore keeps only the latest version
-  of an active drill; the full history of every generated series lives in the
-  process log (`drill_generated` events).
+  impl file in **that language's** directory and the highest number in the store
+  **for that language** (`config.next_drill_number(language)`) — so generating a
+  Python drill can neither reroll nor renumber an in-flight Java series. The store
+  therefore keeps only the latest version of an active drill; the full history of
+  every generated series lives in the process log (`drill_generated` events,
+  which carry `language` and a `focused` flag).
 - **Mutated by** `scripts/drills.py review` / `solve` (append to the **part's**
   `feedback` and overwrite its `assessment` / set its `solution`) and `serve.py`
   via `config.mark_drill_part_complete` (sets the part's `status`/`completed_at`,
   and the record's once the last part lands).
-- **Read** by `serve.py` for the current drill (`config.current_drill`) and its
+- **Read** by `serve.py` for the current drill on the selected language tab
+  (`config.current_drill(drills, language)`) and its
   current part (`config.current_drill_part`), the parts-completed-today meter
-  (`config.drills_completed_today`), and `section_done`. Also the **sole input
-  to the proficiency profile** (`config.drill_proficiency`), which is derived on
+  (`config.drills_completed_today` — counted across **all** languages), and
+  `section_done`. Also the **sole input
+  to the proficiency profile** (`config.drill_proficiency(drills, language)`),
+  which is derived on
   read from the per-part `assessment` objects and never stored — so
   re-reviewing a part updates the profile with no migration and no chance of a
-  stale copy. That profile is **recency-weighted** (`config.DRILL_GRADE_HALF_LIFE`) so
+  stale copy. That profile is **per-language** (neither the skill nor the idiom
+  axis transfers between languages) and **recency-weighted**
+  (`config.DRILL_GRADE_HALF_LIFE`) so
   improvement shows up and old grades don't anchor it, and is fed back into the
   next `generate` as its `## Targeting` section.
 - **Never deleted.**
@@ -1046,10 +1061,10 @@ A JSON array; each record:
 
 | Field | Type | Notes |
 |---|---|---|
-| `number` | int | Drill number (continues the `Drill<N>.java` sequence). Primary key. |
-| `language` | string | `"java"` (only language currently generated). |
+| `number` | int | Drill number, **unique per language**, continuing that language's own file sequence. Together with `language` it forms the primary key; on its own it is ambiguous. |
+| `language` | string | Language track: `"java"` or `"python"` (keys of `config.DRILL_LANGUAGES`). **An absent field means `"java"`** — every drill generated before the language split has no `language`, and `config.drill_language_of` applies that default so the old history stays attached to its files. Determines the file paths, the class name, the comment prefix and the graded vocabularies. |
 | `title` | string | Short generated name for the whole series. |
-| `premise` | string | The **drill-level overview** (3–5 sentences): what is being built, who calls it and why, and that it's one class extended across sittings. Repeated at the top of every part's pasteable comment as the standing brief. Deliberately carries **no** performance / ordering / concurrency / immutability language — those are later-part twists, and naming one here would hand it over on day one. Never names the class (it's always `Drill<N>`). |
+| `premise` | string | The **drill-level overview** (3–5 sentences): what is being built, who calls it and why, and that it's one class extended across sittings. Repeated at the top of every part's pasteable comment as the standing brief. Deliberately carries **no** performance / ordering / concurrency / immutability language — those are later-part twists, and naming one here would hand it over on day one. Never names the class (it's always the language's `class_tmpl` — `JavaDrill<N>` / `PythonDrill<N>`). |
 | `parts` | list[object] | The series, in order — see the part schema below. |
 | `status` | `"active"` / `"complete"` | `complete` once **every** part is complete. |
 | `created_at` | ISO datetime | When generated. |
@@ -1069,9 +1084,9 @@ Each entry in `parts`:
 | `completed_at` | ISO datetime / `null` | Set by `mark_drill_part_complete`; its date drives the daily goal. |
 | `feedback` | list[object] | Review history for this part: `{"at": ISO, "text": <markdown feedback>}`, appended by each review. |
 | `clarifications` | list[object] / absent | Mid-sitting Q&A about this part: `{"at": ISO, "question": …, "answer": …}`, appended by `drills.clarify_part`. **Passed to the reviewer at grading**, so an assumption the tool sanctioned can't then be marked down. Survives a revert — the questions still apply when the part is redone. |
-| `attempt` | object / absent | The operator's own code as it stood when the part was finished: `{"at": ISO, "impl": <Drill<N>.java>, "test": <Drill<N>Test.java>}`. Captured because finishing **replaces** those files with the reference solution — this snapshot is what makes the undo an undo rather than a deletion. Written by `drills.finish_part`, consumed by `drills.restore_attempt`, and dropped once the part is reverted. |
-| `assessment` | object / absent | The **grade**, from the same review call: `{"at": ISO, "skills": {<key>: 0-5}, "idioms_used": [<key>, …]}`, keyed by `config.DRILL_SKILLS` / `config.DRILL_IDIOMS`. **Overwritten, not appended** — a part reviewed three times contributes one sample, so re-reviewing a fix can't inflate the profile. Absent when the part hasn't been reviewed or the grade failed to parse (the prose feedback survives either way). This is the sole input to the derived proficiency profile. |
-| `solution` | object / absent | The reference "correct answer" as of this part (**cumulative** — this part plus every earlier one): `{"at": ISO, "text": <markdown: design notes + Java impl + test>}`. Written by `drills.solve_drill`, overwritten on regenerate; absent until first requested. |
+| `attempt` | object / absent | The operator's own code as it stood when the part was finished: `{"at": ISO, "impl": <impl file body>, "test": <test file body>}`. Captured because finishing **replaces** those files with the reference solution — this snapshot is what makes the undo an undo rather than a deletion. Written by `drills.finish_part`, consumed by `drills.restore_attempt`, and dropped once the part is reverted. Holds **source text, so it is language-coupled**: `scripts/migrate_drill_layout.py` had to rewrite the stored class identifiers alongside the file renames, since a snapshot still naming the old class restored into the renamed file would not compile. |
+| `assessment` | object / absent | The **grade**, from the same review call: `{"at": ISO, "skills": {<key>: 0-5}, "idioms_used": [<key>, …]}`, keyed by that **language's** vocabularies (`config.drill_skills(language)` / `config.drill_idioms(language)`) — Java's keys include `idiomatic_java`, Python's `idiomatic_python`, and the idiom keys don't overlap at all, which is why the derived profile is per-language. **Overwritten, not appended** — a part reviewed three times contributes one sample, so re-reviewing a fix can't inflate the profile. Absent when the part hasn't been reviewed or the grade failed to parse (the prose feedback survives either way). This is the sole input to the derived proficiency profile. |
+| `solution` | object / absent | The reference "correct answer" as of this part (**cumulative** — this part plus every earlier one): `{"at": ISO, "text": <markdown: design notes + impl + test, fenced in the drill's language>}`. Written by `drills.solve_drill`, overwritten on regenerate; absent until first requested. Also read back by `review_drill` from part 2 on, as the labelled *baseline the candidate was given* — so like `attempt` it contains language-coupled source text and was rewritten by `scripts/migrate_drill_layout.py`. |
 
 ### Example
 

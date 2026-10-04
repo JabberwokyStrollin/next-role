@@ -66,19 +66,19 @@ DATA_BACKUP_RETAIN_DAYS = 7
 
 # ─── Code drills (interview-prep) ─────────────────────────────────────────────
 #
-# The /today "Code drills" section generates interview-style Java drills and
-# reviews the operator's manual attempts. The actual code + JUnit tests live in
-# a SIBLING Maven project (default ../manual-code-drills, override with
-# NEXTROLE_DRILLS_DIR) numbered Drill1.java, Drill2.java, …; generated drills
-# continue that sequence. "Open manual-code-drills" launches EDITOR_CMD on that
-# folder (default "code", the VS Code CLI; override with NEXTROLE_EDITOR_CMD for
-# a different editor), falling back to the OS file manager if the launch fails.
+# The /today "Code drills" section generates interview-style drills and reviews
+# the operator's manual attempts. The actual code + tests live in a SIBLING
+# project (default ../manual-code-drills, override with NEXTROLE_DRILLS_DIR),
+# split into one subdirectory PER LANGUAGE. "Open manual-code-drills" launches
+# EDITOR_CMD on the root of that folder (default "code", the VS Code CLI;
+# override with NEXTROLE_EDITOR_CMD), falling back to the OS file manager if the
+# launch fails — so one editor window holds every track.
 #
 # Drills are practiced in SITTINGS, not marathons. A generated drill is ONE
 # small theme split into DRILL_MIN_PARTS..DRILL_MAX_PARTS parts, each sized to
 # fit a single ~DRILL_PART_TARGET_MINUTES sitting: part 1 is the plain working
 # version, and every later part adds exactly ONE new gotcha to the same class.
-# All parts share one Drill<N>.java / Drill<N>Test.java, which the operator
+# All parts of a drill share ONE impl file and ONE test file, which the operator
 # keeps extending. Only the current part is ever surfaced — the later parts
 # stay hidden so the drill can't read as a 4-hour block, which is what drove
 # both procrastination and rushing when a whole spec was shown at once.
@@ -95,51 +95,231 @@ MANUAL_CODE_DRILLS_DIR = Path(
     os.environ.get("NEXTROLE_DRILLS_DIR") or (ROOT.parent / "manual-code-drills")
 ).resolve()
 EDITOR_CMD = os.environ.get("NEXTROLE_EDITOR_CMD", "code").strip()
-_DRILLS_JAVA_PKG_DIR = "src/main/java/drills"
-_DRILLS_TEST_PKG_DIR = "src/test/java/drills"
 
 
-def drill_impl_path(number: int) -> Path:
-    """Absolute path to Drill<number>.java in the sibling Maven project."""
-    return MANUAL_CODE_DRILLS_DIR / _DRILLS_JAVA_PKG_DIR / f"Drill{number}.java"
+# ─── Drill languages (SSOT) ───────────────────────────────────────────────────
+#
+# Everything that varies between drill languages lives HERE, in one record per
+# language, so adding a third language is a dict entry rather than a hunt
+# through drills.py and serve.py. `drills.py` owns the per-language PROMPT
+# fragments (wording is prompt authoring, not configuration); this owns the
+# facts: where files go, what they're called, and the graded vocabularies.
+#
+# Each language is its OWN NUMBERING TRACK. Java at drill 9 and Python at drill
+# 1 coexist, so a bare number no longer identifies a drill — every function
+# keyed on `number` also takes a `language`. Two consequences worth knowing:
+#   * `next_drill_number` scans only that language's directory + that
+#     language's rows in the store, so neither track leaves gaps in the other.
+#   * The process log's `entity_id` is "<language>:<number>" for the same
+#     reason; "9" alone would be ambiguous.
+#
+# Filenames carry the language too (JavaDrill9.java, python_drill1.py). The
+# prefix is redundant inside a directory but not in an editor tab strip, which
+# is where the operator actually reads it. Each language spells the prefix its
+# OWN way — PascalCase class-per-file for Java, snake_case module for Python —
+# because `idiomatic_<language>` is a graded skill and these files are the
+# practice material: a `javaDrill9` class would be modelling the bad habit.
 
 
-def drill_test_path(number: int) -> Path:
-    """Absolute path to Drill<number>Test.java in the sibling Maven project."""
-    return MANUAL_CODE_DRILLS_DIR / _DRILLS_TEST_PKG_DIR / f"Drill{number}Test.java"
+@dataclass(frozen=True)
+class DrillLanguage:
+    """One drill language: paths, naming, and the graded vocabularies.
+
+    `skills` and `idioms` are per-language and NOT interchangeable. Java's
+    `idiomatic_java` and Python's `idiomatic_python` are different dimensions,
+    and an idiom vocabulary is meaningless across languages — which is why the
+    proficiency profile is scoped to one track (see `drill_proficiency`)."""
+    key:             str        # stored on the record; the CLI + URL value
+    label:           str        # display name, also interpolated into prompts
+    subdir:          str        # per-language root under MANUAL_CODE_DRILLS_DIR
+    impl_rel:        str        # impl path under that root; {n} = drill number
+    test_rel:        str        # test path under that root
+    class_tmpl:      str        # class the operator writes
+    test_class_tmpl: str        # test class / module-level convention
+    comment:         str        # line-comment prefix for the pasted prompt
+    fence:           str        # markdown code-fence tag in solve output
+    test_framework:  str        # named in the prompts
+    skills:          dict       # graded skill key -> description
+    idioms:          dict       # tracked idiom key -> description
 
 
-# Markers delimiting the reference solution that `drills.write_correct_code`
-# appends to the operator's own Drill<N>.java / Drill<N>Test.java once they ask
-# to see the answer. It's a BLOCK COMMENT because the file must still compile —
-# two classes of the same name can't coexist — and it's delimited for two
-# reasons that both matter:
-#   1. re-running solve REPLACES the block instead of stacking copies;
-#   2. `review_drill` STRIPS it before grading, or Claude would read its own
-#      reference answer as the candidate's work and grade it as theirs.
+# Skill keys are deliberately near-identical across languages so the meter in
+# the UI is comparable; only the `idiomatic_*` dimension is language-specific.
+# Java's keys MUST stay exactly as they are — they're the keys already stored in
+# every existing assessment, and `_split_assessment` drops unknown keys, so a
+# rename would silently erase graded history rather than fail loudly.
+_JAVA_SKILLS: dict[str, str] = {
+    "correctness":     "Does it do what the part asked, edge cases included",
+    "data_structures": "Right collection / structure for the job",
+    "idiomatic_java":  "Standard-library fluency, modern constructs, naming",
+    "complexity":      "Time and space, and avoiding needless rework",
+    "tests":           "Do the tests actually pin the behaviour down",
+    "decomposition":   "Method breakdown, cohesion, readability",
+}
+
+_PYTHON_SKILLS: dict[str, str] = {
+    "correctness":      "Does it do what the part asked, edge cases included",
+    "data_structures":  "Right collection / structure for the job",
+    "idiomatic_python": "Standard-library fluency, Pythonic constructs, naming",
+    "complexity":       "Time and space, and avoiding needless rework",
+    "tests":            "Do the tests actually pin the behaviour down",
+    "decomposition":    "Function breakdown, cohesion, readability",
+}
+
+_JAVA_IDIOMS: dict[str, str] = {
+    "streams":          "Stream pipelines — map/filter/collect, grouping, reduction",
+    "lambdas":          "Lambdas and method references",
+    "optional":         "Optional rather than null sentinels",
+    "records":          "Records for value types",
+    "pattern_matching": "Sealed types, pattern-matching switch, enhanced instanceof",
+    "collections_api":  "Beyond get/put — computeIfAbsent, merge, TreeMap, Deque, …",
+    "generics":         "Type parameters / bounded types on your own API",
+    "polymorphism":     "Interfaces or abstract classes unifying implementations",
+    "concurrency":      "java.util.concurrent types, synchronization",
+    "legacy_java8":     "Pre-var, pre-record style: explicit iteration, anonymous classes",
+}
+
+# The Python vocabulary leans toward what a data-pipeline interview actually
+# exercises: lazy iteration, the collections/itertools toolbox, exact
+# arithmetic. `decimal_exact` is here rather than treated as a correctness bug
+# because reaching for Decimal on money is a habit, and the idiom axis is what
+# measures habits reached for at all.
+_PYTHON_IDIOMS: dict[str, str] = {
+    "comprehensions":     "List/dict/set comprehensions and generator expressions",
+    "generators":         "yield / lazy iteration instead of building full lists",
+    "dataclasses":        "dataclass or NamedTuple for value types",
+    "collections_module":  "defaultdict, Counter, deque, ChainMap over hand-rolled equivalents",
+    "itertools_functools": "itertools / functools — groupby, chain, reduce, lru_cache, partial",
+    "context_managers":   "with-statements, contextlib, custom __enter__/__exit__",
+    "type_hints":         "Annotations on your own API, typing constructs",
+    "dunder_methods":     "__eq__/__hash__/__repr__/__iter__/__len__, operator protocols",
+    "exceptions_eafp":    "Purposeful exception types and try/except (EAFP) over pre-checks",
+    "decimal_exact":      "Decimal / Fraction for exact arithmetic instead of float",
+    "unpacking":          "Tuple unpacking, *args/**kwargs, starred assignment, enumerate/zip",
+    "sorting_keys":       "sorted with key / operator.itemgetter, stable multi-key ordering",
+    "legacy_python":      "Pre-comprehension style: index loops, manual accumulation, %-formatting",
+}
+
+DRILL_LANGUAGES: dict[str, DrillLanguage] = {
+    "java": DrillLanguage(
+        key="java", label="Java", subdir="java",
+        impl_rel="src/main/java/drills/JavaDrill{n}.java",
+        test_rel="src/test/java/drills/JavaDrill{n}Test.java",
+        class_tmpl="JavaDrill{n}", test_class_tmpl="JavaDrill{n}Test",
+        comment="//", fence="java", test_framework="JUnit 5",
+        skills=_JAVA_SKILLS, idioms=_JAVA_IDIOMS,
+    ),
+    # Flat layout, no package: pytest's default `prepend` import mode puts the
+    # test file's own directory on sys.path, so `from python_drill1 import
+    # PythonDrill1` resolves with zero config — no __init__.py, no pytest.ini.
+    # The test filename MUST keep the `test_` prefix or bare `pytest` collects
+    # nothing and the sitting looks like it passed.
+    "python": DrillLanguage(
+        key="python", label="Python", subdir="python",
+        impl_rel="python_drill{n}.py",
+        test_rel="test_python_drill{n}.py",
+        class_tmpl="PythonDrill{n}", test_class_tmpl="test_* functions",
+        comment="#", fence="python", test_framework="pytest",
+        skills=_PYTHON_SKILLS, idioms=_PYTHON_IDIOMS,
+    ),
+}
+
+# Java is the default for one reason: every drill that predates the language
+# split is Java and carries no `language` field, so an absent value must read
+# as "java" or the whole existing history detaches from its files.
+DEFAULT_DRILL_LANGUAGE = "java"
+
+
+def drill_lang(language: str | None = None) -> DrillLanguage:
+    """Resolve a language key to its spec, falling back to the default for
+    None / unknown values. Tolerant rather than strict because the key arrives
+    from a URL query string and a stored record as well as the CLI, and a typo
+    should show the default track rather than 500 the whole /today page."""
+    return DRILL_LANGUAGES.get(
+        (language or "").strip().lower(), DRILL_LANGUAGES[DEFAULT_DRILL_LANGUAGE])
+
+
+def drill_language_of(drill: dict) -> str:
+    """The language key of a drill record. Pre-split records have no
+    `language` field and are Java by definition."""
+    return drill_lang(drill.get("language")).key
+
+
+def drill_lang_root(language: str | None = None) -> Path:
+    """The per-language root inside the sibling drills project."""
+    return MANUAL_CODE_DRILLS_DIR / drill_lang(language).subdir
+
+
+def drill_impl_path(number: int, language: str | None = None) -> Path:
+    """Absolute path to the impl file the operator writes for this drill."""
+    spec = drill_lang(language)
+    return drill_lang_root(spec.key) / spec.impl_rel.format(n=number)
+
+
+def drill_test_path(number: int, language: str | None = None) -> Path:
+    """Absolute path to the test file the operator writes for this drill."""
+    spec = drill_lang(language)
+    return drill_lang_root(spec.key) / spec.test_rel.format(n=number)
+
+
+def drill_class_name(number: int, language: str | None = None) -> str:
+    """The class the operator is expected to write (e.g. `JavaDrill9`,
+    `PythonDrill1`). Named in the prompts and in the generated reference, so it
+    has to come from the same place as the filename that must contain it."""
+    return drill_lang(language).class_tmpl.format(n=number)
+
+
+def drill_test_class_name(number: int, language: str | None = None) -> str:
+    """The test class, or the collection convention where a language prefers
+    bare functions (pytest)."""
+    return drill_lang(language).test_class_tmpl.format(n=number)
+
+
+# Markers delimiting a reference solution appended INTO the operator's own
+# files. Finishing a part now REWRITES those files instead (see
+# `drills.install_reference_code`), so nothing writes these any more — but
+# `strip_correct_code` still has to recognise them, because files and stored
+# attempt snapshots from before that change still carry the block, and grading
+# it as the candidate's own work would inflate the profile exactly as it did
+# then. Java's form is a block comment (the file must still compile — two
+# classes of one name can't coexist); Python has no block comment, so its form
+# is line comments.
 CORRECT_CODE_BEGIN = "/* ===== CORRECT CODE"
 CORRECT_CODE_END   = "===== END CORRECT CODE ===== */"
+CORRECT_CODE_BEGIN_PY = "# ===== CORRECT CODE"
+CORRECT_CODE_END_PY   = "# ===== END CORRECT CODE ====="
+
+_CORRECT_CODE_MARKERS = ((CORRECT_CODE_BEGIN, CORRECT_CODE_END),
+                         (CORRECT_CODE_BEGIN_PY, CORRECT_CODE_END_PY))
 
 
 def strip_correct_code(text: str) -> str:
-    """Remove every appended Correct Code block from Java source. Idempotent,
-    and returns the text unchanged when there is none. An unterminated block
-    (hand-edited, or a truncated write) drops everything from its start, since
-    the remainder can't be trusted to be the operator's own code."""
-    if CORRECT_CODE_BEGIN not in text:
-        return text
-    out, idx = [], 0
-    while True:
-        begin = text.find(CORRECT_CODE_BEGIN, idx)
-        if begin < 0:
-            out.append(text[idx:])
-            break
-        out.append(text[idx:begin])
-        end = text.find(CORRECT_CODE_END, begin)
-        if end < 0:
-            break
-        idx = end + len(CORRECT_CODE_END)
-    return "".join(out).rstrip("\n")
+    """Remove every appended Correct Code block, in any language's marker form.
+    Idempotent, and returns the text unchanged when there is none. An
+    unterminated block (hand-edited, or a truncated write) drops everything from
+    its start, since the remainder can't be trusted to be the operator's own
+    code.
+
+    Handles both marker styles rather than taking a `language` argument: the
+    markers can't collide (a Java block comment isn't valid Python and vice
+    versa), and the callers that matter — `capture_attempt`, `review_drill` —
+    would otherwise have to thread a language through purely for legacy data."""
+    for begin_marker, end_marker in _CORRECT_CODE_MARKERS:
+        if begin_marker not in text:
+            continue
+        out, idx = [], 0
+        while True:
+            begin = text.find(begin_marker, idx)
+            if begin < 0:
+                out.append(text[idx:])
+                break
+            out.append(text[idx:begin])
+            end = text.find(end_marker, begin)
+            if end < 0:
+                break
+            idx = end + len(end_marker)
+        text = "".join(out).rstrip("\n")
+    return text
 
 
 # ─── Discard ledger ───────────────────────────────────────────────────────────
@@ -228,18 +408,39 @@ def save_drills(rows: list) -> None:
     save_json(DRILLS_STORE_PATH, rows)
 
 
-def next_drill_number() -> int:
-    """The next drill number: one past the highest existing Drill<N>.java in the
-    sibling Maven project AND the highest number already in the store, so the
-    sequence never collides with hand-written drills (Drill1/Drill2/…)."""
+def drills_in_language(drills: list | None = None,
+                       language: str | None = None) -> list:
+    """Only the drills on ONE language's track. Every per-language query goes
+    through this so the "absent language means java" rule lives in exactly one
+    place (`drill_language_of`)."""
+    drills = load_drills() if drills is None else drills
+    key = drill_lang(language).key
+    return [d for d in drills if drill_language_of(d) == key]
+
+
+def next_drill_number(language: str | None = None) -> int:
+    """The next drill number ON ONE LANGUAGE'S TRACK: one past the highest impl
+    file already in that language's directory AND the highest number already in
+    the store for that language.
+
+    Scoped per language so each directory reads as an unbroken sequence — Java
+    sitting at 9 doesn't push the first Python drill to 10. The filesystem is
+    consulted as well as the store so the sequence can't collide with a
+    hand-written drill that was never generated (Java 1-2 were)."""
+    spec    = drill_lang(language)
     highest = 0
-    pkg = MANUAL_CODE_DRILLS_DIR / _DRILLS_JAVA_PKG_DIR
-    if pkg.is_dir():
-        for f in pkg.glob("Drill*.java"):
-            m = _re.match(r"Drill(\d+)\.java$", f.name)
-            if m:
-                highest = max(highest, int(m.group(1)))
-    for d in load_drills():
+    root    = drill_lang_root(spec.key)
+    # Turn the filename template into a capture pattern, so the scan can never
+    # drift from the naming the paths use.
+    pattern = _re.escape(spec.impl_rel.format(n="\x00")).replace("\x00", r"(\d+)")
+    for f in root.rglob("*"):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(root).as_posix()
+        m   = _re.fullmatch(pattern, rel)
+        if m:
+            highest = max(highest, int(m.group(1)))
+    for d in drills_in_language(None, spec.key):
         try:
             highest = max(highest, int(d.get("number", 0)))
         except (TypeError, ValueError):
@@ -247,15 +448,32 @@ def next_drill_number() -> int:
     return highest + 1
 
 
-def current_drill(drills: list | None = None) -> dict | None:
-    """The most recent drill (highest number), or None when the store is empty."""
-    drills = load_drills() if drills is None else drills
-    if not drills:
+def current_drill(drills: list | None = None,
+                  language: str | None = None) -> dict | None:
+    """The most recent drill (highest number) on one language's track, or None
+    when that track is empty.
+
+    Language-scoped because the tracks advance independently: a new Python drill
+    must not make an unfinished Java series unreachable from the UI, which is
+    what a global "highest number wins" would do."""
+    rows = drills_in_language(drills, language)
+    if not rows:
         return None
-    return max(drills, key=lambda d: int(d.get("number", 0)))
+    return max(rows, key=lambda d: int(d.get("number", 0)))
 
 
-def revert_drill_part(number: int, part: int | None = None) -> dict | None:
+def find_drill(drills: list | None = None, number: int | None = None,
+               language: str | None = None) -> dict | None:
+    """One drill by (language, number) — the pair that identifies a drill now
+    that each language numbers its own track."""
+    if number is None:
+        return None
+    return next((d for d in drills_in_language(drills, language)
+                 if int(d.get("number", 0)) == int(number)), None)
+
+
+def revert_drill_part(number: int, part: int | None = None,
+                      language: str | None = None) -> dict | None:
     """Undo a finish/complete for one part — the misclick escape hatch, and the
     exact parallel of `update_status.revert` for a mis-logged application.
 
@@ -272,11 +490,14 @@ def revert_drill_part(number: int, part: int | None = None) -> dict | None:
       * the most recent ``feedback`` entry — the review that finish produced.
 
     The drill's own completion is cleared too: an incomplete part means an
-    incomplete series. Java-side cleanup (removing the appended Correct Code)
-    belongs to `drills.revert_part` — this owns the store only."""
+    incomplete series. Source-file cleanup (restoring the operator's own attempt
+    over the installed reference) belongs to `drills.revert_part` — this owns the
+    store only."""
     drills = load_drills()
+    lang   = drill_lang(language).key
     for d in drills:
-        if int(d.get("number", 0)) != int(number):
+        if (int(d.get("number", 0)) != int(number)
+                or drill_language_of(d) != lang):
             continue
         d["parts"] = drill_parts(d)
         if part is None:
@@ -357,18 +578,22 @@ def drills_completed_today(drills: list | None = None) -> int:
                and (p.get("completed_at") or "")[:10] == t)
 
 
-def mark_drill_part_complete(number: int, part: int | None = None) -> dict | None:
-    """Mark ONE part of drill ``number`` complete (idempotent), defaulting to
-    the current part. Completing the last part completes the drill itself,
-    which is what lets ``next_drill_number`` advance. Returns the updated drill
-    record, or ``None`` when the drill or part isn't found.
+def mark_drill_part_complete(number: int, part: int | None = None,
+                             language: str | None = None) -> dict | None:
+    """Mark ONE part of drill ``number`` on one language's track complete
+    (idempotent), defaulting to the current part. Completing the last part
+    completes the drill itself, which is what lets ``next_drill_number``
+    advance. Returns the updated drill record, or ``None`` when the drill or
+    part isn't found.
 
     Mutating a legacy (pre-parts) record materializes its adapted single part
     into ``parts``; the old top-level fields are left in place, so nothing that
     still reads them breaks."""
     drills = load_drills()
+    lang   = drill_lang(language).key
     for d in drills:
-        if int(d.get("number", 0)) != int(number):
+        if (int(d.get("number", 0)) != int(number)
+                or drill_language_of(d) != lang):
             continue
         d["parts"] = drill_parts(d)
         target = find_drill_part(d, part)
@@ -393,34 +618,27 @@ def mark_drill_part_complete(number: int, part: int | None = None) -> dict | Non
 #
 # TWO AXES, because they fail independently:
 #   skills — how WELL the work was done (0-DRILL_SKILL_MAX per dimension)
-#   idioms — WHICH parts of Java were reached for at all
-# Someone can score 5/5 on every skill and still never once touch streams. That
-# is a breadth gap, not a quality gap, and only the idiom axis can see it —
-# which is the whole point of tracking them separately.
+#   idioms — WHICH parts of the language were reached for at all
+# Someone can score 5/5 on every skill and still never once touch streams (or
+# generators). That is a breadth gap, not a quality gap, and only the idiom axis
+# can see it — which is the whole point of tracking them separately.
+#
+# BOTH axes are per-language, and the profile is therefore scoped to ONE track.
+# The vocabularies live on the language spec (`DRILL_LANGUAGES`); these
+# accessors are the only way to read them, so nothing can accidentally grade a
+# Python attempt against Java's idiom list.
 
 DRILL_SKILL_MAX = 5
 
-DRILL_SKILLS: dict[str, str] = {
-    "correctness":     "Does it do what the part asked, edge cases included",
-    "data_structures": "Right collection / structure for the job",
-    "idiomatic_java":  "Standard-library fluency, modern constructs, naming",
-    "complexity":      "Time and space, and avoiding needless rework",
-    "tests":           "Do the tests actually pin the behaviour down",
-    "decomposition":   "Method breakdown, cohesion, readability",
-}
 
-DRILL_IDIOMS: dict[str, str] = {
-    "streams":          "Stream pipelines — map/filter/collect, grouping, reduction",
-    "lambdas":          "Lambdas and method references",
-    "optional":         "Optional rather than null sentinels",
-    "records":          "Records for value types",
-    "pattern_matching": "Sealed types, pattern-matching switch, enhanced instanceof",
-    "collections_api":  "Beyond get/put — computeIfAbsent, merge, TreeMap, Deque, …",
-    "generics":         "Type parameters / bounded types on your own API",
-    "polymorphism":     "Interfaces or abstract classes unifying implementations",
-    "concurrency":      "java.util.concurrent types, synchronization",
-    "legacy_java8":     "Pre-var, pre-record style: explicit iteration, anonymous classes",
-}
+def drill_skills(language: str | None = None) -> dict[str, str]:
+    """The graded skill vocabulary for one language."""
+    return drill_lang(language).skills
+
+
+def drill_idioms(language: str | None = None) -> dict[str, str]:
+    """The tracked idiom vocabulary for one language."""
+    return drill_lang(language).idioms
 
 # A skill needs this many graded parts before it counts as weak — one bad
 # sitting is noise, not a pattern.
@@ -455,13 +673,14 @@ def _recency_weights(count: int) -> list[float]:
     return [0.5 ** ((count - 1 - i) / hl) for i in range(count)]
 
 
-def drill_assessments(drills: list | None = None) -> list[dict]:
-    """Every stored per-part assessment, oldest first. One per part — a re-review
-    overwrites rather than appending, so a part graded three times counts once
-    and can't skew the profile."""
-    drills = load_drills() if drills is None else drills
+def drill_assessments(drills: list | None = None,
+                      language: str | None = None) -> list[dict]:
+    """Every stored per-part assessment on ONE language's track, oldest first.
+    One per part — a re-review overwrites rather than appending, so a part graded
+    three times counts once and can't skew the profile."""
     out = []
-    for d in sorted(drills, key=lambda r: int(r.get("number", 0))):
+    for d in sorted(drills_in_language(drills, language),
+                    key=lambda r: int(r.get("number", 0))):
         for p in drill_parts(d):
             a = p.get("assessment")
             if isinstance(a, dict) and a.get("skills"):
@@ -469,8 +688,15 @@ def drill_assessments(drills: list | None = None) -> list[dict]:
     return out
 
 
-def drill_proficiency(drills: list | None = None) -> dict:
-    """Derive the proficiency profile from stored assessments.
+def drill_proficiency(drills: list | None = None,
+                      language: str | None = None) -> dict:
+    """Derive the proficiency profile for ONE language from stored assessments.
+
+    Scoped to a single track because neither axis transfers: `idiomatic_java`
+    and `idiomatic_python` are different dimensions, and an idiom vocabulary is
+    meaningless across languages. Pooling them would report a Python track as
+    having never reached for `streams` and aim the next Python drill at a Java
+    idiom that doesn't exist.
 
     Every figure is RECENCY-WEIGHTED (see `DRILL_GRADE_HALF_LIFE`) on BOTH axes,
     so improvement shows up and old grades stop anchoring: a skill you've fixed
@@ -483,11 +709,11 @@ def drill_proficiency(drills: list | None = None) -> dict:
     weighted while `count` and `raw` are honest sample counts. With nothing
     graded yet every skill is absent and every idiom rare, and
     `drill_proficiency_brief` returns "" so the first drill is untargeted."""
-    rows    = drill_assessments(drills)
+    rows    = drill_assessments(drills, language)
     weights = _recency_weights(len(rows))
 
     skills: dict[str, dict] = {}
-    for key in DRILL_SKILLS:
+    for key in drill_skills(language):
         graded = [(r["skills"][key], w) for r, w in zip(rows, weights)
                   if isinstance(r.get("skills"), dict) and key in r["skills"]]
         if not graded:
@@ -504,7 +730,7 @@ def drill_proficiency(drills: list | None = None) -> dict:
         }
 
     idioms = {}
-    for key in DRILL_IDIOMS:
+    for key in drill_idioms(language):
         hits = [(r, w) for r, w in zip(rows, weights)
                 if key in (r.get("idioms_used") or [])]
         uses = sum(w for _, w in hits)
@@ -522,10 +748,12 @@ def drill_proficiency(drills: list | None = None) -> dict:
     }
 
 
-def drill_proficiency_brief(drills: list | None = None) -> str:
+def drill_proficiency_brief(drills: list | None = None,
+                            language: str | None = None) -> str:
     """Plain-text profile summary for the generation prompt, or "" when nothing
-    has been graded yet (so the first drill isn't targeted at noise)."""
-    prof = drill_proficiency(drills)
+    has been graded yet ON THIS TRACK (so the first drill in a newly added
+    language isn't targeted using another language's history)."""
+    prof = drill_proficiency(drills, language)
     if not prof["graded"]:
         return ""
 
@@ -552,6 +780,44 @@ RESUME_PATH             = PROFILE_DIR / "resume.md"
 SCORING_RUBRIC_PATH     = PROFILE_DIR / "scoring_rubric.md"
 STACK_KEYWORDS_PATH     = PROFILE_DIR / "stack_keywords.yaml"
 ANSWER_QUESTIONS_RULES  = PROFILE_DIR / "answer_questions_rules.md"
+
+
+# ─── Drill focus (optional, per language) ─────────────────────────────────────
+#
+# `profile/drill_focus_<language>.md` steers drill GENERATION toward one
+# interview: the domains to draw themes from, and the gotchas worth using as
+# later-part twists. Optional and per-language — an absent file means untargeted
+# generation, which is the correct default once an interview has passed.
+#
+# It's a file rather than prompt text for a reason: a focus is temporary by
+# nature (it exists for one company's round), and a file the operator deletes
+# beats prompt text someone has to remember to rip back out. Editing it needs no
+# code change and no doc change.
+#
+# What it may and may not do is enforced in `drills.py`'s generation prompt: a
+# focus constrains the CHOICE of theme and twist, and can never relax the part
+# sizing rules, add coaching, or leak later parts into the overview. Otherwise a
+# focus file becomes a way to quietly undo the one-method-per-part budget.
+
+def drill_focus_path(language: str | None = None) -> Path:
+    """Path to one language's optional focus file."""
+    return PROFILE_DIR / f"drill_focus_{drill_lang(language).key}.md"
+
+
+def drill_focus(language: str | None = None) -> str:
+    """The focus text for one language, or "" when the file is absent or empty.
+
+    HTML comments (`<!-- … -->`, including multi-line ones) are stripped, so the
+    operator can keep instructions-to-self at the top of the file — what the
+    file is for, how to disable it — without feeding any of that to the model."""
+    path = drill_focus_path(language)
+    if not path.is_file():
+        return ""
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return _re.sub(r"<!--.*?-->", "", raw, flags=_re.S).strip()
 
 # ─── Resume entry slugs (canonical names for sections of profile/resume.md) ──
 #

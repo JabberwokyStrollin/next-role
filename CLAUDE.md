@@ -572,24 +572,53 @@ operator recreates that, even if each individual part is still small.
 
 | Concern | Canonical location |
 |---|---|
+| **Language tracks (paths, filenames, class names, vocabularies)** | `scripts/config.py:DRILL_LANGUAGES` (+ `DrillLanguage`, `DEFAULT_DRILL_LANGUAGE`, `drill_lang`, `drill_language_of`) |
+| **Per-language prompt wording** | `scripts/drills.py:_LANG_PROMPTS` (+ `_LangPrompt`, `_lp`) |
+| **Optional per-interview steer** | `profile/drill_focus_<language>.md` via `scripts/config.py:drill_focus` / `drill_focus_path` |
 | Sitting budget + series length | `scripts/config.py:DRILL_PART_TARGET_MINUTES` (60), `DRILL_MIN_PARTS`/`DRILL_MAX_PARTS` (3-6) |
-| Part sizing + content rules given to Claude | `scripts/drills.py:_GENERATE_SYSTEM` (interpolates all three constants) |
+| Part sizing + content rules given to Claude | `scripts/drills.py:_generate_system(language)` (interpolates all three constants) |
 | Parts list / legacy adaptation | `scripts/config.py:drill_parts` |
 | Which part the operator is on | `scripts/config.py:current_drill_part` (first not-complete, else last) |
 | Completion + daily goal | `scripts/config.py:mark_drill_part_complete`, `drills_completed_today` |
 | One-step finish (grade + answer + complete) | `scripts/drills.py:finish_part`, `POST /today/drill/finish` |
 | Undo a mis-clicked finish | `scripts/config.py:revert_drill_part`, `scripts/drills.py:revert_part`, `POST /today/drill/revert` |
-| Rewrite the Java files on finish | `scripts/drills.py:install_reference_code` / `capture_attempt` / `restore_attempt` |
+| Rewrite the source files on finish | `scripts/drills.py:install_reference_code` / `capture_attempt` / `restore_attempt` (+ `_preamble`, `_split_solution_blocks`) |
 | Mid-sitting clarification | `scripts/drills.py:clarify_part` (+ `_CLARIFY_SYSTEM`, `_full_series_context`), `POST /today/drill/clarify` |
 | Context handed to review/solve | `scripts/drills.py:_series_context` |
-| Graded vocabularies + scale | `scripts/config.py:DRILL_SKILLS`, `DRILL_IDIOMS`, `DRILL_SKILL_MAX` (5) |
+| Graded vocabularies + scale | `scripts/config.py:drill_skills(language)` / `drill_idioms(language)` (both on `DRILL_LANGUAGES`), `DRILL_SKILL_MAX` (5) |
 | Profile thresholds | `scripts/config.py:DRILL_PROFICIENCY_MIN_SAMPLES` (2), `DRILL_WEAK_SKILL_THRESHOLD` (3.5), `DRILL_RARE_IDIOM_MAX_USES` (1), `DRILL_MAX_TARGET_SKILLS` (3) |
 | Recency weighting | `scripts/config.py:DRILL_GRADE_HALF_LIFE` (5) + `_recency_weights` |
-| Derived proficiency profile | `scripts/config.py:drill_proficiency` / `drill_proficiency_brief` |
+| Derived proficiency profile | `scripts/config.py:drill_proficiency(drills, language)` / `drill_proficiency_brief(drills, language)` — **per language** |
+| Per-language numbering + lookup | `scripts/config.py:next_drill_number(language)`, `current_drill(drills, language)`, `drills_in_language`, `find_drill` |
+| Layout migration (one-off) | `scripts/migrate_drill_layout.py` |
 | Grade extraction from a review | `scripts/drills.py:_split_assessment` (+ `_ASSESSMENT_SENTINEL`) |
-| Reference solution written into the Java files | `scripts/drills.py:write_correct_code`; markers + `strip_correct_code` in `config.py` |
+| Legacy appended-reference markers | `config.py:CORRECT_CODE_BEGIN`/`_END` (+ `_PY` variants) and `strip_correct_code` — **nothing writes these any more** (finish rewrites the files); they exist so pre-rewrite files and stored snapshots are still stripped before grading |
 
 ### Rules
+
+0. **Each language is its own track, and `number` alone is not a key.**
+   `(language, number)` identifies a drill. Java sits at 9 while Python sits at
+   1, so anything keyed on a bare number must also take a `language` — that
+   includes `next_drill_number`, `current_drill`, `mark_drill_part_complete`,
+   `revert_drill_part`, the six `drills.py` subcommands, every `/today/drill/*`
+   form, and the process-log `entity_id` (`"<language>:<number>"`). An **absent**
+   `language` field means `java`, because every pre-split drill has none and must
+   stay attached to its files; never "fix" that by writing the field into old
+   records.
+
+   Three things follow, and each was a real bug waiting:
+   - **The proficiency profile is per-language.** Neither axis transfers —
+     `idiomatic_java` and `idiomatic_python` are different dimensions, and an
+     idiom vocabulary is meaningless across languages. Pooling them would report
+     a Python track as never having reached for `streams` and aim its next drill
+     at a Java idiom that doesn't exist. Read vocabularies **only** through
+     `drill_skills(language)` / `drill_idioms(language)`.
+   - **Java's stored skill/idiom keys must never be renamed.** They are the keys
+     in every existing `assessment`, and `_split_assessment` *drops* unknown
+     keys — so a rename erases graded history silently rather than failing.
+   - **`current_drill` must stay language-scoped.** A global "highest number
+     wins" would make an unfinished series in one language unreachable from
+     `/today` the moment you generate in another.
 
 1. **Never surface a part the operator hasn't reached.** Not its prompt, not
    its title, not a summary. `render_drills_body` renders later parts as
@@ -622,24 +651,24 @@ operator recreates that, even if each individual part is still small.
    normal hour of practice never earns the checkmark, which is exactly the
    pressure that caused the rushing.
 
-4. **One file per drill, shared by every part.** All parts extend the same
-   `Drill<N>.java` / `Drill<N>Test.java` — `drill_impl_path`/`drill_test_path`
-   take a drill number only, never a part. So `review_drill` and `solve_drill`
-   are **cumulative**: they judge / write the class as of the current part.
+4. **One file per drill, shared by every part.** All parts extend the same impl
+   + test file — `drill_impl_path`/`drill_test_path` take a drill number and a
+   **language**, never a part. So `review_drill` and `solve_drill` are
+   **cumulative**: they judge / write the class as of the current part.
 
 5. **At most one new method per part — including part 1.** A later part adds one
    method, one new constraint on existing behaviour, or both; never two of
    either. A part that only changes the *behaviour* of an existing method is
    ideal. If a part's tasks say "write the X, Y and Z methods", it is too big:
-   split it. **If drills start sprawling, tighten `_GENERATE_SYSTEM`'s per-part
+   split it. **If drills start sprawling, tighten `_generate_system`'s per-part
    caps — never widen a part and add parts to compensate.** (Raising
    `DRILL_MAX_PARTS` is only correct in the other direction: parts got
    *smaller*, so a theme needs more of them. That's why it went 2-4 → 3-6.)
 
 6. **A reroll must not discard banked work — and "banked" includes unticked
    work.** `generate_drill` replaces the current drill in place only while zero
-   parts are complete AND `_has_written_code` reports nothing in
-   `Drill<N>.java`. Completion status alone is not enough: an operator can write
+   parts are complete AND `_has_written_code` reports nothing in that drill's
+   impl file. Completion status alone is not enough: an operator can write
    246 lines across a session and never press *Mark part complete*, and a reroll
    would then silently orphan the prompts that code answers.
    `render_drills_body` mirrors both conditions in the button label — keep the
@@ -654,7 +683,7 @@ operator recreates that, even if each individual part is still small.
 8. **Grading rides the review call — never add a second one.** The candidate's
    code is already in the review prompt, so scoring costs only the JSON's output
    tokens. A separate "grade me" call would double the per-sitting spend for one
-   object. `_REVIEW_SYSTEM` **must stay an f-string**: it interpolates the
+   object. `_review_system(language)` **must stay interpolated**: it carries the
    sentinel and both vocabularies from `config`. (It was briefly a plain string,
    and the model dutifully echoed the literal `{_ASSESSMENT_SENTINEL}` and
    invented its own skill keys — silently ungraded, because the sanitizer
@@ -742,10 +771,11 @@ operator recreates that, even if each individual part is still small.
     the profile as the NEWEST and therefore highest-weighted sample, aiming the
     next drill at a weakness never demonstrated. `revert_drill_part` therefore
     drops `assessment`, `solution` and the last `feedback` entry — not just the
-    status. `restore_correct_code` must also **re-append the previous part's**
-    reference, since `write_correct_code` replaces rather than stacks and a bare
-    strip would cost an answer already earned. Never touch the operator's own
-    code. Same shape as `update_status.revert`: an undo, not a status.
+    status. `restore_attempt` then puts the operator's own code back from the
+    snapshot `finish_part` took before the rewrite — without it the revert would
+    leave the reference sitting where their attempt used to be, which is a
+    deletion dressed up as an undo. Never touch the operator's own code. Same
+    shape as `update_status.revert`: an undo, not a status.
 
 20. **Finishing advances the view, so the grade must not vanish with it.**
     `render_drills_body` falls back to `_latest_reviewed_part` when the current
@@ -760,9 +790,12 @@ operator recreates that, even if each individual part is still small.
     - `capture_attempt` runs **before** the rewrite and `restore_attempt` on
       revert. Replacing work without a restorable snapshot is data loss, not a
       workflow.
-    - `_package_line` re-attaches the existing `package …;`. The generated
-      reference carries imports but no package declaration, so a naive write
-      produces a file that doesn't compile.
+    - `_preamble(path, language)` re-attaches whatever the file needs in order
+      to still build — Java's existing `package …;` (the generated reference
+      carries imports but never a package line, so a naive write produces a file
+      that doesn't compile), and nothing for Python, where the flat per-language
+      directory has no package and inventing one would break the test's
+      import.
     - `review_drill` must hand the reviewer the **previous part's reference as a
       labelled baseline**. From part 2 on the file legitimately contains code the
       operator was given; without the label the grade — and therefore the whole
@@ -794,12 +827,49 @@ operator recreates that, even if each individual part is still small.
     This is the same rule as pinning time/range shapes, and it was the gap that
     produced the UUID dead end — no gotcha is revealed by naming the key.
 
-26. **Tuning:** `DRILL_GRADE_HALF_LIFE` for how fast old grades fade,
+26. **A focus file steers WHAT, never HOW BIG.** `profile/drill_focus_<language>.md`
+    is injected as a `## Focus` section and aims a track at one specific
+    interview (the domains, the company's question style, gotchas to use as
+    twists). The generation prompt states explicitly that it cannot relax part
+    sizing, the one-method cap, the line budget, the no-coaching rule or the ban
+    on foreshadowing — and that a focus seeming to want a bigger part means *more
+    parts*, not a bigger one. Keep that clause: without it a focus file becomes
+    the back door through which every sizing rule above gets undone, and it will
+    read as the generator misbehaving rather than as the file doing it.
+
+    It is a **file** and not prompt text because a focus is temporary by nature —
+    it exists for one company's round. A file the operator deletes beats prompt
+    text someone has to remember to rip out, and editing it needs no code change
+    and no doc change. `serve.py` names the active file in the section for the
+    same reason: an unexplained steer looks like a bug.
+
+27. **Language pedagogy belongs in the prompt; the company steer belongs in the
+    file.** `_LANG_PROMPTS[...].language_notes` is durable — it says what this
+    *operator* needs from that *language* (Python: they are senior but rusty, so
+    exercise core mechanics over library trivia, stdlib only, and draw twists
+    from Python's runtime gotchas). That outlives any one interview, so it must
+    not live in a file that gets deleted when the interview passes. Conversely a
+    company's domain and question style must not be baked into the prompt.
+
+28. **Porting a language must not perturb the existing one.** The Java prompt
+    fragments in `_LANG_PROMPTS` reproduce the original single-language prompt
+    verbatim, and Java's stored skill/idiom keys are unchanged. Drill sizing has
+    regressed before from small prompt edits, and there is usually a live series
+    mid-flight, so "while I'm in here" rewording of the shared prompt text is how
+    an unrelated track silently starts producing three-hour parts. Language-neutral
+    edits to the shared body are fine; changing what it *asks for* is not.
+
+29. **Tuning:** `DRILL_GRADE_HALF_LIFE` for how fast old grades fade,
     `DRILL_PART_TARGET_MINUTES` for sitting length,
     `DRILL_MIN_PARTS`/`DRILL_MAX_PARTS` for series length,
     `DRILL_WEAK_SKILL_THRESHOLD` / `DRILL_PROFICIENCY_MIN_SAMPLES` for how
     eagerly a weak spot is called, `DRILL_RARE_IDIOM_MAX_USES` for breadth
     sensitivity. All feed the prompt directly — no prompt edit needed for any.
+    Per-language: `_LANG_PROMPTS[<lang>].solution_lines` for the line budget
+    (Python's is tighter than Java's — the same exercise lands in fewer lines, so
+    reusing Java's would quietly license a bigger part). **Adding a language** is
+    a `DRILL_LANGUAGES` entry plus a `_LANG_PROMPTS` entry; nothing else should
+    need to change.
 
 ## Discard ledger — the crawl must not rediscover its own rejects
 
