@@ -18,17 +18,26 @@ stays in config.py (it's a scoring concern).
 import re
 import sys
 
-# ─── Target geographies (the US toggle) ──────────────────────────────────────
+# ─── Target geographies (the country toggle) ─────────────────────────────────
 #
 # The single switch for which geographies the pipeline actively targets. The
-# operator needs visa sponsorship for CA / IE but is a US citizen, so US roles
-# need none — a reluctant remote-only stop-gap. Add/remove "US" to toggle; that
-# flips three behaviors, each reading this set or ``derive_country``:
+# operator is a US citizen, so US roles need no sponsorship; Ireland does, and
+# is kept on because relocation there is still wanted where a role exists.
+# Add/remove a code to toggle; "US" flips three behaviors, each reading this set
+# or ``derive_country``:
 #   - pre-filter remote-only US gate          → ``location_passes`` (below)
 #   - US sponsorship floor instead of company → ``config.composite_score``
 #   - skip the no-sponsorship discard for US  → ``ingest.ingest_job``
+#
+# CANADA WAS REMOVED (2026-10-03). The operator pivoted to a primarily US-remote
+# search after Canadian employers went unresponsive once sponsorship was
+# disclosed. Ireland stays (all work models — it's a relocation target, so an
+# office requirement is fine there); the US stays remote-only. Re-adding "CA"
+# here restores the country derivation and the gates, but is NOT sufficient on
+# its own — see the CLAUDE.md "Geography / US target toggle" section for the
+# accompanying ``location_allow`` and apply-quota edits.
 
-TARGET_COUNTRIES: frozenset[str] = frozenset({"CA", "IE", "US"})
+TARGET_COUNTRIES: frozenset[str] = frozenset({"IE", "US"})
 
 # ─── Country derivation ───────────────────────────────────────────────────────
 #
@@ -104,40 +113,87 @@ _US_STATE_CODES: frozenset[str] = frozenset({
 })
 
 
+# Region codes that are also ordinary English words in exactly the ", XX " form
+# this matcher anchors on. Unlike the in/de/co country-code collisions (dropped
+# from _US_STATE_CODES outright), these can't simply be removed — "Portland, OR"
+# is a real and common location — so they get a stricter anchor instead.
+_AMBIGUOUS_WORD_CODES: frozenset[str] = frozenset({"or"})
+
+
 def _has_region_code(padded_loc: str, codes: frozenset[str]) -> bool:
     """True if ``padded_loc`` (already lowercased + space-padded) contains one of
     ``codes`` in an anchored "City, XX" / "City, XX," / "City, XX)" / "(XX)"
     form. The leading comma/paren and trailing boundary keep full country names
-    ("..., india") and embedded letters from matching."""
+    ("..., india") and embedded letters from matching.
+
+    Codes in ``_AMBIGUOUS_WORD_CODES`` are additionally required to sit at the
+    END of the location in the bare ", XX " form. "or" is the conjunction a
+    multi-region list uses — "Canada - Remote (ON, AB, BC, or NS Only)" — and
+    reading that as Oregon derived a Canada-only posting as US. The trailing
+    forms (", or,", ", or)", "(or)") stay unrestricted: those aren't shapes the
+    conjunction takes."""
     for code in codes:
-        if (f", {code} " in padded_loc
-                or f", {code}," in padded_loc
+        if (f", {code}," in padded_loc
                 or f", {code})" in padded_loc
                 or f"({code})" in padded_loc):
             return True
+        if f", {code} " in padded_loc:
+            if code not in _AMBIGUOUS_WORD_CODES:
+                return True
+            # Accept as a region code only when nothing follows it, i.e. the
+            # location ENDS with "…, or" ("Portland, OR").
+            if padded_loc.rstrip().endswith(f", {code}"):
+                return True
     return False
 
 
 def derive_country(location: str) -> str:
     """Map a free-text job/application location to ``"CA" | "IE" | "US" |
-    "OTHER"``. SSOT — IE/CA are matched before US so a combined posting
-    resolves to the sponsorship-bearing country. Bare "us" is never a substring
-    token (it would match "houston"); region codes are matched only in an
-    anchored "City, XX" form, but spelled-out US state names are matched on a
-    word boundary anywhere ("Remote - New York"). "CA" resolves to California
-    (US) — Canada is detected first by name / Canadian city / province code
-    (ON, BC, …), so a combined "Remote - Canada; Remote - New York" is still
-    CA."""
+    "OTHER"``. SSOT — there is exactly one country derivation; never add a
+    second.
+
+    Detection is pure string matching. Bare "us" is never a substring token (it
+    would match "houston"); region codes are matched only in an anchored
+    "City, XX" form, but spelled-out US state names are matched on a word
+    boundary anywhere ("Remote - New York"). Bare "CA" resolves to California
+    (US) — Canada is detected by name / Canadian city / province code (ON, BC,
+    …), never by the two-letter country code.
+
+    MULTI-COUNTRY postings ("Remote, Canada; Remote, United States") are common
+    and resolve by PREFERENCE: an **enabled** country (one in
+    ``TARGET_COUNTRIES``) always beats a disabled one, and among enabled
+    countries the order is IE > CA > US, so a combined posting still resolves to
+    the sponsorship-bearing market. When no matched country is enabled the first
+    match in that same fixed order is returned, so a CA-only row still derives
+    as "CA" after Canada is switched off — the geography gate, the currency
+    hints and the retroactive sweep all depend on that staying true.
+
+    The enabled-preference step is why this is a function of the toggle and not
+    a frozen table. With CA disabled and a fixed CA-before-US order, every
+    combined CA/US posting resolved to the dead country and was discarded — 9
+    active, fully US-remote roles (GitLab, StackAdapt, Mercury, Life360,
+    1Password …) at the time Canada was dropped. The old order was correct when
+    both were enabled and is preserved in that case; it only misfires once one
+    side is off, which is precisely what this step repairs."""
     loc = f" {(location or '').lower()} "
+    matched: list[str] = []
     if any(t in loc for t in _IE_LOCATION_TOKENS):
-        return "IE"
+        matched.append("IE")
     if any(t in loc for t in _CA_LOCATION_TOKENS) or _has_region_code(loc, _CA_PROVINCE_CODES):
-        return "CA"
+        matched.append("CA")
     if (any(t in loc for t in _US_LOCATION_TOKENS)
             or _has_region_code(loc, _US_STATE_CODES)
             or _US_STATE_NAME_RE.search(loc)):
-        return "US"
-    return "OTHER"
+        matched.append("US")
+    if not matched:
+        return "OTHER"
+    # Enabled countries win. `matched` is already in IE > CA > US order, so with
+    # every country enabled this returns matched[0] — byte-identical to the
+    # original fixed-precedence behavior.
+    for country in matched:
+        if country in TARGET_COUNTRIES:
+            return country
+    return matched[0]
 
 
 # ─── Remote detection ─────────────────────────────────────────────────────────
@@ -294,8 +350,10 @@ def location_passes(location: str,
         supplied, the role is admitted unless ``names_office_requirement``
         matches; with no usable ``jd_text``, the stricter "explicit marker
         required" rule applies, so callers opt in to the wider gate.
-      - **CA / IE**: always kept (sponsorship-target markets, incl. Canadian
-        province codes like "London, ON").
+      - **CA / IE**: kept iff enabled in ``enabled_countries``. These are
+        relocation targets, so an office requirement is irrelevant and no work
+        model gate applies — but the country must still be switched on. (CA is
+        off as of 2026-10-03; it derives correctly and is then dropped here.)
       - **OTHER**: kept only if NOT pinned to a foreign region
         (``names_foreign_location``) — so "Worldwide" / "Americas" / bare
         "Remote" pass, but "Remote - India" / "European Union (Remote)" don't.
@@ -324,7 +382,12 @@ def location_passes(location: str,
             return False
         return names_office_requirement(jd_text) is None
     if country in ("CA", "IE"):
-        return True
+        # Relocation targets: any work model is fine, but the country still has
+        # to be enabled. This MUST consult ``countries`` rather than returning
+        # True unconditionally — otherwise removing a code from
+        # ``TARGET_COUNTRIES`` would silently fail to gate it here, and the rows
+        # would keep flowing through both pre-filters and ``ingest.ingest_job``.
+        return country in countries
     return not names_foreign_location(location)
 
 

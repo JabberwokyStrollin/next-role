@@ -71,8 +71,9 @@ from one of these.
 | Stack keyword scores + stack max + pre-filter title/location lists | `profile/stack_keywords.yaml` | loaded once by `_load_stack_keywords()` and `load_crawl_config()` |
 | Claude's native output ranges (seniority 0-25, domain 0-20) | `profile/scoring_rubric.md` | mirrored in `COMPONENTS[k].native_max`; update both together |
 | Research-queue minimum score | `scripts/config.py:RESEARCH_QUEUE_MIN_SCORE` | `from config import RESEARCH_QUEUE_MIN_SCORE` |
-| Active target geographies (the US toggle) | `scripts/geography.py:TARGET_COUNTRIES` (re-exported by config) | `from config import TARGET_COUNTRIES` |
-| US-role sponsorship floor | `scripts/config.py:US_SPONSORSHIP_SCORE` | `from config import US_SPONSORSHIP_SCORE` |
+| Active target geographies (the country toggle) | `scripts/geography.py:TARGET_COUNTRIES` (re-exported by config) | `from config import TARGET_COUNTRIES` |
+| US-role sponsorship substitution | `scripts/config.py:US_SPONSORSHIP_SCORE` | `from config import US_SPONSORSHIP_SCORE` |
+| Visa paragraph for an ambiguous (`OTHER`) location | `scripts/config.py:COVER_LETTER_FALLBACK_COUNTRY` | `from config import COVER_LETTER_FALLBACK_COUNTRY` |
 | Free-text location → country code | `scripts/geography.py:derive_country()` (re-exported by config) | `from config import derive_country` |
 
 ### Rules
@@ -155,7 +156,7 @@ from one of these.
    until `rescore_all.py --stack-only` re-applies it mechanically (free, from
    `seniority_raw`).
 
-### Geography / US target toggle
+### Geography / country toggle
 
 **Geography SSOT lives in `scripts/geography.py`** — a dependency-free module (no
 API key, no yaml) that holds `derive_country`, `location_passes`,
@@ -168,11 +169,26 @@ generator can't import Python, so it calls `python scripts/geography.py
 copy — that copy is what kept drifting (California, Galway, Toronto). **There is
 exactly one country derivation; never reintroduce a second.**
 
-The operator needs visa sponsorship for **CA / IE** but is a **US citizen**, so
-US roles need none — they're a reluctant **remote-only stop-gap**. The whole
-feature hangs off `geography.TARGET_COUNTRIES` (currently `frozenset({"CA","IE","US"})`;
-remove `"US"` to disable — when absent the US branches never fire and CA/IE
-behavior is byte-identical). Country is **derived on the fly** from `location`
+The operator is a **US citizen**, so US roles need no sponsorship; **Ireland**
+does and is kept on as a relocation target. The whole feature hangs off
+`geography.TARGET_COUNTRIES` (currently `frozenset({"IE","US"})`). When a code is
+absent its branches never fire and the remaining countries' behavior is
+byte-identical.
+
+**Canada was removed 2026-10-03** — the operator pivoted to a primarily
+US-remote search after Canadian employers went unresponsive once sponsorship was
+disclosed. `CA` still *derives*; it is simply not targeted. Two asymmetries
+follow and both are deliberate: **US is remote-only** (`US_ACCEPTED_WORK_MODELS`
+is `{"remote"}`) while **Ireland accepts any work model** (a relocation target —
+an office requirement there is irrelevant).
+
+**Changing `TARGET_COUNTRIES` is never a one-line change.** The constant drives
+the gates and the ranking, but four things sit outside it and must move
+together: the YAML `location_allow` allowlist, `APPLY_QUEUE_COUNTRY_QUOTAS` (+
+its `APPLY_QUEUE_BACKFILL_COUNTRY`), `COVER_LETTER_FALLBACK_COUNTRY` if the
+fallback market is the one being removed, and a **retroactive sweep** —
+`scripts/scan_geography_policy.py --apply` — because the gate blocks future
+ingest, not the rows already stored. Country is **derived on the fly** from `location`
 via `derive_country` (→ `CA`/`IE`/`US`/`OTHER`) — no stored field anywhere in
 the pipeline, with **one exception**: `application_tracker.json` rows carry a
 `country` *snapshot* stamped by `update_status.log_application` at apply time.
@@ -180,15 +196,26 @@ Nothing reads it (it's reporting surface — `generate_cl.js` re-derives from
 `location`), but it goes stale whenever `derive_country` sharpens, so **any
 change to `geography.py` needs a `scripts/resync_tracker_country.py --apply`
 sweep** — the tracker-side parallel of the `scan_foreign_locations.py`
-obligation below. `derive_country` matches IE/CA before US so a combined
-"Remote, Canada/US" posting resolves to the sponsorship-bearing country, and
+obligation below. `derive_country` collects matches in IE > CA > US order and
+then returns **the first one that is in `TARGET_COUNTRIES`**, falling back to the
+first match when none is enabled. So a combined posting resolves to the
+sponsorship-bearing country *among the enabled ones*, and with everything
+enabled the result is byte-identical to the old fixed precedence. **Keep the
+enabled-preference step.** A frozen CA-before-US order misfires the moment one
+side is switched off: when Canada was dropped, every combined "Remote, Canada;
+Remote, United States" posting resolved to the dead country and was swept — 13
+active, fully US-remote roles that the operator had just pivoted *toward*. It
 never uses a bare `"us"` substring (would match "houston"). Two-letter region
 *codes* (CA provinces `ON`/`BC`/…, US **state codes**) are matched only in an
 anchored "City, XX" form
 (`_has_region_code`, US state codes omitting the `in`/`de`/`co` country-code
-collisions); Canada is detected first by name / Canadian city / **province
-code** ("London, ON" → CA), so the bare `"CA"` code resolves to **California
-(US)**, not Canada.
+collisions); Canada is detected by name / Canadian city / **province code**
+("London, ON" → CA), so the bare `"CA"` code resolves to **California (US)**,
+not Canada. A code that is also an English word in the `", XX "` shape goes in
+`_AMBIGUOUS_WORD_CODES` and is then only matched at the **end** of the location
+— currently just `"or"`, because `"… BC, or NS Only"` read as **Oregon** and
+derived a Canada-only posting as US. Don't solve that class by deleting the code
+(as `in`/`de`/`co` were): `"Portland, OR"` is real and common.
 
 Spelled-out **US state names** are separately matched on a word boundary
 anywhere in the location (`_US_STATE_NAMES` / `_US_STATE_NAME_RE`) — codes alone
@@ -196,25 +223,30 @@ aren't enough, because US listings routinely name only the state with no country
 and no "City, XX" pair ("Florida", "Remote - New York"). **Keep this list
 complete when touching US detection.** While `"california"` was the only state
 name token, every other state resolved to `OTHER`, and OTHER is *not* a harmless
-default — it silently inverts three US behaviors at once: the `OTHER → CA`
-cover-letter fallback stamps the **Canadian work-permit paragraph onto a US
-role**, `composite_score` skips the `US_SPONSORSHIP_SCORE` floor, and
+default — it silently inverts three US behaviors at once: the
+`OTHER → COVER_LETTER_FALLBACK_COUNTRY` cover-letter fallback stamps a
+**work-permit paragraph for the wrong country onto a US role**,
+`composite_score` skips the `US_SPONSORSHIP_SCORE` substitution, and
 `ingest.ingest_job` skips the US exemption from the no-sponsorship discard. A
 gap in US detection therefore reads as a cover-letter bug, a ranking bug, and a
 false-discard bug simultaneously.
 
-1. **The US sponsorship floor lives ONLY in `composite_score`.** For a
+1. **The US sponsorship substitution lives ONLY in `composite_score`.** For a
    US-derived role (and only when `"US" in TARGET_COUNTRIES`), the canonical
-   `composite_score` substitutes `US_SPONSORSHIP_SCORE` (native 0-15, default 3)
-   for the company `sponsorship_score`. This is a **thumb on the scale**, not a
-   hard tier: CA/IE roles with normal sponsorship outrank comparable US roles,
-   but a strong-stack US role can still beat a weak CA/IE one. It is **not** a
+   `composite_score` substitutes `US_SPONSORSHIP_SCORE` (native 0-15) for the
+   company `sponsorship_score`. It is **15 — the full native max — so US roles
+   carry no handicap**, which is simply accurate: sponsorship is a non-question
+   for a citizen, and US and Irish roles compete on stack, seniority and
+   freshness alone. It was `3` while the US sat behind Canada as a stop-gap (a
+   deliberate thumb on the scale); the *mechanism* is unchanged, only the value,
+   and any value below 15 reintroduces a tilt toward Ireland. It is **not** a
    new component and **not** a parallel composite — it's a country-conditional
    on the existing `sponsorship` input, inside the one canonical function. Tune
    via `US_SPONSORSHIP_SCORE` only (set to 0 for "zero added from sponsorship").
    `composite_score_pre_research` is untouched (already zero-weights
    sponsorship), so research-queue ranking stays country-agnostic. When US is
-   off, the branch never fires and CA/IE composites are byte-identical to before.
+   off, the branch never fires and other countries' composites are
+   byte-identical to before.
 
 2. **`config.location_passes` removes rows the operator can't take** — a
    pure-string, pre-filter-safe (no-Claude) **subtractive** gate layered AFTER
@@ -226,7 +258,13 @@ false-discard bug simultaneously.
    role needs an explicit marker); otherwise the **JD body** decides via
    `geography.names_office_requirement(jd_text)`. Passing `jd_text=None` keeps
    the old strict "explicit marker required" rule, so callers opt in and none
-   widens silently. **CA/IE** always pass.
+   widens silently. **CA/IE** pass **iff enabled in `enabled_countries`** —
+   relocation targets, so no work-model gate applies there, but the country must
+   still be switched on. That branch returned `True` unconditionally until
+   Canada was dropped, which meant removing a code from `TARGET_COUNTRIES` would
+   have gated nothing here and the rows would have kept flowing through both
+   pre-filters and `ingest.ingest_job`. **Any country branch must consult the
+   enabled set.**
    **OTHER** rows are removed if `names_foreign_location` matches — a remote role
    pinned to a non-target region ("Remote - India", "European Union (Remote)")
    wants a candidate based there, so it's dropped; "Worldwide"/"Americas"/bare
@@ -258,7 +296,8 @@ design, because the location field is not where most employers put this.
 | Cheap string pre-screen (JD text) | `scripts/geography.py:names_office_requirement` (+ `_OFFICE_REQUIREMENT_RE` / `_OFFICE_NOISE_RE`), consumed only by the US branch of `location_passes` |
 | Accurate classification | Sonnet in `score_jd.py` (rubric "Work model" section), returned on the **existing** scoring call |
 | Resolution (Claude + location shortcut) | `scripts/config.py:classify_work_model` |
-| Policy: which models are acceptable | `scripts/config.py:US_ACCEPTED_WORK_MODELS` (default `{"remote", "unstated"}`) |
+| Policy: which models are acceptable | `scripts/config.py:US_ACCEPTED_WORK_MODELS` (currently `{"remote"}`) |
+| Retroactive sweep after narrowing it | `scripts/scan_geography_policy.py` (dry-run default, `--apply`) |
 | Ingest discard | `scripts/config.py:work_model_discard_reason`, called in `ingest.ingest_job` after `score_jd` |
 | Stored value | the job's `job_type` field (replaced the old `remote`/`unknown` guess) |
 
@@ -273,13 +312,26 @@ design, because the location field is not where most employers put this.
    remote". A missed pattern costs one scoring call; a false positive silently
    drops a good role. Tune it in that direction.
 
-3. **`unstated` is not `onsite`.** Keep them distinct everywhere. Measured across
-   14 real boards, the old explicit-remote-marker allowlist dropped 939 US
-   title-passing roles and only ~43% of them actually stated an office
-   requirement; ~43% said nothing at all, and a sampled quarter of *those* were
-   remote-eligible. Folding `unstated` into `onsite` — or removing it from
-   `US_ACCEPTED_WORK_MODELS` — silently recreates that allowlist, just with a
-   Claude call spent first.
+3. **`unstated` is not `onsite`.** Keep them distinct **as values**, always.
+   Measured across 14 real boards, the old explicit-remote-marker allowlist
+   dropped 939 US title-passing roles and only ~43% of them actually stated an
+   office requirement; ~43% said nothing at all, and a sampled quarter of
+   *those* were remote-eligible.
+
+   `unstated` was removed from `US_ACCEPTED_WORK_MODELS` on 2026-10-03 at the
+   operator's explicit direction, as part of the pivot to a primarily US-remote
+   search — they were told the measurement above and chose a
+   confirmed-remote-only queue anyway. So this is a **deliberate** acceptance of
+   that recall cost, not the accident the rule originally guarded against. Two
+   things still hold and must not be eroded:
+
+   - **Don't fold `unstated` into `onsite`.** The two staying separate *values*
+     is exactly what makes this a one-line policy change rather than a
+     re-detection project; collapsing them would make the decision irreversible.
+   - **Narrowing costs a Sonnet call per discarded role.** The work model is an
+     output of the scoring call, so an `unstated` US role is rejected only after
+     it has been paid for. If crawl spend rises or the queue starves, adding
+     `"unstated"` back is the first lever.
 
 4. **`work_model` must stay on the existing `score_jd` call.** It is free in
    token terms only because the JD is already in that prompt. A separate
@@ -289,9 +341,17 @@ design, because the location field is not where most employers put this.
    irrelevant there — `work_model_discard_reason` returns `None` for them. Don't
    generalize the gate to all countries.
 
-6. **Tuning:** edit `US_ACCEPTED_WORK_MODELS` only. Narrow to `{"remote"}` for
-   confirmed-remote only; add `"hybrid"` to accept a commute. The detection
-   layers below it don't change.
+6. **Tuning:** edit `US_ACCEPTED_WORK_MODELS` only — it is `{"remote"}` now;
+   add `"unstated"` back for the higher-recall behavior, or `"hybrid"` to accept
+   a commute. The detection layers below it don't change.
+
+   **Narrowing it needs a retroactive sweep; widening it needs a ledger reset.**
+   The gate runs at ingest, so existing rows keep their old verdict either way:
+   narrowing leaves now-unacceptable rows active (`scan_geography_policy.py
+   --apply`), and widening leaves previously-rejected URLs sitting in the
+   discard ledger where the crawl will keep skipping them
+   (`discard_ledger.py --reason <code> --apply`). Treat whichever applies as
+   part of the change, not as follow-up.
 
 ## Applied-role suppression (SSOT)
 
@@ -338,7 +398,8 @@ which the surfaces apply before calling it.
 | Concern | Canonical location |
 |---|---|
 | Apply-surface ordering | `scripts/config.py:apply_queue_order()` |
-| Per-country daily target mix | `scripts/config.py:APPLY_QUEUE_COUNTRY_QUOTAS` (`{"CA":4,"IE":4,"US":4}`) |
+| Per-country daily target mix | `scripts/config.py:APPLY_QUEUE_COUNTRY_QUOTAS` (`{"IE":4,"US":8}`) |
+| Who absorbs an unfilled quota | `scripts/config.py:APPLY_QUEUE_BACKFILL_COUNTRY` (`"US"`) |
 | Company spread inside the bubbled block | `scripts/config.py:APPLY_QUEUE_MAX_PER_COMPANY` (2) |
 | Daily goal | `scripts/config.py:DAILY_APPLICATION_GOAL` — **derived** from the quotas |
 
@@ -352,6 +413,17 @@ which the surfaces apply before calling it.
 2. **Quotas bubble, they don't filter.** The top N per country are moved to the
    head; everything else follows *beneath, in pure rank order*. Nothing is hidden
    or truncated, so the full ranking is always still reachable by scrolling.
+   This is equally true of the backfill pass — a backfilled role was always
+   already in the queue, just below the fold.
+
+   **An unfilled quota transfers to `APPLY_QUEUE_BACKFILL_COUNTRY`** via a
+   second pass, so the block still reaches `DAILY_APPLICATION_GOAL` whenever the
+   inventory exists. Ireland's inventory is thin and varies day to day (39
+   active rows against 99 US at the time of writing), so a shortfall is the
+   normal case, not the exception — without backfill a one-Irish-role day
+   shrank the block to 9 and pushed the operator into the unshaped tail to find
+   their remaining target. Set it to `None` to restore the plain
+   "shrink the block" behavior.
 
 3. **`APPLY_QUEUE_COUNTRY_QUOTAS = None` restores pure ranking**, byte-identical
    to the pre-quota behavior, with no code change. Keep that path working — it's
@@ -361,7 +433,10 @@ which the surfaces apply before calling it.
 4. **The per-company cap is what actually diversifies.** Quotas alone don't:
    one company with deep inventory can fill an entire country's allocation on
    composite alone. `APPLY_QUEUE_MAX_PER_COMPANY` applies **only** within the
-   bubbled block, never to the tail.
+   bubbled block, never to the tail — but it **spans both passes**, sharing one
+   set of counters. A backfill that re-counted from zero would hand the whole
+   Irish shortfall to the single deepest-inventory US employer, which is the
+   exact concentration the cap exists to prevent.
 
 5. **Don't hardcode the daily goal.** `DAILY_APPLICATION_GOAL` is computed from
    the quotas so the target and the queue shape can't drift; it falls back to

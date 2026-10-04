@@ -751,13 +751,23 @@ RESEARCH_QUEUE_MIN_SCORE: int = 45
 
 # US-role sponsorship floor (native 0-15 scale, the ``sponsorship`` component's
 # native_max). For US-derived roles ``composite_score`` substitutes THIS value
-# for the company's sponsorship_score: the operator is a US citizen (no
-# sponsorship needed), but US is a reluctant stop-gap, so the value is kept
-# deliberately low — a thumb on the scale, NOT a hard tier. CA/IE roles with
-# normal sponsorship outrank comparable US roles, yet a strong-stack US role can
-# still beat a weak CA/IE one. Tune here only (set to 0 for "zero added from
-# sponsorship"). Only consulted when "US" is in TARGET_COUNTRIES.
-US_SPONSORSHIP_SCORE: int = 3
+# for the company's sponsorship_score, because the operator is a US citizen and
+# needs no sponsorship there.
+#
+# Set to the FULL native_max (15) as of 2026-10-03: US roles carry no handicap.
+# It was 3 while the US was a reluctant stop-gap behind CA/IE, which cost a US
+# role ~28 of the composite's 130 points against a well-sponsoring foreign one.
+# The operator has since pivoted to a primarily US-remote search (foreign
+# employers went unresponsive once sponsorship was disclosed), so that thumb on
+# the scale now weighs against the primary track. At 15 the substitution is
+# simply accurate -- sponsorship is a solved problem for a US role -- and US and
+# IE roles compete on stack / seniority / freshness alone.
+#
+# Still a country-conditional on an existing input: NOT a new component and NOT
+# a parallel composite. Tune here only (0 = "zero added from sponsorship"; any
+# value below 15 reintroduces a deliberate tilt toward Ireland). Only consulted
+# when "US" is in TARGET_COUNTRIES.
+US_SPONSORSHIP_SCORE: int = 15
 
 
 VELOCITY_TIERS = [
@@ -823,13 +833,37 @@ REJECTION_REASONS: dict[str, str] = {
 #
 # Set to None to get pure `apply_rank_score` ordering back — byte-identical to
 # the behavior before quotas existed, no code change needed.
-APPLY_QUEUE_COUNTRY_QUOTAS: dict[str, int] | None = {"CA": 4, "IE": 4, "US": 4}
+#
+# CA was dropped and the mix retilted to US-primary on 2026-10-03. Ireland is
+# capped at 4/day because its inventory is thin and it is no longer the primary
+# track; the US takes the other 8 outright, PLUS whatever Ireland cannot fill
+# (see APPLY_QUEUE_BACKFILL_COUNTRY).
+APPLY_QUEUE_COUNTRY_QUOTAS: dict[str, int] | None = {"IE": 4, "US": 8}
+
+# Country that absorbs any quota the other countries could not fill, so the
+# bubbled block reaches DAILY_APPLICATION_GOAL whenever the inventory exists at
+# all. Without this an Ireland shortfall just shrank the block: with IE at 4 and
+# only one eligible Irish role, the operator saw a 9-role block and had to read
+# into the unshaped tail to find their remaining target. Ireland's inventory is
+# thin (39 active rows vs 124 US at the time of writing) and varies day to day,
+# so the shortfall is the normal case rather than the exception.
+#
+# Backfill runs as a SECOND PASS over the same ranked list, after the per-country
+# pass, and obeys APPLY_QUEUE_MAX_PER_COMPANY exactly as the first pass does.
+# Like the quotas themselves it only ever REORDERS — a backfilled role was
+# always already in the queue, just below the fold.
+#
+# Set to None to disable backfill and restore the plain "shrink the block"
+# behavior. Ignored entirely when APPLY_QUEUE_COUNTRY_QUOTAS is None.
+APPLY_QUEUE_BACKFILL_COUNTRY: str | None = "US"
 
 # Within the bubbled-up block only, how many roles one company may hold. Without
 # this a single company with deep inventory takes an entire country's quota —
-# Databricks alone held 19% of the active pipeline and would have filled all
-# four CA slots on composite alone, which is the opposite of giving smaller
-# companies a look. Ignored entirely when quotas are None.
+# Databricks alone held 19% of the active pipeline and would have filled four
+# country slots on composite alone, which is the opposite of giving smaller
+# companies a look. Applies to the backfill pass too, for the same reason — a
+# backfill that ignored it would hand the whole Irish shortfall to one deep-
+# inventory US employer. Ignored entirely when quotas are None.
 APPLY_QUEUE_MAX_PER_COMPANY: int = 2
 
 # Daily application goal. The /today "Cover letters & apply" section auto-earns
@@ -983,6 +1017,24 @@ from geography import (  # noqa: E402
     names_office_requirement,
     location_passes,
 )
+
+# Which country's locked work-authorization paragraph an ambiguous-location role
+# gets. ``derive_country`` returns OTHER for location-flexible remote postings
+# ("Worldwide", "Americas", bare "Remote"); those are worth applying to, and the
+# operator would relocate for one, so they get the sponsorship-market paragraph
+# rather than none.
+#
+# SSOT for the fallback. It was hardcoded as "CA" in BOTH
+# ``serve.py`` (the /today cover-letter button) and ``run.generate_cover_letters``
+# -- two copies that had to be found and changed together when Canada was dropped
+# on 2026-10-03, which is exactly the drift this module exists to prevent. A
+# stale value here is not cosmetic: it staples a work-permit paragraph for the
+# wrong country onto a real application.
+#
+# Must name a country that (a) is in TARGET_COUNTRIES and (b) has a "###" section
+# in profile/cover_letter_rules.md. US is NOT a valid value -- the operator is a
+# citizen, so a US role gets no paragraph at all and never reaches this fallback.
+COVER_LETTER_FALLBACK_COUNTRY: str = "IE"
 
 
 # ─── Title-based seniority cap (mechanical, applied after Claude scoring) ───-
@@ -1928,21 +1980,27 @@ def classify_role_exposure(title: str, claude_exposure: str | None = None) -> st
 # ingest already makes.
 WORK_MODELS: tuple[str, ...] = ("remote", "hybrid", "onsite", "unstated")
 
-# The tunable knob. Which work models are acceptable for a US-derived role —
-# the operator is a US citizen, so US roles need no sponsorship, but they are a
-# remote-only stop-gap, so a CONFIRMED office requirement is rejected.
+# The tunable knob. Which work models are acceptable for a US-derived role.
+# The operator is a US citizen, so US roles need no sponsorship -- but the US
+# search is remote-only, so anything that is not CONFIRMED remote is rejected.
 #
-# 'unstated' is accepted by default, and that is the whole point of this
-# mechanism. Measured across 14 real boards, ~43% of the US roles the old
-# allowlist dropped say nothing at all about work model, and a sampled quarter
-# of those turned out to be remote-eligible. Rejecting 'unstated' would discard
-# them again and reduce this to the allowlist it replaced — just with a Claude
-# call spent first. The operator triages the ambiguous ones from `job_type`.
+# Narrowed to {"remote"} on 2026-10-03, at the operator's explicit direction,
+# as part of the pivot to a primarily US-remote search. Read the tradeoff before
+# widening it back: measured across 14 real boards, ~43% of the US roles the old
+# explicit-marker allowlist dropped say nothing at all about work model, and a
+# sampled quarter of THOSE turned out to be remote-eligible. Excluding
+# 'unstated' therefore discards some genuinely remote roles, and it spends a
+# Sonnet scoring call before doing so (the work model is one of that call's
+# outputs, so the gate cannot run earlier). That cost is accepted deliberately
+# here in exchange for a queue containing only confirmed-remote US roles.
 #
-# Narrow to {"remote"} to admit only confirmed-remote US roles; widen to include
-# "hybrid" to accept a commute. CA / IE roles are NEVER gated on work model (the
-# operator would relocate for those), so this applies to the US branch only.
-US_ACCEPTED_WORK_MODELS: frozenset[str] = frozenset({"remote", "unstated"})
+# 'unstated' is still a distinct value and must stay distinct from 'onsite'
+# everywhere -- the distinction is what makes widening this set a one-line
+# change rather than a re-detection project. Add "unstated" back to restore the
+# high-recall behavior; add "hybrid" to accept a commute. CA / IE roles are
+# NEVER gated on work model (the operator would relocate for those), so this
+# applies to the US branch only.
+US_ACCEPTED_WORK_MODELS: frozenset[str] = frozenset({"remote"})
 
 
 def classify_work_model(location: str,
@@ -2063,6 +2121,14 @@ def apply_queue_order(jobs: list[dict], co_by_id: dict) -> list[dict]:
     beneath in pure rank order. The pure ranking is therefore still intact
     underneath — this changes what you see *first*, not what you can see.
 
+    When a country cannot fill its quota and ``APPLY_QUEUE_BACKFILL_COUNTRY`` is
+    set, a **second pass** gives the unfilled remainder to that country, so the
+    block still reaches ``DAILY_APPLICATION_GOAL`` whenever the inventory
+    exists. The second pass walks the same ranked list and honors
+    ``APPLY_QUEUE_MAX_PER_COMPANY`` identically, so a thin-inventory day cannot
+    hand the whole shortfall to one deep-inventory employer. Backfilled roles
+    are appended after the quota block, keeping the whole head in rank order.
+
     With quotas ``None`` the result is exactly ``sorted(jobs, key=apply_rank_score,
     reverse=True)`` — the pre-quota behavior, restored by config alone."""
     ranked = sorted(
@@ -2087,6 +2153,27 @@ def apply_queue_order(jobs: list[dict], co_by_id: dict) -> list[dict]:
             bubbled.append(job)
         else:
             rest.append(job)
+
+    # Second pass: hand any quota the other countries could not fill to the
+    # backfill country, so a thin day in one market doesn't shrink the block.
+    # Walks `rest` (still in rank order) and re-checks the per-company cap
+    # against the SAME counters, so the cap spans both passes.
+    shortfall = sum(remaining.values()) - remaining.get(APPLY_QUEUE_BACKFILL_COUNTRY, 0)
+    if APPLY_QUEUE_BACKFILL_COUNTRY and shortfall > 0:
+        deferred: list[dict] = []
+        for job in rest:
+            if (shortfall > 0
+                    and derive_country(job.get("location") or "") == APPLY_QUEUE_BACKFILL_COUNTRY):
+                cid   = job.get("company_id")
+                taken = per_company.get(cid, 0)
+                if taken < APPLY_QUEUE_MAX_PER_COMPANY:
+                    per_company[cid] = taken + 1
+                    shortfall -= 1
+                    bubbled.append(job)
+                    continue
+            deferred.append(job)
+        rest = deferred
+
     # Both halves stay in rank order because `ranked` is traversed in order.
     return bubbled + rest
 

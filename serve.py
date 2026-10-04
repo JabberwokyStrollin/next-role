@@ -73,6 +73,7 @@ from config import (  # noqa: E402
     composite_score_pre_research,
     auto_age_application,
     derive_country,
+    COVER_LETTER_FALLBACK_COUNTRY,
     find_duplicate_application,
     gov_screen_result,
     already_applied_block_reason,
@@ -1604,7 +1605,7 @@ def ingest_form(
            placeholder="Staff Software Engineer" required>
     <label>Location</label>
     <input name="location" value="{location}"
-           placeholder="Remote Canada" required>
+           placeholder="Remote - United States" required>
     {paste_section}
     <button class="btn btn-primary" type="submit">
       {'Ingest job' if not show_paste else 'Ingest with pasted JD'}
@@ -5455,14 +5456,15 @@ class Handler(BaseHTTPRequestHandler):
                 # Pass --country from the Python SSOT (config.derive_country) so
                 # the locked visa paragraph is applied. Don't rely on
                 # generate_cl.js's own JS location derivation — it doesn't know
-                # Canadian cities/provinces ("Toronto, Ontario"). Mirrors
+                # city/province forms ("Galway", "London, ON"). Mirrors
                 # run.generate_cover_letters: US gets no paragraph (citizen),
-                # OTHER falls back to CA (operator's default market).
+                # OTHER falls back to config.COVER_LETTER_FALLBACK_COUNTRY.
                 _j = next((j for j in load_pipeline() if j.get("job_id") == job_id), None)
                 if _j:
                     _ctry = derive_country(_j.get("location", ""))
                     if _ctry != "US":
-                        cmd += ["--country", "CA" if _ctry == "OTHER" else _ctry]
+                        cmd += ["--country",
+                                COVER_LETTER_FALLBACK_COUNTRY if _ctry == "OTHER" else _ctry]
                 try:
                     result = subprocess.run(
                         cmd, cwd=ROOT,

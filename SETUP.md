@@ -332,24 +332,36 @@ mechanical stack score (`stack_match_score`) for every JD — used by both
 ingest and the pre-filter. See `ARCHITECTURE.md` for the SSOT rules
 around stack scoring.
 
-### Targeting the US (optional, remote-only)
+### Target geographies (US remote-only + Ireland)
 
-The pipeline targets **Canada** and **Ireland**, plus the **US** as an
-optional, **remote-only stop-gap**. Active geographies are one constant in
-`scripts/geography.py` (the location-SSOT module; US is **currently enabled**):
+The pipeline targets the **US** (remote only) and **Ireland** (any work model).
+Active geographies are one constant in `scripts/geography.py` (the location-SSOT
+module):
 
 ```python
-TARGET_COUNTRIES: frozenset[str] = frozenset({"CA", "IE", "US"})  # remove "US" to disable
+TARGET_COUNTRIES: frozenset[str] = frozenset({"IE", "US"})
 ```
+
+**Canada was removed on 2026-10-03** — the operator pivoted to a primarily
+US-remote search after Canadian employers went unresponsive once sponsorship was
+disclosed. Canadian locations still *derive* as `CA`; they're simply no longer
+targeted, so the geography gate drops them.
+
+A multi-country posting ("Remote, Canada; Remote, United States") resolves to an
+**enabled** country in preference to a disabled one, so combined CA/US listings
+correctly read as US. Among enabled countries the order is IE > CA > US, so a
+combined IE/US posting still resolves to the sponsorship-bearing market.
 
 You also need US/region tokens in `location_allow` (in your gitignored
 `profile/stack_keywords.yaml`) so US-eligible remote roles survive the first
 gate — `united states`, `usa`, `north america`, `worldwide`, `anywhere`. Without
 them, region-only locations like `"USA"`/`"Worldwide"` are dropped at
 `location_allow` before the US gate ever runs. (These are already present in the
-maintained profile.)
+maintained profile.) Irish cities beyond Dublin need no token — the positive
+gate is "`location_allow` matches **OR** `derive_country` is in
+`TARGET_COUNTRIES`", and `geography.py` already knows Cork, Galway and Limerick.
 
-What US being enabled turns on (all keyed off `config.derive_country(location)`):
+What targeting the US turns on (all keyed off `config.derive_country(location)`):
 
 - **Non-office intake, in two stages.** US roles ingest unless they're
   office-bound. With US off, US roles are excluded entirely.
@@ -366,11 +378,15 @@ What US being enabled turns on (all keyed off `config.derive_country(location)`)
   2. **Accurate pass at ingest.** Claude returns a `work_model`
      (`remote`/`hybrid`/`onsite`/`unstated`) on the JD-scoring call it already
      makes, and `config.work_model_discard_reason` drops US roles whose model
-     isn't in `US_ACCEPTED_WORK_MODELS` (default `{"remote", "unstated"}` — a
-     *confirmed* office requirement is rejected; a JD that simply doesn't say is
-     kept for you to triage). Narrow it to `{"remote"}` for confirmed-remote
-     only, or add `"hybrid"` if you'd accept a commute. The resolved value is
-     stored as the job's `job_type`, so you can see which are unconfirmed.
+     isn't in `US_ACCEPTED_WORK_MODELS` — **currently `{"remote"}`**, i.e.
+     confirmed-remote only. Hybrid, onsite *and* `unstated` are all discarded.
+     Add `"unstated"` back to keep JDs that simply don't say (the old default,
+     higher recall at the cost of triage), or add `"hybrid"` if you'd accept a
+     commute. The resolved value is stored as the job's `job_type`.
+
+     Note the cost of the current setting: because the work model is an output
+     of the scoring call, an `unstated` US role is discarded only *after* a
+     Sonnet call has been spent on it.
 
   Why two stages: requiring an explicit remote marker in the location field
   dropped ~939 US roles across 14 real boards, and only ~43% of those actually
@@ -381,18 +397,25 @@ What US being enabled turns on (all keyed off `config.derive_country(location)`)
 - **No-sponsorship JDs kept.** The ingest-time `detect_no_sponsorship` discard
   is skipped for US roles (you're a US citizen), so "we do not sponsor"
   boilerplate no longer throws the posting away. CA/IE still honor it.
-- **Low US sponsorship score.** `composite_score` substitutes
-  `US_SPONSORSHIP_SCORE` (default `3`/15) for the company sponsorship score on
-  US roles, so CA/IE generally outrank US — tune it in `config.py` (set to `0`
-  for "zero added from sponsorship"). A strong-stack US role can still beat a
-  weak CA/IE one.
+- **No US sponsorship handicap.** `composite_score` substitutes
+  `US_SPONSORSHIP_SCORE` for the company sponsorship score on US roles. It is
+  **`15`/15** — the full native max — because sponsorship is simply not a
+  question for a citizen, so US and Irish roles compete on stack, seniority and
+  freshness alone. It was `3` while the US was a stop-gap behind Canada; lower
+  it again in `config.py` to reintroduce a deliberate tilt toward Ireland.
 - **Cover-letter work authorization.** US cover letters get **no**
   work-authorization paragraph — a US citizen applying to a US role needs none.
   `run.py` omits `--country` for US jobs and `generate_cl.js` doesn't derive US,
-  so the visa section is cleanly skipped. (CA/IE still get their locked
-  paragraphs from `profile/cover_letter_rules.md`.)
+  so the visa section is cleanly skipped. (Ireland still gets its locked
+  paragraph from `profile/cover_letter_rules.md`; ambiguous `OTHER` locations
+  fall back to `config.COVER_LETTER_FALLBACK_COUNTRY`.)
 
-Removing `"US"` reverts everything; CA/IE scoring is unchanged either way.
+**Changing `TARGET_COUNTRIES` is not a one-line change.** The constant governs
+the gates and the ranking, but `location_allow` and
+`config.APPLY_QUEUE_COUNTRY_QUOTAS` are separate edits, and rows already in the
+pipeline keep flowing until swept — the gate blocks future ingest, not existing
+inventory. Run `python scripts/scan_geography_policy.py --apply` as part of the
+change (dry-run by default). `CLAUDE.md` carries the full checklist.
 
 ---
 
