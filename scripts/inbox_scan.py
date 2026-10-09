@@ -280,8 +280,23 @@ def _title_tokens(title: str) -> set[str]:
     return {t for t in re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).split() if len(t) > 3}
 
 
+def applied_by(app: dict, received: str) -> bool:
+    """True if the application already existed when the message was sent — a
+    message can't be about an application made after it.
+
+    Without this, an old rejection for a long-closed role matched a brand-new
+    application at the same company: every earlier Reddit application had aged
+    to ``rejected``, so the one applied to that morning was the sole open
+    candidate, and a Reddit rejection from weeks before — never marked processed,
+    because no Reddit application had been open to match it — was staged against
+    it and applied. Same-day mail still matches (confirmations arrive within
+    minutes). An unknown date on either side never excludes."""
+    applied = app.get("date_applied") or ""
+    return not (applied and received) or applied <= received
+
+
 def match_application(open_apps: list[dict], from_header: str, subject: str,
-                      body: str) -> dict | None:
+                      body: str, received: str = "") -> dict | None:
     """Pick the open application this message relates to, or None. When several
     open applications share the matched company, prefer the one whose title
     tokens appear in the subject/body, and break a tie on the most recently
@@ -295,11 +310,14 @@ def match_application(open_apps: list[dict], from_header: str, subject: str,
     the message must also read as being about a job application. Microsoft
     Rewards mails from ``microsoftrewards.com``, whose domain label contains
     "microsoft", so a prize-draw promo cleared the sender test and was matched
-    to a Microsoft application."""
+    to a Microsoft application.
+
+    Applications made after ``received`` are never candidates (`applied_by`)."""
     if not looks_like_recruiting_mail(subject, body):
         return None
     candidates = [a for a in open_apps
-                  if company_matches(a.get("company_name", ""), from_header, subject)]
+                  if applied_by(a, received)
+                  and company_matches(a.get("company_name", ""), from_header, subject)]
     if not candidates:
         return None
     if len(candidates) == 1:
@@ -457,7 +475,8 @@ def scan_via_imap(window_days: int, dry_run: bool = False,
             # Cheap company match on headers before pulling the full body.
             header_candidates = [
                 a for a in open_apps
-                if company_matches(a.get("company_name", ""), from_hdr, subject)
+                if applied_by(a, received)
+                and company_matches(a.get("company_name", ""), from_hdr, subject)
             ]
             if not header_candidates:
                 continue
@@ -478,7 +497,7 @@ def scan_via_imap(window_days: int, dry_run: bool = False,
             new_processed.add(key)
             seen_keys.add(key)
 
-            app = match_application(header_candidates, from_hdr, subject, body)
+            app = match_application(header_candidates, from_hdr, subject, body, received)
             if not app:
                 continue
 
@@ -518,7 +537,7 @@ def scan_from_sample(path: Path, dry_run: bool = False) -> int:
     body     = _extract_text(msg)
 
     open_apps = load_open_applications()
-    app = match_application(open_apps, from_hdr, subject, body)
+    app = match_application(open_apps, from_hdr, subject, body, received)
     status, reason, evidence = classify_inbox_email(subject, body, from_hdr)
 
     print(f"  from:    {from_hdr[:80]}")
