@@ -2,8 +2,11 @@
 /**
  * generate_cl.js — Cover letter generator
  *
- * Calls Claude with the JD + resume + rules to generate structured letter content,
- * then assembles a formatted .docx using the docx library per cover_letter_rules.md.
+ * Fills profile/cover_letter_template.txt — a fixed, operator-written letter —
+ * and assembles a formatted .docx. Only the template's <...> placeholders vary
+ * per job: <Date>, <Job Title>, <Company> are filled mechanically; every other
+ * placeholder is written by one small Claude call from the JD. The locked visa
+ * paragraph still comes from profile/cover_letter_rules.md.
  *
  * Usage:
  *   node scripts/generate_cl.js --job-id <uuid>
@@ -26,7 +29,7 @@ const PROFILE_DIR    = path.join(ROOT, "profile");
 const PIPELINE_PATH  = path.join(DATA_DIR, "job_pipeline.json");
 const REGISTRY_PATH  = path.join(DATA_DIR, "company_registry.json");
 const LOG_PATH       = path.join(DATA_DIR, "process_log.json");
-const RESUME_PATH    = path.join(PROFILE_DIR, "resume.md");
+const CL_TEMPLATE_PATH = path.join(PROFILE_DIR, "cover_letter_template.txt");
 const CL_RULES_PATH  = path.join(PROFILE_DIR, "cover_letter_rules.md");
 
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -35,7 +38,7 @@ if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
 const API_KEY    = process.env.ANTHROPIC_API_KEY;
 const CL_MODEL   = "claude-sonnet-4-6";  // Sonnet 4.6 for cover letters
-const MAX_TOKENS = 4000;
+const MAX_TOKENS = 1000;  // fills are a sentence or two each
 
 if (!API_KEY) {
   console.error("Error: ANTHROPIC_API_KEY environment variable is not set.");
@@ -157,31 +160,202 @@ function parseVisaParagraphs(rulesText) {
   return entries;
 }
 
-// ── Letter content generation ─────────────────────────────────────────────────
+// ── Template ──────────────────────────────────────────────────────────────────
 
-function buildSystem(resumeText, rulesText) {
-  return `You are a cover letter writer. Generate a cover letter and return ONLY valid JSON — no preamble, no markdown fences.
+// The letter is a fixed, operator-written text. Only <...> placeholders change
+// per job. Placeholders named here are filled mechanically from the job record;
+// any OTHER placeholder is an instruction to Claude, and its inner text is the
+// brief for what to write there. Keys are matched case-insensitively.
+const PLACEHOLDER_RE = /<([^<>\n]+)>/g;
 
-## Resume
-${resumeText}
-
-## Cover Letter Rules
-${rulesText}
-
-## Required JSON output format
-{
-  "re_line": "<job title for the Re: line>",
-  "opening": "<opening paragraph>",
-  "body_paragraphs": ["<body paragraph 1>", "<body paragraph 2>", "..."],
-  "closing": "<closing paragraph>"
+function staticPlaceholderValues(job) {
+  const company = job.company_name || "";
+  const title   = cleanTitle(job.title || "");
+  return {
+    "date":         todayLong(),
+    "job title":    title,
+    "title":        title,
+    "company":      company,
+    "company name": company,
+  };
 }
 
-The Cover Letter Rules document above is authoritative — follow it. The visa/work-authorization paragraph is appended automatically server-side after the signature; do not produce it in any field. Return ONLY the JSON object — no preamble, no markdown fences.`;
+// Job boards decorate titles with work model / location / requisition IDs
+// ("Senior Data Engineer (Remote - US)", "Staff Engineer - Remote"). The old
+// Claude-written Re: line silently dropped those; the template fills
+// <Job Title> mechanically, so strip them here.
+function cleanTitle(title) {
+  const LOC = /(remote|hybrid|on-?site|united states|usa|\bus\b|ireland|dublin|canada|anywhere)/i;
+  let t = title.trim();
+  // Trailing parenthetical / bracket naming a location, work model, or req ID.
+  t = t.replace(/\s*[\(\[]([^\)\]]*)[\)\]]\s*$/, (m, inner) =>
+    (LOC.test(inner) || /^[A-Z]{0,4}-?\d{3,}$/i.test(inner.trim())) ? "" : m);
+  // Trailing ", Remote", then " - Remote" / " | Remote" (comma first, so
+  // "Engineer - Data, Remote" keeps "Data").
+  t = t.replace(/,\s*([^,]*)$/, (m, tail) => LOC.test(tail) ? "" : m);
+  t = t.replace(/\s+[-–—|]\s+([^-–—|]*)$/, (m, tail) => LOC.test(tail) ? "" : m);
+  // Em/en dashes in the title read as an AI tell in the letter — use a plain hyphen.
+  return (t.trim() || title.trim()).replace(/[—–]/g, "-");
+}
+
+// Returns { lines, slots } — lines are the raw template lines; slots are the
+// Claude-filled placeholders in order of appearance: { id, raw, brief }.
+// A placeholder repeated verbatim is one slot, filled once.
+function parseTemplate(text, staticValues) {
+  const lines = text.replace(/\r\n/g, "\n").replace(/\s+$/, "").split("\n");
+  const slots = [];
+  const seen  = new Set();
+  for (const line of lines) {
+    for (const m of line.matchAll(PLACEHOLDER_RE)) {
+      if (m[1].trim().toLowerCase() in staticValues || seen.has(m[0])) continue;
+      seen.add(m[0]);
+      slots.push({ id: String(slots.length + 1), raw: m[0], brief: m[1].trim() });
+    }
+  }
+  return { lines, slots };
+}
+
+// Substitutes static values and per-slot text (keyed by slot id) into the lines.
+function renderTemplate(lines, staticValues, slots, fills) {
+  const byRaw = new Map(slots.map(s => [s.raw, fills[s.id]]));
+  return lines.map(line => line.replace(PLACEHOLDER_RE, (m, inner) => {
+    const key = inner.trim().toLowerCase();
+    if (key in staticValues) return staticValues[key];
+    return byRaw.get(m) || m;
+  }));
+}
+
+// ── AI-tell screen ────────────────────────────────────────────────────────────
+
+// Deterministic, so the rule holds no matter what the model decides. A fill
+// that trips any of these gets one retry with the violations named; if it
+// still trips, the letter is written and the checklist flags it.
+const AI_TELL_PATTERNS = [
+  [/[—–]/,                                                          "em/en dash"],
+  [/;/,                                                             "semicolon"],
+  [/!/,                                                             "exclamation mark"],
+  [/[<>]/,                                                          "angle bracket"],
+  [/\bdelv(e|es|ing)\b/i,                                           "\"delve\""],
+  [/\bpassion(ate)?\b/i,                                            "\"passion\""],
+  [/\b(thrilled|excited|eager)\b/i,                                 "excited/thrilled/eager"],
+  [/\bleverag(e|es|ed|ing)\b/i,                                     "\"leverage\""],
+  [/\b(robust|seamless(ly)?|cutting-edge|state-of-the-art|world-class)\b/i, "buzzword adjective"],
+  [/\b(innovative|transformative|game-?chang\w*)\b/i,               "hype adjective"],
+  [/\b(landscape|tapestry|realm|journey|ecosystem)\b/i,             "filler noun"],
+  [/\b(ever-evolving|fast-paced|dynamic)\b/i,                       "filler adjective"],
+  [/\b(spearhead\w*|empower\w*|elevat\w*|foster\w*|harness\w*|unlock\w*)\b/i, "inflated verb"],
+  [/\b(synerg\w*|testament|pivotal|unwavering|paramount)\b/i,       "inflated word"],
+  [/\bnot (just|only|merely)\b/i,                                   "\"not just X\" construction"],
+  [/\b(truly|deeply|incredibly)\b/i,                                "intensifier"],
+];
+
+function findTells(text) {
+  return AI_TELL_PATTERNS.filter(([re]) => re.test(text)).map(([, label]) => label);
+}
+
+// ── Slot filling (the only Claude call) ───────────────────────────────────────
+
+function buildFillSystem() {
+  return `You fill in a few blanks in a cover letter the candidate already wrote. Every word outside the blanks is fixed and you never change it. Return ONLY valid JSON — no preamble, no markdown fences.
+
+## How to write a fill
+- Each blank sits inside a sentence. Your text must continue that sentence grammatically from the words right before the blank and lead cleanly into the words right after it. If the blank ends its sentence, end with a period. If more text follows the blank on the same line, do not add a period.
+- Follow the blank's brief. A brief may include an example in parentheses. It shows the SHAPE wanted (length, specificity, how it ties to the JD). Never reuse its wording, company, or team name unless this job description says the same thing.
+- Be concrete and specific to THIS job description: name the actual team, product, system, or problem it describes. Paraphrase in plain words. Do not lift marketing copy.
+- Match the candidate's voice in the surrounding letter: plain, direct, conversational, the way an experienced engineer talks. Short and specific beats impressive.
+- Make no claims about the candidate's experience, skills, or results. The rest of the letter covers that. You only describe the role and company side.
+- No flattery of the company, no hype, no superlatives.
+- Never use: em or en dashes, semicolons, exclamation marks, "delve", "passionate", "excited", "thrilled", "eager", "leverage", "robust", "seamless", "cutting-edge", "innovative", "transformative", "landscape", "ecosystem", "journey", "realm", "dynamic", "fast-paced", "ever-evolving", "spearhead", "empower", "elevate", "foster", "harness", "unlock", "synergy", "testament", "pivotal", "truly", "deeply", "incredibly", or the "not just X, but Y" construction.
+- One sentence or clause per blank, roughly 15 to 45 words unless the brief asks otherwise.
+
+## Output format
+A JSON object mapping each blank's number (as a string) to its fill text, e.g. {"1": "..."}.`;
+}
+
+function buildFillUser(job, preview, slots, feedback = null) {
+  const briefs = slots.map(s => `[[BLANK ${s.id}]] brief: ${s.brief}`).join("\n");
+  let msg = `## The letter (blanks marked [[BLANK n]])
+${preview}
+
+## Blanks to fill
+${briefs}
+
+## Job
+Company: ${job.company_name}
+Title: ${job.title}
+Location: ${job.location}
+
+## Job description
+${job.jd_text}`;
+  if (feedback) msg += `\n\n## Fix these problems in your previous answer\n${feedback}`;
+  return msg;
+}
+
+function parseJsonObject(text) {
+  let cleaned = text.trim();
+  if (cleaned.includes("```json")) cleaned = cleaned.split("```json")[1].split("```")[0].trim();
+  else if (cleaned.includes("```")) cleaned = cleaned.split("```")[1].split("```")[0].trim();
+  else if (cleaned.includes("{")) cleaned = cleaned.slice(cleaned.indexOf("{"), cleaned.lastIndexOf("}") + 1);
+  return JSON.parse(cleaned);
+}
+
+function normalizeFill(text) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^["'“‘]+|["'”’]+$/g, "")
+    .trim();
+}
+
+// Human-readable problems (missing blanks, AI tells, overlong fills).
+function checkFills(slots, fills) {
+  const problems = [];
+  for (const s of slots) {
+    const f = fills[s.id];
+    if (!f) { problems.push(`Blank ${s.id}: missing or empty.`); continue; }
+    const tells = findTells(f);
+    if (tells.length) problems.push(`Blank ${s.id}: contains ${tells.join(", ")}.`);
+    const words = f.split(/\s+/).length;
+    if (words > 60) problems.push(`Blank ${s.id}: ${words} words, too long. Keep it to one sentence or clause.`);
+  }
+  return problems;
+}
+
+// Returns { fills, problems }. One retry when the first answer has problems.
+async function fillSlots(job, lines, staticValues, slots) {
+  if (slots.length === 0) return { fills: {}, problems: [] };
+
+  const markers = Object.fromEntries(slots.map(s => [s.id, `[[BLANK ${s.id}]]`]));
+  const preview = renderTemplate(lines, staticValues, slots, markers).join("\n");
+  const system  = buildFillSystem();
+
+  let fills = {};
+  let problems = [];
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const feedback = attempt > 1 ? problems.join("\n") : null;
+    const raw = await callClaude(system, buildFillUser(job, preview, slots, feedback));
+    let parsed;
+    try {
+      parsed = parseJsonObject(raw);
+    } catch (e) {
+      problems = [`Response was not valid JSON: ${raw.slice(0, 200)}`];
+      continue;
+    }
+    fills = Object.fromEntries(slots.map(s => [s.id, normalizeFill(parsed[s.id])]));
+    problems = checkFills(slots, fills);
+    if (problems.length === 0) break;
+    if (attempt === 1) console.log(`  Fill needs another pass: ${problems.join(" ")}`);
+  }
+  return { fills, problems };
 }
 
 // ── docx assembly ─────────────────────────────────────────────────────────────
 
-async function buildDocx(content, outputPath, visaText = null) {
+// Renders the filled template line by line, so the .docx mirrors the template
+// file: each non-empty line is a paragraph, each blank line a spacer. Styling
+// is positional — line 1 is the name header, line 2 the contact line, a line
+// starting "Re:" is bold, and the last line (the signature) is bold.
+async function buildDocx(lines, outputPath, visaText = null) {
   const {
     Document, Packer, Paragraph, TextRun,
     AlignmentType,
@@ -195,19 +369,12 @@ async function buildDocx(content, outputPath, visaText = null) {
   const CONTACT_SIZE = 19;  // 9.5pt — one size smaller than body
   const NAME_SIZE    = 28;  // 14pt
 
-  // Body paragraph
-  function bodyPara(text, opts = {}) {
+  function para(text, { size = BODY_SIZE, bold = false, color, alignment,
+                        before = 80, after = 80 } = {}) {
     return new Paragraph({
-      spacing: { before: 80, after: 80 },
-      alignment: opts.alignment,
-      children: [
-        new TextRun({
-          text,
-          font: "Calibri",
-          size: opts.size || BODY_SIZE,
-          bold: opts.bold || false,
-        }),
-      ],
+      spacing: { before, after },
+      alignment,
+      children: [new TextRun({ text, font: "Calibri", size, bold, color })],
     });
   }
 
@@ -219,79 +386,26 @@ async function buildDocx(content, outputPath, visaText = null) {
     });
   }
 
+  let lastIdx = lines.length - 1;
+  while (lastIdx >= 0 && !lines[lastIdx].trim()) lastIdx--;
+
   const children = [];
-
-  // ── Header: Name (centered) ───────────────────────────────────────────────
-  children.push(new Paragraph({
-    spacing: { before: 0, after: 0 },
-    alignment: AlignmentType.CENTER,
-    children: [
-      new TextRun({
-        text: "Johnny Ray Blanton III",
-        font: "Calibri",
-        size: NAME_SIZE,
-        color: NAVY,
-        bold: true,
-      }),
-    ],
-  }));
-
-  // ── Header: Contact line (centered, one size smaller) ────────────────────
-  children.push(new Paragraph({
-    spacing: { before: 0, after: 120 },
-    alignment: AlignmentType.CENTER,
-    children: [
-      new TextRun({
-        text: "+1 210 980 2220  |  blantonjohnny3@gmail.com  |  linkedin.com/in/johnny-blanton",
-        font: "Calibri",
-        size: CONTACT_SIZE,
-      }),
-    ],
-  }));
-
-  // ── Date ─────────────────────────────────────────────────────────────────
-  // Always use today's actual system date — never trust Claude to provide it,
-  // since model training cutoffs make hallucinated dates likely.
-  children.push(bodyPara(todayLong()));
-  children.push(spacer());
-
-  // ── Salutation ────────────────────────────────────────────────────────────
-  children.push(bodyPara("Hiring Manager"));
-  children.push(spacer());
-
-  // ── Re: line ─────────────────────────────────────────────────────────────
-  children.push(new Paragraph({
-    spacing: { before: 0, after: 80 },
-    children: [
-      new TextRun({
-        text: `Re: ${content.re_line}`,
-        font: "Calibri",
-        size: BODY_SIZE,
-        bold: true,
-      }),
-    ],
-  }));
-  children.push(spacer());
-
-  // ── Opening paragraph ─────────────────────────────────────────────────────
-  children.push(bodyPara(content.opening));
-
-  // ── Body paragraphs (no headings — prose only) ───────────────────────────
-  for (const para of content.body_paragraphs) {
-    children.push(bodyPara(para));
-  }
-
-  // ── Closing ───────────────────────────────────────────────────────────────
-  children.push(bodyPara(content.closing));
-  children.push(spacer());
-  children.push(bodyPara("Sincerely,"));
-  children.push(spacer());
-  children.push(bodyPara("Johnny Ray Blanton III", { bold: true }));
+  lines.forEach((rawLine, i) => {
+    const line = rawLine.trim();
+    if (!line) children.push(spacer());
+    else if (i === 0) children.push(para(line, {
+      size: NAME_SIZE, bold: true, color: NAVY,
+      alignment: AlignmentType.CENTER, before: 0, after: 0 }));
+    else if (i === 1) children.push(para(line, {
+      size: CONTACT_SIZE, alignment: AlignmentType.CENTER, before: 0, after: 120 }));
+    else if (/^Re:/i.test(line)) children.push(para(line, { bold: true, before: 0, after: 80 }));
+    else children.push(para(line, { bold: i === lastIdx }));
+  });
 
   // ── Visa paragraph (after signature, prefixed "Note:") ────────────────────
   if (visaText) {
     children.push(spacer());
-    children.push(bodyPara(`Note: ${visaText}`));
+    children.push(para(`Note: ${visaText}`));
   }
 
   const doc = new Document({
@@ -357,96 +471,43 @@ async function main() {
 
   console.log(`\nGenerating cover letter for: ${job.company_name} — ${job.title}`);
 
-  // ── Load context files ───────────────────────────────────────────────────
-  if (!fs.existsSync(RESUME_PATH)) {
-    console.error(`Error: resume not found at ${RESUME_PATH}\nCopy profile.example/ to profile/ and fill in your details.`);
+  // ── Load template ────────────────────────────────────────────────────────
+  if (!fs.existsSync(CL_TEMPLATE_PATH)) {
+    console.error(`Error: cover letter template not found at ${CL_TEMPLATE_PATH}\nCopy profile.example/ to profile/ and fill in your details.`);
     process.exit(1);
   }
-  if (!fs.existsSync(CL_RULES_PATH)) {
-    console.error(`Error: cover letter rules not found at ${CL_RULES_PATH}\nCopy profile.example/ to profile/ and fill in your details.`);
-    process.exit(1);
-  }
-
-  const resumeText = fs.readFileSync(RESUME_PATH, "utf8");
-  const rulesText  = fs.readFileSync(CL_RULES_PATH, "utf8");
+  const templateText = fs.readFileSync(CL_TEMPLATE_PATH, "utf8");
+  const staticValues = staticPlaceholderValues(job);
+  const { lines, slots } = parseTemplate(templateText, staticValues);
 
   // ── Resolve visa paragraph ───────────────────────────────────────────────
-  const visaParagraphs = parseVisaParagraphs(rulesText);
-  let visaText = country ? (visaParagraphs[country] || null) : null;
-  if (visaText) {
-    visaText = visaText.replace(/\[Company Name\]/g, job.company_name);
-    console.log(`  Work authorization: ${country} paragraph applied`);
-  } else if (country && Object.keys(visaParagraphs).length > 0) {
-    console.log(`  Note: no Work Authorization entry for "${country}" in profile — section omitted`);
+  // The locked per-country paragraphs still live in cover_letter_rules.md; the
+  // file is only needed when a country paragraph is actually wanted.
+  let visaText = null;
+  if (country) {
+    const rulesText = fs.existsSync(CL_RULES_PATH) ? fs.readFileSync(CL_RULES_PATH, "utf8") : "";
+    visaText = parseVisaParagraphs(rulesText)[country] || null;
+    if (visaText) {
+      visaText = visaText.replace(/\[Company Name\]/g, job.company_name);
+      console.log(`  Work authorization: ${country} paragraph applied`);
+    } else {
+      console.log(`  Note: no Work Authorization entry for "${country}" in ${CL_RULES_PATH} — section omitted`);
+    }
   } else {
     console.log(`  Work authorization: none (section omitted)`);
   }
 
-  // ── Call Claude ──────────────────────────────────────────────────────────
-  console.log("  Calling Claude to generate letter content...");
-  const system  = buildSystem(resumeText, rulesText);
-  const userMsg = `Generate a cover letter for this job.\n\nCompany: ${job.company_name}\nTitle: ${job.title}\nLocation: ${job.location}\n\nJob Description:\n${job.jd_text}`;
-
-  const raw = await callClaude(system, userMsg);
-
-  // ── Parse JSON response ───────────────────────────────────────────────────
-  function parseLetterJson(text) {
-    let cleaned = text.trim();
-    if (cleaned.includes("```json")) cleaned = cleaned.split("```json")[1].split("```")[0].trim();
-    else if (cleaned.includes("```")) cleaned = cleaned.split("```")[1].split("```")[0].trim();
-    else if (cleaned.includes("{")) cleaned = cleaned.slice(cleaned.indexOf("{"), cleaned.lastIndexOf("}") + 1);
-    return JSON.parse(cleaned);
-  }
-
-  let content;
-  try {
-    content = parseLetterJson(raw);
-  } catch (e) {
-    console.error("Error: Claude returned non-JSON response:\n", raw);
+  // ── Fill the Claude placeholders ─────────────────────────────────────────
+  console.log(`  Filling ${slots.length} template placeholder(s) with Claude...`);
+  const { fills, problems } = await fillSlots(job, lines, staticValues, slots);
+  const missing = slots.filter(s => !fills[s.id]);
+  if (missing.length) {
+    console.error(`Error: Claude did not fill placeholder(s): ${missing.map(s => s.raw).join(", ")}`);
+    if (problems.length) console.error(`  ${problems.join("\n  ")}`);
     process.exit(1);
   }
 
-  // ── Word-count enforcement (auto-retry once if over cap) ─────────────────
-  function countLetterWords(c) {
-    const all = [c.opening, ...c.body_paragraphs, c.closing].join(" ");
-    return all.trim().split(/\s+/).filter(Boolean).length;
-  }
-
-  const WORD_CAP = 380;
-  const initialCount = countLetterWords(content);
-  if (initialCount > WORD_CAP) {
-    console.log(`  Draft is ${initialCount} words (cap ${WORD_CAP}). Asking Claude to trim...`);
-    const trimSystem = `You are trimming a cover letter to fit a hard word cap.
-
-## Hard rules
-- Opening + all body paragraph texts + closing combined MUST be ≤ ${WORD_CAP} words.
-- body_paragraphs MUST have exactly 2 or 3 entries. Never 4. If the input has more than 3, drop entries.
-- The entire body MUST name AT MOST 3 distinct projects total (across all paragraphs combined). A "named project" is one referenced by name (e.g. "HALOC Distilled", "Jailer", "YAML ingestion framework", "HALOC Flink Distilled", "MASS/GPC", "next-role") or by a description that resolves unambiguously to one project. If the input names more than 3, drop the weakest one entirely — do not just compress it. A single paragraph that gives sentence-level treatment to 3 different projects is a violation even if the paragraph count is within the cap.
-- Do NOT add new content. Only cut.
-- Do NOT introduce any visa, sponsorship, or work-authorization content anywhere — that paragraph is appended automatically server-side and must not appear in opening, body, or closing.
-- Preserve narrative arc (problem → decision → outcome). Cut whole sentences, not adjectives.
-- Drop a body paragraph entirely (remove that array element) if needed to fit; do not pad the remaining paragraphs.
-- Return the SAME JSON shape as input: { re_line, opening, body_paragraphs: [string, ...], closing }.
-
-Return ONLY valid JSON — no preamble, no markdown fences.`;
-    const trimUserMsg = `Trim this letter to ≤ ${WORD_CAP} words. Current count: ${initialCount}.\n\n${JSON.stringify(content, null, 2)}`;
-    const trimRaw = await callClaude(trimSystem, trimUserMsg);
-    try {
-      const trimmed = parseLetterJson(trimRaw);
-      const trimmedCount = countLetterWords(trimmed);
-      if (trimmedCount <= WORD_CAP) {
-        console.log(`  Trimmed to ${trimmedCount} words.`);
-        content = trimmed;
-      } else {
-        console.log(`  Trim attempt landed at ${trimmedCount} words — still over cap. Using trimmed version anyway.`);
-        content = trimmed;
-      }
-    } catch (e) {
-      console.error("  Warning: trim retry returned non-JSON; keeping original draft.");
-    }
-  }
-
-  content.company_name = job.company_name;
+  const filledLines = renderTemplate(lines, staticValues, slots, fills);
 
   // ── Build docx ────────────────────────────────────────────────────────────
   // Filename: YYYY-MM-DD_Company_Title.docx; same-day regen → _v2, _v3, ...
@@ -466,7 +527,7 @@ Return ONLY valid JSON — no preamble, no markdown fences.`;
   const relPath    = `output/${filename}`;
 
   console.log("  Assembling .docx...");
-  await buildDocx(content, outputPath, visaText);
+  await buildDocx(filledLines, outputPath, visaText);
   console.log(`  Written to: ${outputPath}`);
 
   // ── Update pipeline record ────────────────────────────────────────────────
@@ -486,28 +547,25 @@ Return ONLY valid JSON — no preamble, no markdown fences.`;
   });
 
   // ── Post-generation summary ───────────────────────────────────────────────
-  const allText  = [content.opening, ...content.body_paragraphs, content.closing].join(" ");
-  const realWords = allText.trim().split(/\s+/).filter(Boolean).length;
-  const overCap  = realWords > WORD_CAP ? ` ⚠ OVER ${WORD_CAP}-WORD CAP` : "";
-
-  const paraCount = content.body_paragraphs.length;
-  const overParas = paraCount > 3 ? ` ⚠ OVER 3-PARAGRAPH CAP` : (paraCount < 2 ? ` ⚠ UNDER 2-PARAGRAPH MIN` : "");
-
   const visaLine = visaText ? `  Work auth: ${country} paragraph applied (after signature, "Note:" prefix)` : `  Work auth: none`;
   console.log("\n── Post-generation checklist ─────────────────────────────────");
   console.log(`  File:         ${filename}`);
-  console.log(`  Word count:   ${realWords}${overCap}`);
-  console.log(`  Body paras:   ${paraCount}${overParas}`);
+  console.log(`  Re: line:     ${staticValues["job title"]}`);
+  for (const s of slots) console.log(`  Fill ${s.id}:       ${fills[s.id]}`);
+  if (problems.length) console.log(`  ⚠ Fill still flagged after retry: ${problems.join(" ")}`);
   console.log(visaLine);
   console.log("\n  Before submitting, verify:");
-  console.log("  [ ] All project names and metrics are accurate");
-  console.log("  [ ] No fabricated stack claims (e.g. AWS vs Azure)");
-  console.log("  [ ] Em dashes (—) used throughout, not double hyphens (--)");
+  console.log("  [ ] The filled-in text reads naturally and is accurate to the JD");
   console.log("  [ ] Single page when opened in Word");
   if (visaText) console.log("  [ ] Company name correct in work authorization paragraph");
 }
 
-main().catch(err => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});
+// Exported for offline checks (no API call); main() only runs from the CLI.
+module.exports = { cleanTitle, parseTemplate, renderTemplate, findTells, staticPlaceholderValues, buildDocx };
+
+if (require.main === module) {
+  main().catch(err => {
+    console.error("Fatal error:", err);
+    process.exit(1);
+  });
+}

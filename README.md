@@ -21,8 +21,10 @@ strong application than a week on fifty weak ones.
    recent layoffs, ethics flags.
 3. **Dashboard** — a terminal summary (and the `/today` web UI) ranks
    all active jobs by composite score so you know where to focus.
-4. **Cover letter** — one command generates a tailored `.docx` cover
-   letter using your resume, your rules, and the specific JD.
+4. **Cover letter** — one command fills your own fixed letter
+   (`profile/cover_letter_template.txt`) for a specific JD and writes a
+   `.docx`. Only the `<...>` placeholders change per job; Claude writes
+   just the JD-specific ones, so the rest stays in your voice.
 5. **Comp estimate** — on demand, generate a salary + bonus estimate
    for any job to anchor your negotiation.
 
@@ -545,7 +547,7 @@ prompt.
 |---|---|---|
 | Ingest + score one job | Sonnet 4.5 | ~$0.013 |
 | Research one company | Haiku 4.5 + 1 web search | ~$0.03–0.05 |
-| Generate cover letter | Sonnet 4.6 | ~$0.03 |
+| Generate cover letter (fills template placeholders only) | Sonnet 4.6 | ~$0.01 |
 | Generate comp estimate | Opus 4.7 | ~$0.15–0.20 |
 | Answer one application question | Sonnet 4.6 | ~$0.02–0.05 |
 | Generate a code drill (3–6 part series) | Sonnet 4.6 | ~$0.01–0.02 |

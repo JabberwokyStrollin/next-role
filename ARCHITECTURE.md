@@ -92,7 +92,7 @@ file.
 | `APPLICATION_QUESTIONS_PATH` | `Path` | `data/application_questions.json` — answer-questions records keyed by job_id (dict, not list). |
 | `RESUME_ENTRY_NOTES_PATH` | `Path` | `data/resume_entry_notes.json` — global supplemental notes per resume-entry slug. |
 | `PROFILE_DIR` | `Path` | `<ROOT>/profile` — gitignored user-rules directory. |
-| `COVER_LETTER_RULES` | `Path` | `profile/cover_letter_rules.md` — tone + section structure. |
+| `COVER_LETTER_RULES` | `Path` | `profile/cover_letter_rules.md` — holds the locked per-country visa paragraphs read by `generate_cl.js` (the letter body itself comes from `profile/cover_letter_template.txt`). |
 | `RESUME_PATH` | `Path` | `profile/resume.md` — active resume. |
 | `SCORING_RUBRIC_PATH` | `Path` | `profile/scoring_rubric.md` — Claude system prompt for JD scoring. |
 | `STACK_KEYWORDS_PATH` | `Path` | `profile/stack_keywords.yaml` — keyword weights + crawl pre-filter. |
@@ -2680,35 +2680,45 @@ Draft history is preserved.
 
 ## `scripts/generate_cl.js`
 
-**Role.** Node-side `.docx` cover-letter generator. Reads the job from
-`data/job_pipeline.json`, loads `profile/resume.md` and
-`profile/cover_letter_rules.md`, calls Claude (Sonnet 4.6) to draft the
-letter as a strict-shape JSON, enforces a 380-word cap (auto-retry with a
-trim prompt), parses the visa paragraph for the right country out of
-`cover_letter_rules.md`, assembles a styled `.docx` via the `docx` npm
-library, and writes it to `output/<date>_<company>_<title>.docx`.
+**Role.** Node-side `.docx` cover-letter generator. The letter is a **fixed,
+operator-written template** — `profile/cover_letter_template.txt` — and only
+its `<...>` placeholders vary per job. `<Date>`, `<Job Title>`/`<Title>`,
+`<Company>`/`<Company Name>` are filled mechanically from the job record;
+**every other placeholder is a brief for Claude**, and one small Sonnet 4.6
+call writes just those fills from the JD. This replaced whole-letter
+generation (a 380-word-capped Claude draft from resume + rules) because too
+many AI tells bled into full drafts. The fills pass a deterministic AI-tell
+screen (`AI_TELL_PATTERNS`) with one retry. The visa paragraph for the right
+country is still parsed out of `profile/cover_letter_rules.md`. Output is a
+styled `.docx` via the `docx` npm library at
+`output/<date>_<company>_<title>.docx`.
 
 Written in Node specifically because the `docx` library has better fidelity
 for the styling spec (Calibri, navy headers, exact margins) than the Python
 alternatives the user evaluated.
 
+Exports `cleanTitle`, `parseTemplate`, `renderTemplate`, `findTells`,
+`staticPlaceholderValues`, `buildDocx` for offline checks; `main()` runs only
+when invoked as a script (`require.main === module`).
+
 ### Module-level constants
 
 | Name | Purpose |
 |---|---|
-| `ROOT`, `DATA_DIR`, `OUTPUT_DIR`, `PROFILE_DIR`, `PIPELINE_PATH`, `REGISTRY_PATH`, `LOG_PATH`, `RESUME_PATH`, `CL_RULES_PATH` | Path constants. |
+| `ROOT`, `DATA_DIR`, `OUTPUT_DIR`, `PROFILE_DIR`, `PIPELINE_PATH`, `REGISTRY_PATH`, `LOG_PATH`, `CL_TEMPLATE_PATH`, `CL_RULES_PATH` | Path constants. `CL_TEMPLATE_PATH` = `profile/cover_letter_template.txt`. |
 | `API_KEY` | Read from `process.env.ANTHROPIC_API_KEY`; exits 1 if unset. |
 | `CL_MODEL` | `"claude-sonnet-4-6"`. |
-| `MAX_TOKENS` | 4000. |
+| `MAX_TOKENS` | 1000 — fills are a sentence or two each. |
 | `COUNTRY_NAME_TO_CODE` | `{"canada": "CA", "ireland": "IE", "united kingdom": "UK", "uk": "UK"}` — used by `parseVisaParagraphs` to match `### <country>` headings. **US is intentionally absent** (US citizen → no work-auth paragraph), so US jobs produce no visa section. |
-| `WORD_CAP` | 380 — hard cap; over-cap drafts get one trim retry. |
+| `PLACEHOLDER_RE` | `/<([^<>\n]+)>/g` — a template placeholder. |
+| `AI_TELL_PATTERNS` | `[regex, label]` pairs a Claude fill must not match: em/en dashes, semicolons, `!`, angle brackets, and stock LLM vocabulary (`delve`, `leverage`, `robust`, `seamless`, `ecosystem`, `spearhead`, `not just X`, intensifiers, …). Deterministic so the rule holds regardless of the prompt. |
 
 ### Functions
 
 #### Helpers
 - `loadJson(p) / saveJson(p, data)` — read/write JSON.
 - `todayISO()` — local-time `YYYY-MM-DD`. Uses local components rather than `toISOString()` so the filename date matches `todayLong()` around midnight.
-- `todayLong()` — `"May 18, 2026"` for the letter body.
+- `todayLong()` — `"May 18, 2026"` for the `<Date>` placeholder.
 - `uuidv4()` — RFC 4122 v4 UUID for log entries.
 - `appendLog(entry)` — adds a UUID + timestamps + writes to `data/process_log.json`.
 - `slugify(str)` — non-alphanum → `_`, trim underscores. Used for filenames.
@@ -2730,20 +2740,62 @@ following `### ` to bound its capture, so without this it would swallow any
 trailing comment/rule that separates the section from the next `## ` — which
 previously leaked into Ireland letters (Ireland being the last subsection).
 
-#### `buildSystem(resumeText, rulesText)`
-Constructs the Claude system prompt: resume, the full rules document, the
-required JSON output schema (`re_line`, `opening`, `body_paragraphs`,
-`closing`), and the explicit "do not produce a visa paragraph" instruction
-— the visa paragraph is appended server-side after the signature.
+#### `staticPlaceholderValues(job)`
+Map of lowercase placeholder name → mechanical value: `date` (`todayLong()`),
+`job title` / `title` (`cleanTitle(job.title)`), `company` / `company name`.
+A placeholder whose name is a key here is never sent to Claude.
 
-#### `buildDocx(content, outputPath, visaText = null)` — async
-Assembles the `.docx` via the `docx` library:
+#### `cleanTitle(title)`
+Strips board decoration the old Claude-written `Re:` line used to drop: a
+trailing parenthetical naming a location / work model / requisition ID
+(`"(Remote - US)"`, `"(R12345)"`), then a trailing `", Remote"`, then a
+trailing `" - Remote"` / `" | Remote"`. Other parentheticals (`"(Platform)"`)
+are kept. Falls back to the raw title if stripping empties it. Finally, any
+em/en dash (`—`/`–`) becomes a plain hyphen, since a dash in the `Re:` line reads
+as an AI tell.
 
-- Header: centered "Johnny Ray Blanton III" in 14pt navy bold.
-- Contact line centered in 9.5pt.
-- Date (computed locally — never trust Claude's date), salutation, bold `Re:` line.
-- Body paragraphs in 10.5pt Calibri, soft spacing.
-- "Sincerely," + bold name.
+#### `parseTemplate(text, staticValues)` → `{ lines, slots }`
+Splits the template into lines (CRLF-normalized, trailing whitespace trimmed)
+and collects the Claude slots: each distinct non-static placeholder, in order,
+as `{ id: "1"…, raw: "<…>", brief: inner text }`. A placeholder repeated
+verbatim is one slot.
+
+#### `renderTemplate(lines, staticValues, slots, fills)`
+Substitutes static values and per-slot text (`fills` keyed by slot id) into
+the lines. Also used with `[[BLANK n]]` markers to build the prompt preview.
+
+#### `findTells(text)` / `checkFills(slots, fills)`
+`findTells` returns the labels of every `AI_TELL_PATTERNS` match.
+`checkFills` returns human-readable problems: a missing fill, any tells, or a
+fill over 60 words.
+
+#### `buildFillSystem()` / `buildFillUser(job, preview, slots, feedback)`
+The fill prompt. System: fill only the blanks; continue the surrounding
+sentence grammatically; follow the brief but never copy its example; be
+specific to this JD; match the letter's plain voice; make **no** claims about
+the candidate (the static letter does that); the banned-word list. User: the
+whole letter with `[[BLANK n]]` markers, each blank's brief, company / title /
+location, the JD, and — on retry — the problems to fix. Output is JSON
+`{"1": "...", ...}`. The resume is deliberately **not** sent.
+
+#### `parseJsonObject(text)` / `normalizeFill(text)`
+Tolerant JSON extraction (fenced or bare); whitespace-collapse and strip
+wrapping quotes from a fill.
+
+#### `fillSlots(job, lines, staticValues, slots)` — async → `{ fills, problems }`
+Calls Claude; if `checkFills` reports problems (or the JSON doesn't parse),
+retries **once** with them named. Returns the second answer either way, with
+any remaining problems. No slots → no API call.
+
+#### `buildDocx(lines, outputPath, visaText = null)` — async
+Renders the **filled template line by line**, so the `.docx` mirrors the
+template file. Styling is positional:
+
+- Line 1: centered 14pt navy bold (name header).
+- Line 2: centered 9.5pt (contact line).
+- A line starting `Re:`: bold.
+- The last non-empty line (signature): bold.
+- Every other non-empty line: 10.5pt Calibri paragraph. Each blank line: a spacer.
 - Visa paragraph (if any) prefixed with `"Note: "` after the signature.
 - US-Letter page size with explicit margins.
 
@@ -2753,16 +2805,14 @@ Writes the file via `Packer.toBuffer` + `fs.writeFileSync`.
 - Parses `--job-id UUID` and optional `--country CA|IE`.
 - Loads the job; exits 1 if not found.
 - Derives the country from `--country` (passed by `run.py`/`serve.py` from the Python SSOT) or, when absent, by shelling out to `python scripts/geography.py "<location>"` — the same `config.derive_country` logic, so no parallel JS derivation. Maps `CA`/`IE` → the matching visa paragraph; `US`/`OTHER` → none.
-- Loads + reads resume.md, cover_letter_rules.md; exits 1 if either is missing.
+- Loads `cover_letter_template.txt`; exits 1 if missing. `cover_letter_rules.md` is read only when a country paragraph is wanted (missing file → paragraph omitted with a note).
 - Resolves the country-specific visa paragraph (replaces `[Company Name]` placeholders); logs whether one was applied.
-- Calls Claude with the build prompts.
-- Parses the JSON response; on parse failure, exits 1 with the raw response.
-- Counts words; if over 380, sends a strict trim prompt and replaces `content` with the trimmed JSON. (Even if the trim still overshoots, the trimmed version is used.)
+- `fillSlots`; exits 1 if any slot is still empty after the retry. Remaining tells are reported but don't block.
 - Filename: `<YYYY-MM-DD>_<Company>_<Title>.docx` with `_v2`, `_v3`, ... appended on same-day collisions.
 - Calls `buildDocx`, writes the file.
 - Updates the job record (`cover_letter_generated=true`, version bump, `cover_letter_path`, `pipeline_status="cover_letter_ready"`).
 - Logs a `cover_letter_generated` event.
-- Prints a post-generation checklist (word count, paragraph count, visa-applied note, manual verification reminders).
+- Prints a post-generation checklist (the `Re:` title, each fill, any tells that survived the retry, visa-applied note, manual verification reminders).
 
 ---
 

@@ -1,0 +1,16 @@
+Your Name
++1 555 555 5555  |  you@example.com  |  linkedin.com/in/your-handle
+<Date>
+
+Hiring Manager
+
+Re: <Job Title>
+
+Opening sentence in your own words, ending with a hook into <Insert Job Description specific reference: (ex. what the platform team is building: a self-serve data layer every analytics workload can run on.)>
+Body paragraph one, written once by you and reused verbatim in every letter.
+Body paragraph two, also static.
+I'd welcome the chance to discuss how my experience maps to the challenges <Company> is solving.
+
+Sincerely,
+
+Your Name
