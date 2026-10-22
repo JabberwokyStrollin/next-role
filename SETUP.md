@@ -75,8 +75,9 @@ Edit these files in `profile/`:
 
 | File | What it controls |
 |---|---|
-| `resume.md` | Your resume — injected into the cover-letter prompt and the comp-estimate prompt. |
-| `cover_letter_rules.md` | Tone, section structure, projects to reference, work-authorization paragraphs. |
+| `resume.md` | Your resume — injected into the comp-estimate and answer-questions prompts. |
+| `cover_letter_template.txt` | Your cover letter, written once, verbatim. Per job, only the `<...>` placeholders change: `<Date>`, `<Job Title>`, `<Company>` (or `<Company Name>`, `<Title>`) are filled mechanically; **any other placeholder is a brief for Claude** — write what you want there inside the brackets, optionally with an example in parentheses. Layout is line-based: line 1 = name header, line 2 = contact line, a `Re:` line is bold, the last line (signature) is bold, every other non-empty line is a paragraph and each blank line is a spacer. |
+| `cover_letter_rules.md` | Now only read for its **Locked Visa / Work Authorization Paragraphs** section (appended after the signature for CA/IE roles). The tone/structure sections no longer drive generation. |
 | `scoring_rubric.md` | Claude system prompt for JD scoring — your seniority and domain criteria, plus the gov-screen role-exposure classification. |
 | `stack_keywords.yaml` | Keyword weights for mechanical stack scoring **and** the crawl pre-filter. |
 | `drill_focus_<language>.md` | **Optional.** Aims code-drill generation at one upcoming interview (domains, question style, gotchas to use as twists). One per language — `drill_focus_java.md`, `drill_focus_python.md`. Absent = untargeted drills. See *Code drills* below. |
