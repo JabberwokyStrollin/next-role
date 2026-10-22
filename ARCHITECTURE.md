@@ -2750,7 +2750,9 @@ Strips board decoration the old Claude-written `Re:` line used to drop: a
 trailing parenthetical naming a location / work model / requisition ID
 (`"(Remote - US)"`, `"(R12345)"`), then a trailing `", Remote"`, then a
 trailing `" - Remote"` / `" | Remote"`. Other parentheticals (`"(Platform)"`)
-are kept. Falls back to the raw title if stripping empties it.
+are kept. Falls back to the raw title if stripping empties it. Finally, any
+em/en dash (`—`/`–`) becomes a plain hyphen, since a dash in the `Re:` line reads
+as an AI tell.
 
 #### `parseTemplate(text, staticValues)` → `{ lines, slots }`
 Splits the template into lines (CRLF-normalized, trailing whitespace trimmed)

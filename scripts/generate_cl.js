@@ -194,7 +194,8 @@ function cleanTitle(title) {
   // "Engineer - Data, Remote" keeps "Data").
   t = t.replace(/,\s*([^,]*)$/, (m, tail) => LOC.test(tail) ? "" : m);
   t = t.replace(/\s+[-–—|]\s+([^-–—|]*)$/, (m, tail) => LOC.test(tail) ? "" : m);
-  return t.trim() || title.trim();
+  // Em/en dashes in the title read as an AI tell in the letter — use a plain hyphen.
+  return (t.trim() || title.trim()).replace(/[—–]/g, "-");
 }
 
 // Returns { lines, slots } — lines are the raw template lines; slots are the
