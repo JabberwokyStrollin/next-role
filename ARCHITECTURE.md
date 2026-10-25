@@ -2808,7 +2808,8 @@ Writes the file via `Packer.toBuffer` + `fs.writeFileSync`.
 - Loads `cover_letter_template.txt`; exits 1 if missing. `cover_letter_rules.md` is read only when a country paragraph is wanted (missing file → paragraph omitted with a note).
 - Resolves the country-specific visa paragraph (replaces `[Company Name]` placeholders); logs whether one was applied.
 - `fillSlots`; exits 1 if any slot is still empty after the retry. Remaining tells are reported but don't block.
-- Filename: `<YYYY-MM-DD>_<Company>_<Title>.docx` with `_v2`, `_v3`, ... appended on same-day collisions.
+- Filename: a **regeneration reuses the job's existing `cover_letter_path` and overwrites that file in place** (the employer sees the filename, and a `_v2` suffix reads as a recycled letter). A first generation gets `<YYYY-MM-DD>_<Company>_<Title>.docx`, with a bare `_2`, `_3`, ... only when that name already belongs to another job's letter (a same-day re-listing), so neither is clobbered.
+- If Windows refuses the write because the file is open in Word (`EBUSY`/`EPERM`), exits 1 with a "close it in Word" message before touching the job record.
 - Calls `buildDocx`, writes the file.
 - Updates the job record (`cover_letter_generated=true`, version bump, `cover_letter_path`, `pipeline_status="cover_letter_ready"`).
 - Logs a `cover_letter_generated` event.

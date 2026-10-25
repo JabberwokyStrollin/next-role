@@ -547,7 +547,7 @@ prompt.
 |---|---|---|
 | Ingest + score one job | Sonnet 4.5 | ~$0.013 |
 | Research one company | Haiku 4.5 + 1 web search | ~$0.03–0.05 |
-| Generate cover letter (fills template placeholders only) | Sonnet 4.6 | ~$0.01 |
+| Generate cover letter (fills template placeholders only) | Sonnet 4.6 | ~$0.01; $0 when the template has only `<Date>`/`<Job Title>`/`<Company>` (no API call) |
 | Generate comp estimate | Opus 4.7 | ~$0.15–0.20 |
 | Answer one application question | Sonnet 4.6 | ~$0.02–0.05 |
 | Generate a code drill (3–6 part series) | Sonnet 4.6 | ~$0.01–0.02 |

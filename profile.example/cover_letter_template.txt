@@ -6,7 +6,7 @@ Hiring Manager
 
 Re: <Job Title>
 
-Opening sentence in your own words, ending with a hook into <Insert Job Description specific reference: (ex. what the platform team is building: a self-serve data layer every analytics workload can run on.)>
+Opening sentence in your own words. This maps naturally to <Insert a super high-level description of what the team or company is building, plain enough for a recruiter to take in at a glance. Shape: "what the TEAM team at COMPANY is building" (or "what COMPANY is building" if no team is named), a colon, then a plain noun phrase of at most 8 words. No lists of users, data types, or workloads, and no internal jargon. End with a period: (ex. what the platform team is building: a reliable, self-serve data platform.)>
 Body paragraph one, written once by you and reused verbatim in every letter.
 Body paragraph two, also static.
 I'd welcome the chance to discuss how my experience maps to the challenges <Company> is solving.

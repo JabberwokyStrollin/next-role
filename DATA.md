@@ -110,7 +110,7 @@ status transitions, and the `/today` apply queue all read from this file.
 | `seniority_raw` | int 0-25 | optional | Pre-cap value (only present when `apply_title_cap` reduced the score). Audit trail. |
 | `seniority_cap_title` | string | optional | The title that triggered the cap. Only present when `seniority_raw` is. |
 | `cover_letter_generated` | bool | ✅ | `false` at ingest; `true` after `generate_cl.js` runs. |
-| `cover_letter_version` | int | ✅ | `0` at ingest; bumped on each regen. Drives the filename suffix. |
+| `cover_letter_version` | int | ✅ | `0` at ingest; bumped on each regen. Internal count only (the `CL vN ready` badge); it doesn't affect the filename, since a regen overwrites the file at `cover_letter_path`. |
 | `cover_letter_path` | string | optional | POSIX-style path under `output/` (e.g. `"output/2026-05-15_EA_Senior_Software_Engineer.docx"`). Present once `cover_letter_generated` is `true`. |
 | `pipeline_status` | enum | ✅ | `"active"` (ingested, no CL yet), `"cover_letter_ready"` (CL exists), `"applied"` (logged), `"archived"` (manually retired or no-sponsorship sweep). |
 | `pay_range_min` | int / `null` | ✅ | Always `null` in current builds — reserved for future structured-pay parsing. |
