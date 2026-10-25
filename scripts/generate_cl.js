@@ -510,25 +510,43 @@ async function main() {
   const filledLines = renderTemplate(lines, staticValues, slots, fills);
 
   // ── Build docx ────────────────────────────────────────────────────────────
-  // Filename: YYYY-MM-DD_Company_Title.docx; same-day regen → _v2, _v3, ...
-  // Date prefix prevents collisions across different jobs at the same company,
-  // and gives same-day regenerations a stable disambiguator.
+  // Filename: YYYY-MM-DD_Company_Title.docx. A regeneration overwrites the
+  // job's existing file in place: the employer sees the filename, and a
+  // "_v2"/"_v3" suffix reads as a recycled letter. Only a first generation
+  // picks a new name; a clash with ANOTHER job's file (a same-day re-listing
+  // of the same title) gets a bare "_2", "_3", ... so neither is clobbered.
   const version    = (job.cover_letter_version || 0) + 1;
-  const dateStr    = todayISO();
-  const slug       = `${slugify(job.company_name)}_${slugify(job.title)}`;
-  let filename     = `${dateStr}_${slug}.docx`;
-  let collisionN   = 1;
-  while (fs.existsSync(path.join(OUTPUT_DIR, filename))) {
-    collisionN += 1;
-    filename = `${dateStr}_${slug}_v${collisionN}.docx`;
+  const prevName   = /^output\/[^/\\]+\.docx$/.test(job.cover_letter_path || "")
+    ? job.cover_letter_path.slice("output/".length) : null;
+  let filename;
+  if (prevName) {
+    filename = prevName;
+  } else {
+    const dateStr  = todayISO();
+    const slug     = `${slugify(job.company_name)}_${slugify(job.title)}`;
+    filename       = `${dateStr}_${slug}.docx`;
+    let collisionN = 1;
+    while (fs.existsSync(path.join(OUTPUT_DIR, filename))) {
+      collisionN += 1;
+      filename = `${dateStr}_${slug}_${collisionN}.docx`;
+    }
   }
   const outputPath = path.join(OUTPUT_DIR, filename);
   // POSIX-style relative path; serve.py converts to OS-native when opening.
   const relPath    = `output/${filename}`;
 
   console.log("  Assembling .docx...");
-  await buildDocx(filledLines, outputPath, visaText);
-  console.log(`  Written to: ${outputPath}`);
+  try {
+    await buildDocx(filledLines, outputPath, visaText);
+  } catch (e) {
+    // Windows refuses to overwrite a .docx that Word has open.
+    if (e.code === "EBUSY" || e.code === "EPERM") {
+      console.error(`Error: ${filename} is open in another program. Close it in Word and regenerate.`);
+      process.exit(1);
+    }
+    throw e;
+  }
+  console.log(`  ${prevName ? "Overwrote" : "Written to"}: ${outputPath}`);
 
   // ── Update pipeline record ────────────────────────────────────────────────
   const updatedJobs = jobs.map(j => j.job_id === jobId
