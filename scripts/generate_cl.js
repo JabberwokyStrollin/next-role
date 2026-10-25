@@ -498,7 +498,9 @@ async function main() {
   }
 
   // ── Fill the Claude placeholders ─────────────────────────────────────────
-  console.log(`  Filling ${slots.length} template placeholder(s) with Claude...`);
+  console.log(slots.length
+    ? `  Filling ${slots.length} template placeholder(s) with Claude...`
+    : "  No Claude placeholders in the template; no API call.");
   const { fills, problems } = await fillSlots(job, lines, staticValues, slots);
   const missing = slots.filter(s => !fills[s.id]);
   if (missing.length) {
