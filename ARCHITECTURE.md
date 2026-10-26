@@ -141,6 +141,7 @@ file.
 | `_DIRECT_INVITATION_PATTERNS` | `list[Pattern]` | Phrases that invite the candidate to talk **now** — "I'd love to chat", "self-schedule", "requesting that you schedule", "schedule your interview", "your availability", Calendly. Consumed by `detect_direct_invitation`, which `classify_inbox_email` checks **before** the acknowledgement bail-out. Every pattern is second-person and present-tense on purpose: an acknowledgement's advancement language is conditional future ("if your experience is a match, one of our team members will contact you to schedule a call"), so it can't fake them. A phrase that boilerplate *could* produce — "a recruiter will reach out to schedule an initial phone screen" — belongs in the suppressible `_INTERVIEW_PATTERNS`, not here. |
 | `_POSITION_FILLED_PATTERNS` / `_REJECTION_PATTERNS` / `_OFFER_PATTERNS` / `_INTERVIEW_PATTERNS` | `list[Pattern]` | Deterministic phrase rules for `classify_inbox_email`. Position-filled → rejection reason `position_filled`; general rejection → `generic`; offer → `offer`; advancement (recruiter screen / interview invitation) → signal `interview`. "invite" counts only when followed by an interview/call word (so "invite you to follow us on LinkedIn" is ignored). The screen phrase matches "…screen" **or** "…interview" ("Recruiter Phone Interview") because a calendar invitation is titled that way and contains none of the scheduling phrases — the scheduling already happened. |
 | `_CONDITIONAL_LEAD_RE` | `Pattern` | Guard used by `_first_match_evidence(..., skip_conditional=True)` to skip rejection phrases embedded in a conditional clause ("If you are not selected …") — application-confirmation boilerplate, not a real rejection. |
+| `_HYPOTHETICAL_OFFER_LEAD_RE` | `Pattern` | Guard passed as `skip_lead_re` when matching `_OFFER_PATTERNS`: skips an offer phrase whose lead-in is hypothetical or negated ("any", "before", "until", "prior to", "never", "without", "no"). Life360's anti-recruiting-scam footer — on every mail it sends — says "before you've received and signed any formal offer", and staged an acknowledgement as an **offer**. |
 | `_ADVANCE_IN_PROGRESS` | `frozenset` | Statuses (`recruiter_screen`, `interview`) at which a rejection is an interview failure and a further advancement email promotes the screen. Consumed by `suggest_status_transition`. |
 | `GOV_SCREEN_FLAGGED_REGIONS` | `list[str]` | User-editable ISO 3166-1 alpha-2 region codes for the gov/defense screen's tier_c escalation. Empty by default (region logic dormant). |
 | `GOV_SCREEN_FLAG_PENALTY_PCT` | `int` | Apply-rank penalty (%) for a gov-screen `flag` result. Consumed by `gov_screen_penalty_factor` / `apply_rank_score`. |
@@ -376,7 +377,8 @@ Deterministically classify an inbox email's *own signal*. Returns
 `("needs_reply", None, …)`, or
 `(None, None, "")` when no signal is found (including application-received
 confirmations). Order is **rejection → offer → direct invitation →
-acknowledgement bail-out → interview → needs_reply** so a rejection that mentions
+acknowledgement bail-out → interview → needs_reply** (the offer check is itself
+skipped for an automated acknowledgement — see below) so a rejection that mentions
 "interview"/"offer" isn't mislabeled, and a rejection or invitation containing a
 question keeps its stronger signal.
 
@@ -389,15 +391,23 @@ and its "questions? just reply" line reads as a human question. Both guards are
 load-bearing: placing it **after** rejection/offer keeps real rejections (which
 routinely open with "thank you for applying"), and requiring an **automated
 sender** keeps a human recruiter's *"Thanks for applying! Are you open to
-relocating?"* — a real question the operator must answer. This is only what the email says;
+relocating?"* — a real question the operator must answer. The same automated-acknowledgement
+test also **skips the offer check** (but never the rejection check): no real offer reads as an
+application receipt, whereas acknowledgement boilerplate — anti-scam footers, offer-letter FAQ
+text — mentions offers freely. This is only what the email says;
 the concrete status the operator applies is resolved from the application's
 current status by `suggest_status_transition` (below). Per the "deterministic
 rules in code" principle, the phrase rules live here (the SSOT), never in a
 prompt — the scanner makes no LLM call. Matches are staged for one-click operator
 review, so the rules bias toward recall. `_first_match_evidence(text, patterns,
-skip_conditional=False)` is the private helper returning a context snippet around
-the first matching pattern; `skip_conditional=True` ignores matches inside a
-conditional clause (the "If you are not selected …" confirmation boilerplate).
+skip_conditional=False, skip_lead_re=None)` is the private helper returning a context
+snippet around the first matching pattern; `skip_conditional=True` ignores matches inside a
+conditional clause (the "If you are not selected …" confirmation boilerplate), and
+`skip_lead_re` adds a further lead-in to skip on (`_HYPOTHETICAL_OFFER_LEAD_RE` for offers).
+It folds curly apostrophes to straight ones before matching, so patterns written with
+`won't` also match the `won’t` HTML mail usually carries. The generic-rejection set covers
+contractions as well as a bare `not` — "Unfortunately … we won't be able to invite you to the
+next round" (Whatnot) matched nothing while the `unfortunately` rule required the word `not`.
 
 #### `is_ats_sender(from_header) -> bool`
 True when the From header is an ATS platform's **relay** domain. Narrower than `is_automated_sender` (which also fires on `no-reply@`-style local parts): this one answers *"is a hiring system speaking for a company"*, which is what lets `inbox_scan.company_matches` trust a company name found in the subject line.

@@ -1664,7 +1664,11 @@ _REJECTION_PATTERNS: list[_re.Pattern] = [
     _re.compile(r"\bno\s+longer\s+(?:be\s+)?(?:considering|under\s+consideration)\b", _re.I),
     _re.compile(r"\bnot\s+(?:be\s+)?extend(?:ing)?\s+an?\s+offer\b", _re.I),
     _re.compile(r"\bdecided\s+not\s+to\s+(?:move|proceed|continue)\b", _re.I),
-    _re.compile(r"\bunfortunately\b[^.!?\n]{0,60}?\b(?:not|other\s+candidates|another\s+candidate)\b", _re.I),
+    # "won't"/"can't"/"unable" as well as "not": Whatnot's rejection reads
+    # "Unfortunately, … we won't be able to invite you to the next round", and a
+    # bare `not` never matches inside a contraction, so it went unstaged.
+    _re.compile(r"\bunfortunately\b[^.!?\n]{0,60}?\b(?:not|won't|can't|cannot|unable|other\s+candidates|another\s+candidate)\b", _re.I),
+    _re.compile(r"\b(?:won't|will\s+not|can't|cannot|unable\s+to|not\s+able\s+to)\s+(?:be\s+able\s+to\s+)?(?:invite|move|advance|progress)\s+you\b", _re.I),
     _re.compile(r"\bwish\s+you\s+(?:the\s+best|luck)\s+(?:in|with)\s+your\b", _re.I),
 ]
 
@@ -1773,19 +1777,33 @@ _OFFER_PATTERNS: list[_re.Pattern] = [
 _CONDITIONAL_LEAD_RE = _re.compile(
     r"\b(?:if|should|unless|whether|in\s+case|in\s+the\s+event)\b[^.!?\n]{0,25}$", _re.I)
 
+# An offer phrase in a hypothetical or negated clause is not an offer. Life360's
+# anti-recruiting-scam footer — appended to every mail it sends, acknowledgements
+# included — says "we will never request your bank details … before you've
+# received and signed any formal offer", and was staged as an OFFER.
+_HYPOTHETICAL_OFFER_LEAD_RE = _re.compile(
+    r"\b(?:any|before|until|prior\s+to|never|without|no)\b[^.!?\n]{0,40}$", _re.I)
+
 
 def _first_match_evidence(text: str, patterns: list[_re.Pattern],
-                          skip_conditional: bool = False) -> str | None:
+                          skip_conditional: bool = False,
+                          skip_lead_re: _re.Pattern | None = None) -> str | None:
     """Return a short snippet around the first matching pattern, or None. When
     ``skip_conditional`` is set, a match whose lead-in is a conditional clause
     ("if you are not selected …") is skipped — that phrasing is confirmation
-    boilerplate, not an actual status change."""
+    boilerplate, not an actual status change. ``skip_lead_re`` adds a further
+    lead-in to skip on (see `_HYPOTHETICAL_OFFER_LEAD_RE`).
+
+    Curly apostrophes are folded to straight ones first, so a pattern written
+    as ``won't`` also matches the ``won’t`` most HTML mail actually contains."""
+    text = text.replace("’", "'").replace("‘", "'")
     for pat in patterns:
         for m in pat.finditer(text):
-            if skip_conditional:
-                lead = text[max(0, m.start() - 30):m.start()]
-                if _CONDITIONAL_LEAD_RE.search(lead):
-                    continue
+            lead = text[max(0, m.start() - 50):m.start()]
+            if skip_conditional and _CONDITIONAL_LEAD_RE.search(lead[-30:]):
+                continue
+            if skip_lead_re is not None and skip_lead_re.search(lead):
+                continue
             start = max(0, m.start() - 25)
             end   = min(len(text), m.end() + 25)
             return " ".join(text[start:end].split())
@@ -1982,9 +2000,17 @@ def classify_inbox_email(subject: str, body: str,
     if ev:
         return "rejected", "generic", ev
 
-    ev = _first_match_evidence(haystack, _OFFER_PATTERNS)
-    if ev:
-        return "offer", None, ev
+    # An automated application-received acknowledgement is never an offer, so
+    # its boilerplate (anti-scam footers, "offer letter" FAQ text) can't fake
+    # one. Unlike rejections — which routinely open with "thank you for
+    # applying" — no real offer reads as an application receipt.
+    is_auto_ack = bool(is_automated_sender(from_header)
+                       and detect_acknowledgement(subject, body))
+    if not is_auto_ack:
+        ev = _first_match_evidence(haystack, _OFFER_PATTERNS,
+                                   skip_lead_re=_HYPOTHETICAL_OFFER_LEAD_RE)
+        if ev:
+            return "offer", None, ev
 
     # Everything below is a WEAK signal that acknowledgement boilerplate fakes
     # convincingly — but a real invitation OPENS with that same boilerplate, so
@@ -2001,7 +2027,7 @@ def classify_inbox_email(subject: str, body: str,
     #     definition, whereas a human recruiter opening with "Thanks for
     #     applying! Are you open to relocating?" is asking a real question, and
     #     suppressing that would drop the one signal the operator must act on.
-    if is_automated_sender(from_header) and detect_acknowledgement(subject, body):
+    if is_auto_ack:
         return None, None, ""
 
     ev = _first_match_evidence(haystack, _INTERVIEW_PATTERNS)
