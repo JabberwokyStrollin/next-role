@@ -1,13 +1,17 @@
 """
 linkedin_fetch.py — IMAP fetch of LinkedIn job-alert emails.
 
-Connects via IMAP, searches the inbox for unseen messages from senders in
-data/email_config.json, parses each message's HTML for job listings, and
-writes them to data/email_staged.json for the /today UI to render.
+Connects via IMAP, searches the inbox for messages from senders in
+data/email_config.json received within the last FETCH_WINDOW_DAYS days, parses
+each message's HTML for job listings, and writes them to data/email_staged.json
+for the /today UI to render.
 
-After parsing, marks each fetched message \\Seen on the server and records
-its Message-ID in data/email_state.json so a re-fetch (or unflag) won't
-re-stage the same email.
+Read-flag independence. The server \\Seen flag is neither consulted nor set:
+the search has no UNSEEN term, every fetch uses BODY.PEEK, and no STORE is
+issued. Opening an alert in your mail client therefore can't hide it from us
+(it used to — the search was UNSEEN-only), and we never change what you've
+read. Dedup is data/email_state.json's Message-ID list alone, the same model
+inbox_scan.py uses.
 
 Credentials via env vars (matches scripts/config.py ANTHROPIC_API_KEY pattern):
     NEXTROLE_IMAP_HOST          (e.g. imap.gmail.com)
@@ -16,7 +20,7 @@ Credentials via env vars (matches scripts/config.py ANTHROPIC_API_KEY pattern):
 
 Usage:
     python scripts/linkedin_fetch.py
-    python scripts/linkedin_fetch.py --dry-run     # parse only, no \\Seen, no state write
+    python scripts/linkedin_fetch.py --dry-run     # parse only, no state write
     python scripts/linkedin_fetch.py --sample FILE # parse a local .eml (no IMAP)
 
 Output (last line of stdout, machine-readable):
@@ -32,7 +36,7 @@ import os
 import re
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.header import decode_header, make_header
 from pathlib import Path
 
@@ -365,6 +369,11 @@ def _fetch_jd_text(url: str) -> tuple[str, bool, str]:
 # run, so it stays well under serve.py's per-action subprocess caps.
 IMAP_TIMEOUT_SECONDS = 60
 
+# Look-back window (days) for alert fetches. Read state is ignored, so this —
+# plus seen_message_ids — is what bounds a fetch. Long enough to cover a week or
+# more away from the pipeline; an alert older than this is stale anyway.
+FETCH_WINDOW_DAYS = 14
+
 
 def get_creds() -> tuple[str, str, str]:
     host = os.environ.get("NEXTROLE_IMAP_HOST", "").strip()
@@ -389,8 +398,59 @@ def get_creds() -> tuple[str, str, str]:
     return host, user, pw
 
 
-def fetch_via_imap(dry_run: bool = False) -> int:
-    """Fetch unseen LinkedIn alerts from IMAP. Returns count of new staged jobs."""
+# Messages per header FETCH (shared with inbox_scan.py, which imports it). Both
+# mailbox tools need the headers of every message in their window (the
+# Message-ID dedup key is only knowable after fetching), but one
+# FETCH per message is one network round trip per message: a routine 400-message
+# 14-day window cost ~170s on Gmail, which — plus body fetches and login —
+# overran serve.py's 300s subprocess timeout and surfaced as "Inbox scan timed
+# out after 300s". Batched, the same window is a few round trips (~4s).
+HEADER_BATCH_SIZE = 100
+
+# Leading sequence number of an untagged FETCH response line: b'22546 (BODY[...'
+_FETCH_SEQ_RE = re.compile(rb"^\s*(\d+)\s+\(")
+
+
+def _fetch_header_batch(M: imaplib.IMAP4, seq_nums: list[bytes]) -> dict[bytes, bytes]:
+    """Peek the match-relevant headers of many messages in one FETCH round trip.
+
+    Returns ``{sequence_number: raw_header_bytes}``. Messages the server omits
+    are simply absent — the caller skips them, exactly as it skipped a per-message
+    fetch that came back non-OK. ``BODY.PEEK`` keeps the \\Seen guarantee."""
+    if not seq_nums:
+        return {}
+    typ, resp = M.fetch(
+        b",".join(seq_nums), "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT MESSAGE-ID DATE)])")
+    if typ != "OK" or not resp:
+        return {}
+    out: dict[bytes, bytes] = {}
+    for item in resp:
+        # Each message is a (prefix, literal) tuple; the b')' terminators between
+        # them are plain bytes and carry no payload.
+        if not isinstance(item, tuple) or len(item) < 2 or not item[1]:
+            continue
+        m = _FETCH_SEQ_RE.match(item[0] or b"")
+        if m:
+            out[m.group(1)] = item[1]
+    return out
+
+
+def _since_date(window_days: int) -> str:
+    """IMAP SINCE token (DD-Mon-YYYY) for `window_days` ago, UTC."""
+    dt = datetime.now(timezone.utc) - timedelta(days=window_days)
+    return dt.strftime("%d-%b-%Y")
+
+
+def fetch_via_imap(dry_run: bool = False, window_days: int | None = None) -> int:
+    """Fetch LinkedIn alerts received in the last ``window_days`` days that we
+    haven't harvested yet. Returns count of new staged jobs.
+
+    Read state is irrelevant in both directions: the search is SINCE + FROM (no
+    UNSEEN), so an alert you already opened is still picked up, and the mailbox
+    is selected read-only with PEEK fetches, so nothing is marked read.
+    ``seen_message_ids`` is the only cross-run dedup."""
+    if window_days is None:
+        window_days = FETCH_WINDOW_DAYS
     host, user, pw = get_creds()
     senders = load_allowlist()
     seen    = load_seen_ids()
@@ -412,28 +472,44 @@ def fetch_via_imap(dry_run: bool = False) -> int:
         print(f"ERROR: IMAP login failed: {e}")
         sys.exit(2)
 
-    M.select("INBOX")
+    M.select("INBOX", readonly=True)
+    since = _since_date(window_days)
 
     new_jobs        = []
     new_message_ids = set()
-    fetched_uids    = []
 
     for sender in senders:
-        typ, data = M.search(None, "UNSEEN", "FROM", f'"{sender}"')
+        typ, data = M.search(None, "SINCE", since, "FROM", f'"{sender}"')
         if typ != "OK":
             print(f"  [warn] search failed for {sender}: {typ}")
             continue
         uids = data[0].split() if data and data[0] else []
-        print(f"  {sender}: {len(uids)} unseen message(s)")
-        for uid in uids:
-            typ, msg_data = M.fetch(uid, "(RFC822)")
+
+        # Message-IDs are only knowable from headers; peek them in batches so a
+        # window of already-harvested alerts costs a few round trips, and only
+        # unharvested messages download a body.
+        pending = []
+        for start in range(0, len(uids), HEADER_BATCH_SIZE):
+            batch   = uids[start:start + HEADER_BATCH_SIZE]
+            headers = _fetch_header_batch(M, batch)
+            for uid in batch:
+                raw_hdr = headers.get(uid)
+                if not raw_hdr:
+                    continue
+                mid = (email.message_from_bytes(raw_hdr).get("Message-ID") or "").strip()
+                if mid and mid in seen:
+                    continue
+                pending.append(uid)
+        print(f"  {sender}: {len(uids)} message(s) since {since}, "
+              f"{len(pending)} not yet harvested")
+
+        for uid in pending:
+            typ, msg_data = M.fetch(uid, "(BODY.PEEK[])")
             if typ != "OK" or not msg_data or not msg_data[0]:
                 continue
             raw = msg_data[0][1]
             msg = email.message_from_bytes(raw)
             mid = (msg.get("Message-ID") or "").strip()
-            if mid and mid in seen:
-                continue
             html = _extract_html(msg)
             if not html:
                 print(f"  [warn] no HTML body in message {uid.decode()}")
@@ -459,97 +535,45 @@ def fetch_via_imap(dry_run: bool = False) -> int:
                 kept += 1
 
             print(f"    msg {uid.decode()}: parsed {len(jobs_in_email)}, kept {kept}")
-            if mid and kept > 0:
+            # Record the message once it parsed into jobs, even if every one was
+            # already staged — otherwise it's re-downloaded on every fetch while
+            # it stays in the window. A message that parsed to NOTHING stays
+            # unrecorded so a parser fix picks it up on the next fetch.
+            if mid and jobs_in_email:
                 new_message_ids.add(mid)
-                fetched_uids.append(uid)
-            elif kept == 0:
-                # Parse yielded nothing usable — leave message untouched so
-                # it can be re-investigated, no \Seen mark, no Message-ID record.
-                pass
-
-    if not dry_run:
-        for uid in fetched_uids:
-            try:
-                M.store(uid, "+FLAGS", "\\Seen")
-            except Exception as e:
-                print(f"  [warn] failed to mark {uid.decode()} \\Seen: {e}")
+                seen.add(mid)
 
     try:
         M.logout()
     except Exception:
         pass
 
-    if new_jobs and not dry_run:
-        staged.extend(new_jobs)
-        save_staged(staged)
-        add_seen_ids(new_message_ids)
+    if not dry_run:
+        if new_jobs:
+            staged.extend(new_jobs)
+            save_staged(staged)
+        if new_message_ids:
+            add_seen_ids(new_message_ids)
 
     print(f"FETCHED: {len(new_jobs)}")
     return len(new_jobs)
 
 
-def reset_seen_state() -> tuple[int, int, int]:
+def reset_seen_state() -> tuple[int, int]:
     """
-    Clear local dedup state, clear the staged-jobs list, and remove \\Seen on
-    the server for messages whose Message-ID we'd previously tracked. Lets a
-    re-fetch pull the same alerts.
+    Clear local dedup state and the staged-jobs list, so the next fetch
+    re-stages every alert still inside FETCH_WINDOW_DAYS. Local-only: the fetch
+    ignores the server \\Seen flag, so there is nothing to undo on the server.
 
-    Returns (n_local_cleared, n_staged_cleared, n_server_unflagged). Preserves
-    \\Seen on any LinkedIn messages the user had naturally read outside our
-    fetch flow.
+    Returns (n_local_cleared, n_staged_cleared).
     """
-    seen_ids   = list(load_seen_ids())
-    n_local    = len(seen_ids)
-    n_staged   = len(load_staged())
-
+    n_local  = len(load_seen_ids())
+    n_staged = len(load_staged())
     if EMAIL_STATE.exists():
         EMAIL_STATE.unlink()
     if STAGED_PATH.exists():
         STAGED_PATH.unlink()
-
-    if not seen_ids:
-        return n_local, n_staged, 0
-
-    host, user, pw = get_creds()
-    print(f"Connecting to {host} to unflag {len(seen_ids)} message(s)...")
-    # Unreachable server is NOT fatal here, unlike in fetch_via_imap: the local
-    # state files are already deleted above, so we report the local reset that
-    # did happen and a server-unflag count of 0, same as a login failure.
-    try:
-        M = imaplib.IMAP4_SSL(host, timeout=IMAP_TIMEOUT_SECONDS)
-    except (TimeoutError, OSError) as e:
-        print(f"ERROR: could not connect to {host} during reset: {e}")
-        return n_local, n_staged, 0
-    try:
-        M.login(user, pw)
-    except imaplib.IMAP4.error as e:
-        print(f"ERROR: IMAP login failed during reset: {e}")
-        return n_local, n_staged, 0
-
-    M.select("INBOX")
-    n_server = 0
-    for mid in seen_ids:
-        try:
-            typ, data = M.search(None, "HEADER", "Message-ID", f'"{mid}"')
-        except Exception as e:
-            print(f"  [warn] search failed for {mid}: {e}")
-            continue
-        if typ != "OK":
-            continue
-        uids = data[0].split() if data and data[0] else []
-        for uid in uids:
-            try:
-                M.store(uid, "-FLAGS", "\\Seen")
-                n_server += 1
-            except Exception as e:
-                print(f"  [warn] failed to unflag {uid.decode()}: {e}")
-
-    try:
-        M.logout()
-    except Exception:
-        pass
-
-    return n_local, n_staged, n_server
+    return n_local, n_staged
 
 
 def rehydrate_staged() -> tuple[int, int]:
@@ -631,20 +655,21 @@ def fetch_from_sample(path: Path, dry_run: bool = False) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch LinkedIn job-alert emails via IMAP.")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Parse only; do not mark \\Seen, do not persist staged/state files.")
+                        help="Parse only; do not persist staged/state files.")
     parser.add_argument("--sample", metavar="EML_PATH",
                         help="Parse a local .eml file instead of connecting to IMAP.")
     parser.add_argument("--reset", action="store_true",
-                        help="Clear local dedup state and unflag previously-ingested messages "
-                             "on the server so they can be re-fetched. Preserves \\Seen on any "
-                             "LinkedIn alerts you'd naturally read outside the fetch flow.")
+                        help="Clear local dedup state and the staged list so the next fetch "
+                             "re-stages every alert in the look-back window.")
+    parser.add_argument("--window-days", type=int, default=FETCH_WINDOW_DAYS,
+                        help=f"Look-back window in days (default {FETCH_WINDOW_DAYS}).")
     parser.add_argument("--rehydrate", action="store_true",
                         help="Normalize URLs in existing staged rows (strip /comm/ from "
                              "LinkedIn URLs). Useful after a parser upgrade — avoids "
                              "reset + IMAP re-fetch. Does not auto-fetch JDs.")
     args = parser.parse_args()
 
-    # A socket stall partway through either IMAP path trips IMAP_TIMEOUT_SECONDS
+    # A socket stall partway through the IMAP fetch trips IMAP_TIMEOUT_SECONDS
     # (or the server drops us). Report it on the machine-readable ERROR line
     # serve.py surfaces instead of dying with a traceback.
     def _imap_guard(fn, label):
@@ -655,13 +680,9 @@ def main() -> None:
             sys.exit(2)
 
     if args.reset:
-        n_local, n_staged, n_server = _imap_guard(reset_seen_state, "reset")
-        print(
-            f"Cleared {n_local} local Message-ID(s); "
-            f"cleared {n_staged} staged row(s); "
-            f"unflagged {n_server} message(s) on server."
-        )
-        print(f"RESET: local={n_local} staged={n_staged} server={n_server}")
+        n_local, n_staged = reset_seen_state()
+        print(f"Cleared {n_local} local Message-ID(s); cleared {n_staged} staged row(s).")
+        print(f"RESET: local={n_local} staged={n_staged}")
         return
 
     if args.rehydrate:
@@ -673,7 +694,8 @@ def main() -> None:
     if args.sample:
         fetch_from_sample(Path(args.sample), dry_run=args.dry_run)
     else:
-        _imap_guard(lambda: fetch_via_imap(dry_run=args.dry_run), "fetch")
+        _imap_guard(lambda: fetch_via_imap(dry_run=args.dry_run,
+                                           window_days=args.window_days), "fetch")
 
 
 if __name__ == "__main__":
