@@ -90,7 +90,9 @@ SETUP.md.
    watch its tail update live.
 3. **LinkedIn ingest** — pull job-alert emails via IMAP, pre-filter
    them, fetch the JD body on demand for each row, ingest the ones
-   you like.
+   you like. The fetch takes every alert from the last 14 days whether
+   or not you've already opened it, and never marks mail read
+   (`python scripts/linkedin_fetch.py --window-days N` to look further back).
 4. **Cover letters & apply** — ranked apply queue. For each job:
    generate a cover letter, optionally generate a comp estimate, open
    the `.docx`, log the application. An **Applications sent today: X / N**

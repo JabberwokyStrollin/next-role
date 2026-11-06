@@ -712,8 +712,10 @@ Section IDs come from `serve.py:CHECKLIST_SECTIONS`.
 
 ## `data/email_config.json`
 
-**Role.** IMAP sender allowlist for `linkedin_fetch.py`. Only `UNSEEN`
-messages whose `FROM` matches a sender in this list get pulled in.
+**Role.** IMAP sender allowlist for `linkedin_fetch.py`. Messages received
+within `linkedin_fetch.FETCH_WINDOW_DAYS` whose `FROM` matches a sender in this
+list get pulled in, **read or unread**. Dedup is `email_state.json`, not the
+server's read flag.
 
 **Lifecycle.**
 
@@ -742,13 +744,14 @@ messages whose `FROM` matches a sender in this list get pulled in.
 ## `data/email_state.json`
 
 **Role.** Cross-run dedup state for `linkedin_fetch.py`. Records RFC 822
-`Message-ID` headers of every alert email we've already harvested, so a
-re-fetch (or a manual unflag of `\Seen`) won't re-stage the same jobs.
+`Message-ID` headers of every alert email we've already harvested. It is the
+**only** cross-run dedup: the fetch ignores the server read flag, so without
+this file every alert in the look-back window would be re-staged on each fetch.
 
 **Lifecycle.**
 
-- **Updated** by `linkedin_fetch.add_seen_ids` after every successful fetch.
-- **Cleared** entirely by `linkedin_fetch.reset_seen_state` (the `--reset` CLI flag), alongside removing `\Seen` from the corresponding messages on the server. Preserves `\Seen` on LinkedIn alerts the user read naturally.
+- **Updated** by `linkedin_fetch.add_seen_ids` after every non-dry-run fetch, with each message that parsed into at least one job (a message that parsed to nothing is left out so a parser fix can retry it).
+- **Cleared** entirely by `linkedin_fetch.reset_seen_state` (the `--reset` CLI flag), together with `email_staged.json`. Local-only; the server is not touched.
 
 ### Schema
 

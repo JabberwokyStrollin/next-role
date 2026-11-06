@@ -9,7 +9,7 @@ as a rejection or an interview request via config.classify_inbox_email. Matches
 are written to data/inbox_matches.json for the /today "Status updates" UI to
 surface for one-click review — nothing mutates application status here.
 
-Read-flag safety. Unlike linkedin_fetch.py, this scanner NEVER marks messages
+Read-flag safety. Like linkedin_fetch.py, this scanner NEVER marks messages
 \\Seen: every fetch uses BODY.PEEK, and it issues no STORE. It keeps its own
 processed-Message-ID list in data/inbox_scan_state.json — every message whose
 body it examined, matched or not — so reading mail in your own client neither
@@ -40,7 +40,7 @@ import json
 import re
 import sys
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from email.header import decode_header, make_header
 from email.utils import parseaddr, parsedate_to_datetime
 from pathlib import Path
@@ -57,10 +57,17 @@ from config import (
     now_utc,
     save_json,
 )
-# Reuse the IMAP credential loader and socket timeout so the two mailbox tools
-# never diverge. IMAP_TIMEOUT_SECONDS is defined there, next to get_creds, and
-# re-exported here — so inbox_scan.IMAP_TIMEOUT_SECONDS still resolves.
-from linkedin_fetch import IMAP_TIMEOUT_SECONDS, get_creds
+# Reuse the IMAP credential loader, socket timeout and batched header peek so
+# the two mailbox tools never diverge. They're defined in linkedin_fetch, next to
+# get_creds, and re-exported here — so inbox_scan.IMAP_TIMEOUT_SECONDS etc. still
+# resolve.
+from linkedin_fetch import (
+    HEADER_BATCH_SIZE,
+    IMAP_TIMEOUT_SECONDS,
+    _fetch_header_batch,
+    _since_date,
+    get_creds,
+)
 
 ROOT          = Path(__file__).parent.parent
 DATA_DIR      = ROOT / "data"
@@ -72,17 +79,6 @@ INBOX_STATE   = DATA_DIR / "inbox_scan_state.json"
 # (applied / recruiter_screen / interview / ghosted) is "open": a real reply to
 # a ghosted application resurrects it, so ghosted stays in scope.
 TERMINAL_STATUSES = frozenset({"rejected", "offer", "withdrawn"})
-
-# Messages per header FETCH. The scan needs the headers of every message in the
-# window (the Message-ID dedup key is only knowable after fetching), but one
-# FETCH per message is one network round trip per message: a routine 400-message
-# 14-day window cost ~170s on Gmail, which — plus body fetches and login —
-# overran serve.py's 300s subprocess timeout and surfaced as "Inbox scan timed
-# out after 300s". Batched, the same window is a few round trips (~4s).
-HEADER_BATCH_SIZE = 100
-
-# Leading sequence number of an untagged FETCH response line: b'22546 (BODY[...'
-_FETCH_SEQ_RE = re.compile(rb"^\s*(\d+)\s+\(")
 
 # Company-name tokens too generic to match on (dropped from the match phrase).
 _GENERIC_CO_TOKENS = {
@@ -371,36 +367,6 @@ def build_match(app: dict, from_header: str, subject: str, received: str,
 
 
 # ── IMAP scan ─────────────────────────────────────────────────────────────────
-
-def _since_date(window_days: int) -> str:
-    """IMAP SINCE token (DD-Mon-YYYY) for `window_days` ago, UTC."""
-    dt = datetime.now(timezone.utc) - timedelta(days=window_days)
-    return dt.strftime("%d-%b-%Y")
-
-
-def _fetch_header_batch(M: imaplib.IMAP4, seq_nums: list[bytes]) -> dict[bytes, bytes]:
-    """Peek the match-relevant headers of many messages in one FETCH round trip.
-
-    Returns ``{sequence_number: raw_header_bytes}``. Messages the server omits
-    are simply absent — the caller skips them, exactly as it skipped a per-message
-    fetch that came back non-OK. ``BODY.PEEK`` keeps the \\Seen guarantee."""
-    if not seq_nums:
-        return {}
-    typ, resp = M.fetch(
-        b",".join(seq_nums), "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT MESSAGE-ID DATE)])")
-    if typ != "OK" or not resp:
-        return {}
-    out: dict[bytes, bytes] = {}
-    for item in resp:
-        # Each message is a (prefix, literal) tuple; the b')' terminators between
-        # them are plain bytes and carry no payload.
-        if not isinstance(item, tuple) or len(item) < 2 or not item[1]:
-            continue
-        m = _FETCH_SEQ_RE.match(item[0] or b"")
-        if m:
-            out[m.group(1)] = item[1]
-    return out
-
 
 def scan_via_imap(window_days: int, dry_run: bool = False,
                   recheck: bool = False) -> int:

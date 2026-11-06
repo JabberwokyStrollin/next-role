@@ -217,6 +217,15 @@ not Canada. A code that is also an English word in the `", XX "` shape goes in
 derived a Canada-only posting as US. Don't solve that class by deleting the code
 (as `in`/`de`/`co` were): `"Portland, OR"` is real and common.
 
+The IE/CA **city** tokens have the mirror-image problem: Dublin, Galway,
+Limerick, Vancouver and Waterloo are also US places. A city directly pinned to a
+US state (`"Dublin, OH"`, `"Vancouver, Washington"`) is removed by
+`_US_PINNED_CITY_RE` before the IE/CA tokens are tested, so it derives US; a bare
+`"Dublin"` still derives IE. Before that, `"Dublin, OH"` resolved to IE (tested
+first, and enabled). When adding an IE/CA city token, add it to
+`_IE_CITY_TOKENS` / `_CA_CITY_TOKENS`, not to the country-marker tuple, so it
+gets the same protection.
+
 Spelled-out **US state names** are separately matched on a word boundary
 anywhere in the location (`_US_STATE_NAMES` / `_US_STATE_NAME_RE`) — codes alone
 aren't enough, because US listings routinely name only the state with no country

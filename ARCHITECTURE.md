@@ -711,7 +711,9 @@ concern); `US_SPONSORSHIP_SCORE` stays in `config.py` (a scoring concern).
 | Name | Purpose |
 |---|---|
 | `TARGET_COUNTRIES` | **SSOT** for active target geographies (currently `{"IE","US"}` — Canada dropped 2026-10-03). Read by `config.composite_score`, `derive_country` (enabled-preference on multi-country postings), `location_passes`, and `work_model_discard_reason`. |
-| `_IE_/_CA_/_US_LOCATION_TOKENS` | Space-padded location substrings for `derive_country`, collected in IE > CA > US order; no bare `"us"`. Canada isn't detected by bare `"CA"` (collides with California). Precedence among matches is resolved against `TARGET_COUNTRIES` — see `derive_country`. |
+| `_IE_/_CA_/_US_LOCATION_TOKENS` | Space-padded location substrings for `derive_country`, collected in IE > CA > US order; no bare `"us"`. Canada isn't detected by bare `"CA"` (collides with California). Precedence among matches is resolved against `TARGET_COUNTRIES` — see `derive_country`. The IE and CA tuples are built as country markers + `_IE_CITY_TOKENS` / `_CA_CITY_TOKENS`. |
+| `_IE_CITY_TOKENS` / `_CA_CITY_TOKENS` | The city names in the IE/CA token lists, split out because several are also US places (Dublin OH/CA/GA, Galway NY, Limerick PA, Vancouver WA, Waterloo IA). Feed `_US_PINNED_CITY_RE`. |
+| `_US_PINNED_CITY_RE` | An IE/CA city token directly followed by a US state code or name (`"Dublin, OH"`, `"Vancouver, Washington"`). `derive_country` blanks these out before testing the IE/CA tokens. Codes in `_AMBIGUOUS_WORD_CODES` only pin at the end of the location (`"Dublin, or Cork"` is a list). |
 | `_CA_PROVINCE_CODES` / `_US_STATE_CODES` | Two-letter codes matched only in an anchored "City, XX" form by `_has_region_code`. US states omit `in`/`de`/`co` (country-code collisions). |
 | `_AMBIGUOUS_WORD_CODES` | Region codes that are also English words in the `", XX "` shape (`{"or"}`). `_has_region_code` requires these at the **end** of the location, so the conjunction in `"… BC, or NS Only"` isn't read as Oregon. |
 | `_US_STATE_NAMES` / `_US_STATE_NAME_RE` | All 50 spelled-out US state names + `district of columbia`, matched on a word boundary anywhere in the location. Needed because ATS boards write the name with no country and no "City, XX" pair ("Florida", "Remote - New York"), which the code check can't see. `georgia` resolves the US state, not the country; `indiana` now resolves US before `_FOREIGN_LOCATION_TOKENS`' `india` substring can reject it. |
@@ -727,6 +729,15 @@ Maps a free-text location to `"CA" | "IE" | "US" | "OTHER"`. Padded-substring
 match. Canada is matched by name / Canadian city / **province code**
 ("London, ON" → CA), so bare `"CA"` resolves to **California (US)**
 ("San Francisco, CA" → US, "Toronto, CA" → CA).
+
+**A foreign city pinned to a US state is not foreign.** IE/CA tokens are tested
+against a copy of the location with `_US_PINNED_CITY_RE` matches removed; US is
+tested against the original, so it still sees the state. Without this,
+`"Dublin, OH"` derived as **IE**: IE is collected first and is enabled, so it
+won the preference step outright, and an office-bound Ohio role would have
+skipped the US work-model gate and been ranked as an Irish relocation target.
+A bare city (`"Dublin"`, `"Dublin (Hybrid)"`, LinkedIn's usual form) still
+counts as IE.
 
 **Multi-country postings resolve by preference, and the preference is
 toggle-aware.** All matching countries are collected in the fixed order
@@ -1973,10 +1984,25 @@ via env vars (`NEXTROLE_IMAP_HOST` / `NEXTROLE_IMAP_USER` /
 the user generates a 16-char app password and points
 `NEXTROLE_IMAP_HOST=imap.gmail.com` at it.
 
-Three dedup safeguards: `staged_ids` / `staged_urls` (per-run, in-memory),
-`data/email_state.json` `seen_message_ids` (cross-run, by RFC 822 Message-ID),
-and `\Seen` on the server (so a re-fetch ignores the same UID). The
-`--reset` flag clears all three so an alert can be re-staged.
+**Read-flag independence.** The fetch searches `SINCE` (the last
+`FETCH_WINDOW_DAYS` days) + `FROM`, with **no `UNSEEN` term**; it selects the
+mailbox read-only, fetches only with `BODY.PEEK`, and issues no `STORE` — so
+the server `\Seen` flag is neither consulted nor changed, the same model as
+`inbox_scan.py`. It used to search `UNSEEN` only, which meant that opening an
+alert in your mail client before the fetch ran hid it from the pipeline
+silently: the jobs were never staged, never logged, and never reached the
+discard ledger, so nothing showed what had been missed.
+
+Two dedup safeguards: `staged_ids` / `staged_urls` (per-run, in-memory,
+seeded from the current staged list) and `data/email_state.json`
+`seen_message_ids` (cross-run, by RFC 822 Message-ID). Headers are peeked in
+batches of `HEADER_BATCH_SIZE` to read each message's Message-ID, so only
+unharvested alerts download a body. A message is recorded once it **parses
+into at least one job**, even if every job was already staged (otherwise it is
+re-downloaded on every fetch while it stays in the window); a message that
+parses to nothing stays unrecorded, so a parser fix picks it up next time. The
+`--reset` flag clears the local state so every alert in the window is
+re-staged.
 
 JD bodies are **not** fetched automatically — LinkedIn soft-banned the
 user when prior runs did bulk JD fetches. The `/today` UI offers a
@@ -1991,6 +2017,9 @@ instead.
 | `DEFAULT_SENDERS` | `["jobalerts-noreply@linkedin.com"]` — written to `email_config.json` if it doesn't exist. |
 | `MIN_JD_LENGTH` | 200 — mirrors `serve.py` so a JD fetch that yields less is treated as failure. |
 | `JD_FETCH_HEADERS` | Chrome user-agent for outbound JD fetches. |
+| `FETCH_WINDOW_DAYS` | `14` — look-back window for the alert search (`--window-days` overrides it). Because read state is ignored, this window plus `seen_message_ids` is what bounds a fetch. |
+| `HEADER_BATCH_SIZE` | `100` — messages per batched header `FETCH`. **Shared with `inbox_scan.py`**, which imports it, along with `_fetch_header_batch` and `_since_date`. See that module's round-trip budget for why batching matters. |
+| `_FETCH_SEQ_RE` | Matches the leading sequence number of an untagged `FETCH` response line, to pair each returned literal with its message. |
 | `IMAP_TIMEOUT_SECONDS` | `60` — **canonical socket timeout for every IMAP connection in the project.** Defined here next to `get_creds` and imported by `inbox_scan.py` alongside it, so the two mailbox tools can't diverge. Bounds a **single** blocking socket operation, not a whole run, so it stays well under `serve.py`'s per-action subprocess caps. Without it a stalled connect or a mid-run server hang blocks forever and only the subprocess kill ends the run — reporting a bare "timed out" that can't distinguish a slow mailbox from a dead network. |
 
 ### Functions
@@ -2013,19 +2042,21 @@ instead.
 
 #### IMAP fetch
 - `get_creds() -> tuple[str, str, str]` — read all three env vars or exit 2 with a helpful message.
-- `fetch_via_imap(dry_run: bool = False) -> int` — main flow. Returns the number of new staged jobs. Connects with `timeout=IMAP_TIMEOUT_SECONDS`; an unreachable or stalled server is **fatal** here (prints `ERROR: could not connect to <host>`, exits 2) because there's nothing partial worth reporting.
-- `reset_seen_state() -> tuple[int, int, int]` — clear local dedup state, clear staged-jobs list, remove `\Seen` on the server for every previously-tracked Message-ID. Returns `(n_local_cleared, n_staged_cleared, n_server_unflagged)`. Preserves `\Seen` on LinkedIn messages the user read outside the fetch flow. A failed connect is **not** fatal here (unlike `fetch_via_imap`): the local files are already cleared, so it returns the local counts with `n_server_unflagged=0` — same shape as a login failure.
+- `_fetch_header_batch(M, seq_nums) -> dict[bytes, bytes]` — one `BODY.PEEK[HEADER.FIELDS (FROM SUBJECT MESSAGE-ID DATE)]` `FETCH` for up to `HEADER_BATCH_SIZE` messages; returns `{sequence_number: raw_header_bytes}`. Messages the server omits are absent and get skipped by the caller. Also used by `inbox_scan.py`.
+- `_since_date(window_days) -> str` — IMAP `SINCE` token (DD-Mon-YYYY), UTC. Also used by `inbox_scan.py`.
+- `fetch_via_imap(dry_run: bool = False, window_days: int | None = None) -> int` — main flow: a `SINCE` + `FROM` search per allowlisted sender (`window_days` defaults to `FETCH_WINDOW_DAYS`), batched header peek to skip Message-IDs already in `seen_message_ids`, then `BODY.PEEK[]` + parse for the rest. Never touches `\Seen`. Returns the number of new staged jobs. `dry_run` writes neither the staged list nor the state file. Connects with `timeout=IMAP_TIMEOUT_SECONDS`; an unreachable or stalled server is **fatal** here (prints `ERROR: could not connect to <host>`, exits 2) because there's nothing partial worth reporting.
+- `reset_seen_state() -> tuple[int, int]` — clear local dedup state and the staged-jobs list so the next fetch re-stages every alert in the window. Returns `(n_local_cleared, n_staged_cleared)`. Local-only: it used to remove `\Seen` on the server too, which stopped being necessary once the fetch stopped depending on that flag.
 - `rehydrate_staged() -> tuple[int, int]` — re-run `_normalize_linkedin_url` over existing staged rows after a parser upgrade. Returns `(n_normalized, n_total)`.
 - `fetch_from_sample(path: Path, dry_run: bool = False) -> int` — parse a local `.eml` file as if it had been fetched. For testing without an IMAP server.
 
 #### `main() -> None`
-Argparse: `--dry-run`, `--sample EML_PATH`, `--reset`, `--rehydrate`.
+Argparse: `--dry-run`, `--window-days N` (default `FETCH_WINDOW_DAYS`),
+`--sample EML_PATH`, `--reset`, `--rehydrate`.
 Prints machine-readable last lines for `serve.py` to parse:
-`FETCHED: N`, `RESET: local=N staged=N server=N`, `REHYDRATE:
+`FETCHED: N`, `RESET: local=N staged=N`, `REHYDRATE:
 normalized=N total=N`, or `ERROR: <message>`.
 
-Both IMAP paths (`--reset` and the default fetch) run through a local
-`_imap_guard` helper that catches a socket stall or dropped connection
+The IMAP fetch runs through a local `_imap_guard` helper that catches a socket stall or dropped connection
 *mid-run* (`TimeoutError` / `OSError` / `imaplib.IMAP4.abort`) and reports it on
 the `ERROR:` line rather than dying with a traceback `serve.py` can't parse.
 
@@ -2046,7 +2077,7 @@ by `serve.py` (`config.suggest_status_transition`), never frozen at scan time.
 Matches are written to `data/inbox_matches.json`; nothing mutates application
 status here (the operator applies each match from the UI).
 
-**Read-flag safety.** Unlike `linkedin_fetch.py`, this scanner **never marks
+**Read-flag safety.** Like `linkedin_fetch.py`, this scanner **never marks
 messages `\Seen`** — every fetch uses `BODY.PEEK` and it issues no `STORE`. It
 keeps its own processed-Message-ID list in `data/inbox_scan_state.json` (every
 message whose body it examined — see the round-trip budget below), so the scan
@@ -2076,9 +2107,8 @@ subprocess 300s. Two properties keep it inside that:
 | Name | Purpose |
 |---|---|
 | `INBOX_MATCHES`, `INBOX_STATE` | `data/inbox_matches.json` (staged matches) and `data/inbox_scan_state.json` (own dedup state). |
-| `HEADER_BATCH_SIZE` | `100` — messages per batched header `FETCH`. See the round-trip budget above. |
+| `HEADER_BATCH_SIZE` | `100` — messages per batched header `FETCH`. **Imported from `linkedin_fetch.py`** (shared, not defined here). See the round-trip budget above. |
 | `IMAP_TIMEOUT_SECONDS` | **Imported from `linkedin_fetch.py`** (not defined here), alongside `get_creds`, so both mailbox tools share one timeout — see that module's table for the rationale. `60`s bounds a single blocking socket operation, well under `serve.py`'s 300s scan cap. |
-| `_FETCH_SEQ_RE` | Matches the leading sequence number of an untagged `FETCH` response line, to pair each returned literal with its message. |
 | `TERMINAL_STATUSES` | `frozenset({"rejected", "offer", "withdrawn"})` — applications a reply can no longer change; excluded from matching. Every other status (incl. `ghosted`) is "open". |
 | `_GENERIC_CO_TOKENS` | Company-name tokens too generic to match on (`inc`, `llc`, `technologies`, …); dropped from the match phrase. |
 
@@ -2097,8 +2127,7 @@ subprocess 300s. Two properties keep it inside that:
 - `_title_tokens(title)` / `match_application(open_apps, from_header, subject, body, received="") -> dict | None` — pick the open application the message relates to; when several open apps share the matched company, prefer the one whose title tokens appear in the subject/body, breaking a tie on the most recent `date_applied`. The tie-break is what handles a follow-up in a thread: only the first message names the role, so a later "Re:" has zero title overlap across three open MongoDB applications and file order otherwise picked one at random. Gated first by `config.looks_like_recruiting_mail`: a plausible sender is not enough on its own, because Microsoft Rewards mails from `microsoftrewards.com` — whose domain label contains "microsoft" — and a prize-draw promo cleared the sender test.
 - `_message_key(mid, from_header, subject, received) -> str` — stable dedup key (Message-ID, else a content digest).
 - `build_match(...) -> dict` — assemble one staged-match record (see DATA.md `inbox_matches.json`).
-- `_since_date(window_days) -> str` — IMAP `SINCE` token (DD-Mon-YYYY).
-- `_fetch_header_batch(M, seq_nums) -> dict[bytes, bytes]` — one `BODY.PEEK[HEADER.FIELDS (...)]` `FETCH` for up to `HEADER_BATCH_SIZE` messages; returns `{sequence_number: raw_header_bytes}`. Messages the server omits are absent and get skipped by the caller.
+- `_since_date` / `_fetch_header_batch` — **imported from `linkedin_fetch.py`**; see that section.
 - `scan_via_imap(window_days, dry_run=False, recheck=False) -> int` — main flow: `SINCE` search, batched header-peek + cheap company match, then per-message body-peek + classify, stage new matches. Every message whose body is examined joins the processed-ID set (not just matches), and that set is saved whenever `dry_run` is false — even with zero matches. Returns count staged. `recheck=True` ignores the processed-ID list for that run (in memory — nothing is deleted), so every message in the window is classified again under the current rules; already-staged matches are still skipped, so nothing duplicates. **That is the obligation that comes with editing the classification or matching rules**: a message the old rules swallowed is recorded as processed and is never looked at again, so a fix would otherwise only apply to mail that hasn't arrived yet — the same retroactive-sweep duty as `scan_no_sponsorship.py` after a policy change.
 - `scan_from_sample(path, dry_run=False) -> int` — classify a local `.eml` against open applications. For testing without IMAP.
 - `reset_state() -> tuple[int, int]` — clear staged matches + processed-id state.

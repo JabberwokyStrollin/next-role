@@ -274,11 +274,11 @@ you job alerts:
 { "senders": ["jobalerts-noreply@linkedin.com", "alerts@otta.com"] }
 ```
 
-After each successful fetch, the script marks every harvested message
-`\Seen` on the server (so re-fetches don't restage them) and records
-Message-IDs in `data/email_state.json` as a second-line dedup safeguard.
-Run `python scripts/linkedin_fetch.py --reset` to clear both layers and
-re-fetch from scratch.
+The fetch looks at alerts from the last 14 days (`--window-days N` to change
+it), **whether or not you've already opened them in your mail client**, and
+never marks anything read. Dedup is the Message-ID list in
+`data/email_state.json`. Run `python scripts/linkedin_fetch.py --reset` to
+clear it (and the staged list) and re-stage everything in the window.
 
 The sender allowlist applies to **LinkedIn ingest only** — the mailbox scan
 (`inbox_scan.py`) ignores it and instead matches every recent inbox message
