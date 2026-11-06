@@ -51,13 +51,21 @@ TARGET_COUNTRIES: frozenset[str] = frozenset({"IE", "US"})
 # state abbreviation ("San Francisco, CA"). Canada is reliably named ("canada")
 # or carries a Canadian city / province code, so those are the signals; "CA"
 # alone resolves to California (US) via the US state-code check below.
-_IE_LOCATION_TOKENS: tuple[str, ...] = (
-    "ireland", " ie,", " ie ", "(ie)", "dublin", "cork", "galway", "limerick",
-)
-_CA_LOCATION_TOKENS: tuple[str, ...] = (
-    "canada", "toronto", "vancouver", "montreal",
+#
+# The city tokens are kept separate from the country markers because several of
+# them are also US place names — Dublin OH/CA/GA, Galway NY, Limerick PA,
+# Vancouver WA, Waterloo IA. A city immediately pinned to a US state ("Dublin,
+# OH", "Vancouver, Washington") is not evidence for IE/CA; see
+# _US_PINNED_CITY_RE. A bare city ("Dublin", "Dublin (Hybrid)") still counts.
+_IE_CITY_TOKENS: tuple[str, ...] = ("dublin", "cork", "galway", "limerick")
+_CA_CITY_TOKENS: tuple[str, ...] = (
+    "toronto", "vancouver", "montreal",
     "ottawa", "calgary", "edmonton", "waterloo", "kitchener",
 )
+_IE_LOCATION_TOKENS: tuple[str, ...] = (
+    "ireland", " ie,", " ie ", "(ie)",
+) + _IE_CITY_TOKENS
+_CA_LOCATION_TOKENS: tuple[str, ...] = ("canada",) + _CA_CITY_TOKENS
 _US_LOCATION_TOKENS: tuple[str, ...] = (
     "united states", " usa", " us,", " us ", " us:", "(us)", "u.s.",
     "remote, us", "remote (us)", "us remote", "us-remote",
@@ -119,6 +127,23 @@ _US_STATE_CODES: frozenset[str] = frozenset({
 # is a real and common location — so they get a stricter anchor instead.
 _AMBIGUOUS_WORD_CODES: frozenset[str] = frozenset({"or"})
 
+# An IE/CA city token directly followed by a US state code or name: "Dublin,
+# OH", "Dublin, Ohio", "Vancouver, WA". derive_country blanks these out before
+# testing the IE/CA tokens, so the city stops counting for the foreign country
+# while the US check (run on the untouched string) still sees the state. Without
+# it "Dublin, OH" derived as IE: IE is tested first and is enabled, so it won
+# the preference step outright. Ambiguous-word codes ("or") only pin at the END
+# of the location, matching _has_region_code — "Dublin, or Cork" is a list.
+_US_PINNED_CITY_RE = re.compile(
+    r"(?<![a-z])(" + "|".join(_IE_CITY_TOKENS + _CA_CITY_TOKENS) + r")"
+    r"\s*,\s*(?:"
+    + "|".join(sorted((re.escape(s) for s in _US_STATE_NAMES), key=len, reverse=True))
+    + "|" + "|".join(sorted(_US_STATE_CODES - _AMBIGUOUS_WORD_CODES))
+    + r")(?![a-z])"
+    + "|" + r"(?<![a-z])(?:" + "|".join(_IE_CITY_TOKENS + _CA_CITY_TOKENS) + r")"
+    + r"\s*,\s*(?:" + "|".join(sorted(_AMBIGUOUS_WORD_CODES)) + r")\s*$"
+)
+
 
 def _has_region_code(padded_loc: str, codes: frozenset[str]) -> bool:
     """True if ``padded_loc`` (already lowercased + space-padded) contains one of
@@ -176,10 +201,14 @@ def derive_country(location: str) -> str:
     both were enabled and is preserved in that case; it only misfires once one
     side is off, which is precisely what this step repairs."""
     loc = f" {(location or '').lower()} "
+    # IE/CA are tested on a copy with US-state-pinned cities removed ("Dublin,
+    # OH"); US is tested on the original so it still sees the state.
+    foreign_loc = _US_PINNED_CITY_RE.sub(" ", loc)
     matched: list[str] = []
-    if any(t in loc for t in _IE_LOCATION_TOKENS):
+    if any(t in foreign_loc for t in _IE_LOCATION_TOKENS):
         matched.append("IE")
-    if any(t in loc for t in _CA_LOCATION_TOKENS) or _has_region_code(loc, _CA_PROVINCE_CODES):
+    if (any(t in foreign_loc for t in _CA_LOCATION_TOKENS)
+            or _has_region_code(foreign_loc, _CA_PROVINCE_CODES)):
         matched.append("CA")
     if (any(t in loc for t in _US_LOCATION_TOKENS)
             or _has_region_code(loc, _US_STATE_CODES)

@@ -711,7 +711,9 @@ concern); `US_SPONSORSHIP_SCORE` stays in `config.py` (a scoring concern).
 | Name | Purpose |
 |---|---|
 | `TARGET_COUNTRIES` | **SSOT** for active target geographies (currently `{"IE","US"}` — Canada dropped 2026-10-03). Read by `config.composite_score`, `derive_country` (enabled-preference on multi-country postings), `location_passes`, and `work_model_discard_reason`. |
-| `_IE_/_CA_/_US_LOCATION_TOKENS` | Space-padded location substrings for `derive_country`, collected in IE > CA > US order; no bare `"us"`. Canada isn't detected by bare `"CA"` (collides with California). Precedence among matches is resolved against `TARGET_COUNTRIES` — see `derive_country`. |
+| `_IE_/_CA_/_US_LOCATION_TOKENS` | Space-padded location substrings for `derive_country`, collected in IE > CA > US order; no bare `"us"`. Canada isn't detected by bare `"CA"` (collides with California). Precedence among matches is resolved against `TARGET_COUNTRIES` — see `derive_country`. The IE and CA tuples are built as country markers + `_IE_CITY_TOKENS` / `_CA_CITY_TOKENS`. |
+| `_IE_CITY_TOKENS` / `_CA_CITY_TOKENS` | The city names in the IE/CA token lists, split out because several are also US places (Dublin OH/CA/GA, Galway NY, Limerick PA, Vancouver WA, Waterloo IA). Feed `_US_PINNED_CITY_RE`. |
+| `_US_PINNED_CITY_RE` | An IE/CA city token directly followed by a US state code or name (`"Dublin, OH"`, `"Vancouver, Washington"`). `derive_country` blanks these out before testing the IE/CA tokens. Codes in `_AMBIGUOUS_WORD_CODES` only pin at the end of the location (`"Dublin, or Cork"` is a list). |
 | `_CA_PROVINCE_CODES` / `_US_STATE_CODES` | Two-letter codes matched only in an anchored "City, XX" form by `_has_region_code`. US states omit `in`/`de`/`co` (country-code collisions). |
 | `_AMBIGUOUS_WORD_CODES` | Region codes that are also English words in the `", XX "` shape (`{"or"}`). `_has_region_code` requires these at the **end** of the location, so the conjunction in `"… BC, or NS Only"` isn't read as Oregon. |
 | `_US_STATE_NAMES` / `_US_STATE_NAME_RE` | All 50 spelled-out US state names + `district of columbia`, matched on a word boundary anywhere in the location. Needed because ATS boards write the name with no country and no "City, XX" pair ("Florida", "Remote - New York"), which the code check can't see. `georgia` resolves the US state, not the country; `indiana` now resolves US before `_FOREIGN_LOCATION_TOKENS`' `india` substring can reject it. |
@@ -728,6 +730,14 @@ match. Canada is matched by name / Canadian city / **province code**
 ("London, ON" → CA), so bare `"CA"` resolves to **California (US)**
 ("San Francisco, CA" → US, "Toronto, CA" → CA).
 
+**A foreign city pinned to a US state is not foreign.** IE/CA tokens are tested
+against a copy of the location with `_US_PINNED_CITY_RE` matches removed; US is
+tested against the original, so it still sees the state. Without this,
+`"Dublin, OH"` derived as **IE**: IE is collected first and is enabled, so it
+won the preference step outright, and an office-bound Ohio role would have
+skipped the US work-model gate and been ranked as an Irish relocation target.
+A bare city (`"Dublin"`, `"Dublin (Hybrid)"`, LinkedIn's usual form) still
+counts as IE.
 
 **Multi-country postings resolve by preference, and the preference is
 toggle-aware.** All matching countries are collected in the fixed order
