@@ -93,9 +93,13 @@ SETUP.md.
    you like. The fetch takes every alert from the last 14 days whether
    or not you've already opened it, and never marks mail read
    (`python scripts/linkedin_fetch.py --window-days N` to look further back).
-4. **Cover letters & apply** — ranked apply queue. For each job:
+4. **Cover letters & apply** — ranked apply queue, 30 rows per page with
+   **Prev / Next** links to page through the whole ranking. For each job:
    generate a cover letter, optionally generate a comp estimate, open
-   the `.docx`, log the application. An **Applications sent today: X / N**
+   the `.docx`, log the application. Actions on a later page keep you on
+   that page. `/pipeline` also has a **Mark Applied** button on every
+   not-yet-applied role, for logging one you found or applied to outside
+   the queue. An **Applications sent today: X / N**
    meter tracks the day's submissions; this section auto-earns its green
    checkmark once you hit the daily goal. `DAILY_APPLICATION_GOAL` is
    **derived** from `APPLY_QUEUE_COUNTRY_QUOTAS` (currently `IE:4 + US:8` = 12)
