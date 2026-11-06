@@ -1703,6 +1703,12 @@ def pipeline_page() -> str:
         apply_link = f'<a class="apply-link" href="{apply_url}" target="_blank">Apply ↗</a>' if apply_url else ""
         details_link = f'<a class="apply-link" href="/job/{job_id}">Details →</a>'
         cl = "✓" if job.get("cover_letter_generated") else ""
+        # Mark Applied for anything not yet applied — the apply queue on /today
+        # only shows the top of the ranking, so this is how a lower-ranked role
+        # gets logged. Same form + duplicate guard as the queue rows.
+        dupe_badge, applied_form = ("", "")
+        if job.get("pipeline_status") in ("active", "cover_letter_ready"):
+            dupe_badge, applied_form = mark_applied_form(job, apps, return_to="/pipeline")
         rows += f"""
         <div class="job-row">
           <span class="score">{score}</span>
@@ -1710,11 +1716,21 @@ def pipeline_page() -> str:
           <span class="title-cell">{job['title'][:45]}</span>
           <span style="color:#888;font-size:11px">{job.get('pipeline_status','')}</span>
           <span style="color:#1a5c2e;font-size:11px">{cl}</span>
+          {dupe_badge}
           {apply_link}
           {details_link}
+          {applied_form}
         </div>"""
 
+    flash      = pop_cl_flash()
+    flash_html = ""
+    if flash:
+        cls = {"ok": "notice notice-ok", "warn": "notice notice-warn"}.get(
+            flash["kind"], "notice notice-info")
+        flash_html = f'<div class="{cls}">{esc(flash["text"])}</div>'
+
     return page("Pipeline", f"""
+{flash_html}
 {interview_card}
 <div class="card">
   <h2>All active jobs ({len(active)})</h2>
@@ -3418,7 +3434,7 @@ def render_drills_body(view: str = "default") -> str:
     return "".join(parts)
 
 
-def render_section_body(sid: str, view: str = "default") -> str:
+def render_section_body(sid: str, view: str = "default", cl_page: int = 1) -> str:
     # A single ``view`` query param is shared across sections; only the open
     # section interprets it (status_updates: active|ghosted; linkedin:
     # default|all|failing; code_drills: java|python). Each renderer treats
@@ -3430,7 +3446,7 @@ def render_section_body(sid: str, view: str = "default") -> str:
     if sid == "linkedin_ingest":
         return render_linkedin_body(view)
     if sid == "cover_letters":
-        return render_cover_letters_body()
+        return render_cover_letters_body(cl_page)
     if sid == "code_drills":
         return render_drills_body(view)
     return '<p class="section-placeholder">Section content arrives in a later phase.</p>'
@@ -3982,10 +3998,12 @@ def render_app_row(app: dict) -> str:
     """
 
 
-def render_cover_letters_body() -> str:
+def render_cover_letters_body(cl_page: int = 1) -> str:
     """
-    Cover letters & apply section. Top CL_RENDER_CAP eligible rows by partial
-    composite score; each row has state-dependent buttons:
+    Cover letters & apply section. Eligible rows in apply_queue_order, shown
+    CL_RENDER_CAP per page (``cl_page`` is 1-based and clamped to the valid range;
+    Prev/Next links page through the full queue). Each row has state-dependent
+    buttons:
 
       active (CL not yet generated):
         [Generate CL]  [Open Apply]  [Mark Applied]  [Archive]
@@ -4076,8 +4094,13 @@ def render_cover_letters_body() -> str:
         )
         return "\n".join(parts)
 
-    visible = eligible[:CL_RENDER_CAP]
-    overage = len(eligible) - len(visible)
+    n_pages = max(1, -(-len(eligible) // CL_RENDER_CAP))
+    cl_page = min(max(1, cl_page), n_pages)
+    start   = (cl_page - 1) * CL_RENDER_CAP
+    visible = eligible[start:start + CL_RENDER_CAP]
+    # Actions on a later page return to that page; page 1 keeps the plain
+    # /today redirect it always had.
+    row_return_to = f"/today?open=cover_letters&page={cl_page}" if cl_page > 1 else ""
 
     n_ready = sum(1 for j in eligible if j.get("pipeline_status") == "cover_letter_ready")
     n_new   = len(eligible) - n_ready
@@ -4101,18 +4124,14 @@ def render_cover_letters_body() -> str:
 
     comp_by_job = load_comp_estimates_by_job()
 
+    pager_html = render_cl_pager(cl_page, n_pages, start, len(visible), len(eligible))
+    parts.append(pager_html)
     parts.append('<div class="cl-list">')
     for job in visible:
-        parts.append(render_cl_row(job, co_by_id, comp_by_job.get(job.get("job_id", "")), apps))
+        parts.append(render_cl_row(job, co_by_id, comp_by_job.get(job.get("job_id", "")), apps,
+                                   return_to=row_return_to))
     parts.append('</div>')
-
-    if overage > 0:
-        parts.append(
-            f'<p style="color:#888;font-size:11px;margin-top:8px">'
-            f'Showing top {len(visible)} of {len(eligible)} by composite score. '
-            f'Generate/apply/archive rows to surface the next batch.'
-            '</p>'
-        )
+    parts.append(pager_html)
 
     # Clipboard handler + form-submit debounce. Wrapped in an IIFE to avoid
     # leaking globals; re-attaches every render since the page reloads on each form post.
@@ -4331,9 +4350,87 @@ def render_comp_panel(comp_record: dict, job_id: str) -> str:
     """
 
 
+def mark_applied_form(job: dict, apps: list | None, return_to: str = "",
+                      form_style: str = "display:inline") -> tuple[str, str]:
+    """``(dupe_badge_html, form_html)`` for one job's **Mark Applied** button,
+    shared by the apply queue (`render_cl_row`) and `/pipeline` so the two can't
+    drift. Duplicate-application guard: if we've already applied to effectively
+    this same role (same company + core title) under another listing, return a
+    warning badge and gate the button behind a confirm, posting ``force=1``.
+    SSOT: config.find_duplicate_application. ``return_to`` sends the post-submit
+    redirect back to the calling page instead of /today."""
+    from html import escape as esc
+
+    job_id = esc(job.get("job_id", ""))
+    dupe = find_duplicate_application(
+        job.get("company_id"), job.get("title", ""), apps or []
+    ) if apps else None
+    dupe_badge = ""
+    onsubmit   = ""
+    if dupe:
+        d_title  = esc((dupe.get("title") or "")[:50])
+        d_status = esc(dupe.get("status") or "")
+        d_date   = esc(dupe.get("date_applied") or "")
+        dupe_badge = (
+            '<span class="pf-badge" style="background:#fde2e1;color:#8a1c13" '
+            f'title="Already applied: {d_title} (status: {d_status}, {d_date}). '
+            'Likely the same role under a different listing.">⚠ already applied</span>'
+        )
+        onsubmit = (
+            f' onsubmit="return confirm(\'You already applied to a similar role at this '
+            f'company ({d_title}, {d_status}, {d_date}). Log this one anyway?\');"'
+        )
+    form = (
+        f'<form method="POST" action="/today/apply/log" class="cl-form" '
+        f'style="{form_style}"{onsubmit}>'
+        f'<input type="hidden" name="job_id" value="{job_id}">'
+        + ('<input type="hidden" name="force" value="1">' if dupe else '')
+        + (f'<input type="hidden" name="return_to" value="{esc(return_to)}">' if return_to else '')
+        + '<button class="btn-mini" type="submit">Mark Applied</button>'
+        '</form>'
+    )
+    return dupe_badge, form
+
+
+def _strip_row_fragment(params: dict) -> None:
+    """Rewrite ``params['return_to']`` from ``…#cl-<id>`` to ``…#cover_letters``
+    for actions that remove the row (archive, mark applied)."""
+    rt = (params.get("return_to", [""])[0] or "").strip()
+    if rt:
+        params["return_to"] = [rt.split("#", 1)[0] + "#cover_letters"]
+
+
+def with_return_to(html: str, return_to: str) -> str:
+    """Add a hidden ``return_to`` field to every POST form in ``html``. Handlers
+    that redirect via ``redirect_or_today`` then land back on ``return_to``."""
+    from html import escape as esc
+    field = f'<input type="hidden" name="return_to" value="{esc(return_to)}">'
+    return re.sub(r'(<form\b[^>]*\bmethod="POST"[^>]*>)', lambda m: m.group(1) + field, html)
+
+
+def render_cl_pager(cl_page: int, n_pages: int, start: int, n_visible: int,
+                    n_total: int) -> str:
+    """Prev/Next links for the apply queue. Empty when everything fits on one
+    page. The queue order is the same on every page — the country-quota block
+    bubbles to the head of page 1, and later pages continue in pure rank order."""
+    if n_pages <= 1:
+        return ""
+    def link(p: int, label: str) -> str:
+        return (f'<a class="btn-mini" style="text-decoration:none" '
+                f'href="/today?open=cover_letters&page={p}#cover_letters">{label}</a>')
+    prev_html = link(cl_page - 1, "← Prev") if cl_page > 1 else ""
+    next_html = link(cl_page + 1, "Next →") if cl_page < n_pages else ""
+    return (
+        '<div class="cl-pager" style="display:flex;gap:8px;align-items:center;'
+        'margin:8px 0;color:#888;font-size:11px">'
+        f'{prev_html}<span>Page {cl_page} of {n_pages} · rows {start + 1}–'
+        f'{start + n_visible} of {n_total}</span>{next_html}</div>'
+    )
+
+
 def render_cl_row(job: dict, co_by_id: dict | None = None,
                   comp_record: dict | None = None,
-                  apps: list | None = None) -> str:
+                  apps: list | None = None, return_to: str = "") -> str:
     from html import escape as esc
 
     job_id    = esc(job.get("job_id", ""))
@@ -4350,28 +4447,8 @@ def render_cl_row(job: dict, co_by_id: dict | None = None,
     company_rec = (co_by_id or {}).get(job.get("company_id")) if co_by_id else None
     is_stub     = bool(company_rec and company_rec.get("stub"))
 
-    # Duplicate-application guard: have we already applied to effectively this
-    # same role (same company + core title) under another listing? Surface a
-    # warning badge and gate Mark Applied behind a confirm. SSOT:
-    # config.find_duplicate_application.
-    dupe = find_duplicate_application(
-        job.get("company_id"), job.get("title", ""), apps or []
-    ) if apps else None
-    dupe_badge = ""
-    dupe_confirm_js = ""
-    if dupe:
-        d_title  = esc((dupe.get("title") or "")[:50])
-        d_status = esc(dupe.get("status") or "")
-        d_date   = esc(dupe.get("date_applied") or "")
-        dupe_badge = (
-            '<span class="pf-badge" style="background:#fde2e1;color:#8a1c13" '
-            f'title="Already applied: {d_title} (status: {d_status}, {d_date}). '
-            'Likely the same role under a different listing.">⚠ already applied</span>'
-        )
-        dupe_confirm_js = (
-            f"return confirm('You already applied to a similar role at this "
-            f"company ({d_title}, {d_status}, {d_date}). Log this one anyway?');"
-        )
+    dupe_badge, mark_applied_html = mark_applied_form(
+        job, apps, form_style="display:inline;margin-left:auto")
 
     # Government/defense screen badge. A `flag` reduces the apply-rank (shown);
     # `fail` roles are excluded upstream so they don't reach here.
@@ -4515,7 +4592,7 @@ def render_cl_row(job: dict, co_by_id: dict | None = None,
             f'{pre_score}/{PRE_RESEARCH_MAX} pre</span>'
         )
 
-    return f"""
+    row_html = f"""
     <div class="cl-row" id="cl-{job_id}">
       <div class="cl-meta">
         {score_block}
@@ -4544,12 +4621,7 @@ def render_cl_row(job: dict, co_by_id: dict | None = None,
         {open_copy}
         {apply_link}
         {detail_link}
-        <form method="POST" action="/today/apply/log" class="cl-form" style="display:inline;margin-left:auto"
-              {f'onsubmit="{dupe_confirm_js}"' if dupe else ''}>
-          <input type="hidden" name="job_id" value="{job_id}">
-          {'<input type="hidden" name="force" value="1">' if dupe else ''}
-          <button class="btn-mini" type="submit">Mark Applied</button>
-        </form>
+        {mark_applied_html}
         <form method="POST" action="/today/cl/archive" class="cl-form" style="display:inline">
           <input type="hidden" name="job_id" value="{job_id}">
           <button class="btn-mini" type="submit">Archive</button>
@@ -4557,6 +4629,11 @@ def render_cl_row(job: dict, co_by_id: dict | None = None,
       </div>
     </div>
     """
+    # Rows on a later page of the queue send every action back to that page
+    # (and to this row), instead of snapping to page 1.
+    if return_to:
+        row_html = with_return_to(row_html, f"{return_to}#cl-{job_id}")
+    return row_html
 
 
 # ── /answer-questions — ad-hoc application question answers ──────────────────
@@ -5114,7 +5191,8 @@ _AQ_PAGE_JS = """
 """
 
 
-def daily_checklist_page(open_section: str | None = None, view: str = "default") -> str:
+def daily_checklist_page(open_section: str | None = None, view: str = "default",
+                         cl_page: int = 1) -> str:
     apply_ghosted_check()
     apply_stale_job_check()
     apply_data_backup()
@@ -5174,14 +5252,14 @@ def daily_checklist_page(open_section: str | None = None, view: str = "default")
             )
 
         sections_html += f"""
-        <details {open_attr} class="checklist-section">
+        <details {open_attr} class="checklist-section" id="{sid}">
           <summary>
             <span class="section-badge {badge_class}">{badge_char}</span>
             <span class="section-title">{i}. {title}</span>
           </summary>
           <div class="section-body">
             <p class="section-hint">{hint}</p>
-            {render_section_body(sid, view=view)}
+            {render_section_body(sid, view=view, cl_page=cl_page)}
             {toggle_html}
           </div>
         </details>
@@ -5223,7 +5301,12 @@ class Handler(BaseHTTPRequestHandler):
             qs           = parse_qs(parsed.query)
             open_section = qs.get("open", [None])[0]
             view         = qs.get("view", ["default"])[0]
-            self.send_html(daily_checklist_page(open_section, view))
+            # Apply-queue page (cover_letters section only). Bad input → page 1.
+            try:
+                cl_page = int(qs.get("page", ["1"])[0])
+            except ValueError:
+                cl_page = 1
+            self.send_html(daily_checklist_page(open_section, view, cl_page))
         elif path == "/today/crawl/status":
             self.send_json(crawl_status_payload())
         elif path == "/pipeline":
@@ -5683,7 +5766,10 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         set_cl_flash("warn", "Archive failed — job not found.")
 
-            self.redirect_today("cover_letters")
+            # The row is gone after this, so drop its #cl-<id> fragment and land
+            # on the section instead (same page of the queue via return_to).
+            _strip_row_fragment(params)
+            self.redirect_or_today(params, "cover_letters")
             return
 
         if path == "/today/apply/log":
@@ -5717,7 +5803,10 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:
                     set_cl_flash("warn", f"Failed to launch update_status.py: {e}")
 
-            self.redirect_today("cover_letters")
+            # The row is gone after this, so drop its #cl-<id> fragment and land
+            # on the section instead (same page of the queue via return_to).
+            _strip_row_fragment(params)
+            self.redirect_or_today(params, "cover_letters")
             return
 
         if path == "/today/toggle":
