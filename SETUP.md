@@ -80,6 +80,8 @@ Edit these files in `profile/`:
 | `cover_letter_rules.md` | Now only read for its **Locked Visa / Work Authorization Paragraphs** section (appended after the signature for CA/IE roles). The tone/structure sections no longer drive generation. |
 | `scoring_rubric.md` | Claude system prompt for JD scoring — your seniority and domain criteria, plus the gov-screen role-exposure classification. |
 | `stack_keywords.yaml` | Keyword weights for mechanical stack scoring **and** the crawl pre-filter. |
+| `algorithm_reference.md` | Question bank for the `/today` **Algorithm drill**: one `## N. Title` section per pattern, each with a `**Problem.**` paragraph and cues, then `### Java` / `### Python` fenced reference solutions, then complexity and gotchas. Missing = the section shows a notice. |
+| `behavioral_reference.md` | Question bank for the `/today` **Interview drill**: one `## N. <question>` section per question with its model answer. `[CONFIRM: …]`, `[FROM JD: …]` and `STATUS: NEEDS STORY` markers are highlighted on screen. |
 | `drill_focus_<language>.md` | **Optional.** Aims code-drill generation at one upcoming interview (domains, question style, gotchas to use as twists). One per language — `drill_focus_java.md`, `drill_focus_python.md`. Absent = untargeted drills. See *Code drills* below. |
 
 > **profile/ is gitignored.** Your resume and personal scoring criteria
@@ -161,11 +163,11 @@ applications/
 
 ### Resume tips
 
-- The user's active resume in `profile/resume.md` is country-specific
-  (Canada vs Ireland variant). Keep the inactive variant separately and
-  swap it in when you change target market. (If you enable US roles — see
-  §6 — you can keep a US variant the same way; there's no automatic
-  per-country resume switching.)
+- `profile/resume.md` holds the active resume variant (currently US-remote;
+  the old Canada variant is kept as `profile/resume.canada.md.bak`). There's
+  no automatic per-country resume switching — swap the file when you change
+  target market. Its `## Key Differentiators` and `## Accuracy Constraints`
+  sections aren't on the delivered .docx; keep them when re-syncing.
 - `serve.py /resume` parses Experience and Education sections out of
   `resume.md` for the copy-paste snippet builder — keep the section
   headings (`## Experience`, `## Education`) and the date-range format

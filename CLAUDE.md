@@ -955,6 +955,34 @@ operator recreates that, even if each individual part is still small.
     a `DRILL_LANGUAGES` entry plus a `_LANG_PROMPTS` entry; nothing else should
     need to change.
 
+## Algorithm + Interview drills (SSOT)
+
+Two daily `/today` sections before Code drills, each fed by an operator-owned
+question bank in `profile/`. Separate from Code drills on purpose: no parts, no
+grading, no proficiency profile.
+
+| Concern | Canonical location |
+|---|---|
+| Bank paths, progress paths, daily goals | `scripts/config.py:ALGORITHM_REFERENCE_PATH` / `BEHAVIORAL_REFERENCE_PATH` / `ALGORITHM_DRILLS_PATH` / `INTERVIEW_DRILLS_PATH` / `DAILY_ALGORITHM_GOAL` / `DAILY_INTERVIEW_GOAL` |
+| Parsing, daily pick, completions, explanation | `scripts/study_drills.py` |
+| Rendering + routes | `serve.py:render_algorithm_body` / `render_interview_body`, `POST /today/study/<kind>/<action>` |
+
+### Rules
+
+1. **The banks are the operator's files; never generate items.** An item is a
+   `## N. Title` heading and its number is its identity in the progress store.
+   Don't renumber a bank casually: history follows the number, not the text.
+2. **Never fill in the behavioral doc's markers.** `[CONFIRM: …]`,
+   `[FROM JD: …]` and `STATUS: NEEDS STORY` exist because only the operator
+   knows those facts. The UI highlights them; no model call may complete them.
+3. **One explanation call per pattern, cached with the entry's hash.** Never
+   call Claude on render. Editing an entry makes its explanation stale (shown,
+   with *Regenerate*), never silently wrong.
+4. **The pick is deterministic rotation, not random.** Least-recently-touched
+   first, so a refresh can't change today's item and the bank cycles fully.
+5. **Undo removes only today's completion.** Same shape as the other undos:
+   an undo, not a status, and it can't rewrite earlier days.
+
 ## Discard ledger — the crawl must not rediscover its own rejects
 
 `ingest_job` returning `None` writes nothing to `job_pipeline.json`, and the
@@ -1017,8 +1045,11 @@ hours over 7 runs — with **zero** jobs ingested. The symptom the operator saw 
 - This is a **closed-source / proprietary** project. No `LICENSE` file, no
   contribution guidelines, no OSS framing. Treat as a commercial product.
 - Data files (`data/*.json`, `output/*.docx`) are gitignored.
-- The user's active resume in `profile/resume.md` is the Canada variant;
-  Ireland variant is tracked separately. Don't propose merging.
+- The user's active resume in `profile/resume.md` is the US-remote variant
+  (contact line just "Remote"), converted from
+  `OneDrive\Resumes\JohnnyRayBlantonIII_CV.docx` on 2026-11-08. The
+  `## Key Differentiators` and `## Accuracy Constraints` sections exist only
+  in the markdown, so keep them when re-syncing from the .docx.
 
 ## Persistent user-level memories
 

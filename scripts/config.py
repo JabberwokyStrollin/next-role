@@ -1152,6 +1152,20 @@ DAILY_APPLICATION_GOAL = (
 # low-volume practice, unlike applications. serve.py reads the constant.
 DAILY_DRILL_GOAL = 1
 
+# ─── Study drills: daily Algorithm + Interview sections on /today ─────────────
+#
+# Two reference docs in profile/ are the question banks; scripts/study_drills.py
+# parses them (one `## N. Title` heading per item), picks today's item and
+# records completions. Each section auto-earns its /today checkmark at its goal,
+# exactly like DAILY_DRILL_GOAL. The banks are the operator's files — edit them
+# to add or reword items; numbering is the identity, so don't renumber lightly.
+ALGORITHM_REFERENCE_PATH = PROFILE_DIR / "algorithm_reference.md"
+BEHAVIORAL_REFERENCE_PATH = PROFILE_DIR / "behavioral_reference.md"
+ALGORITHM_DRILLS_PATH    = DATA_DIR / "algorithm_drills.json"
+INTERVIEW_DRILLS_PATH    = DATA_DIR / "interview_drills.json"
+DAILY_ALGORITHM_GOAL     = 1
+DAILY_INTERVIEW_GOAL     = 1
+
 # Inbox scanner look-back window (days). scripts/inbox_scan.py scans INBOX
 # messages received within this many days of the scan, regardless of read
 # state, and matches them to open applications. Independent of the server-side
