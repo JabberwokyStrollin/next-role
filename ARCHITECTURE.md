@@ -34,6 +34,7 @@ Two cross-cutting rules govern most of the code and are referenced throughout:
 - [`scripts/inbox_scan.py`](#scriptsinbox_scanpy) — IMAP scan for rejection / interview replies to open applications
 - [`scripts/discard_ledger.py`](#scriptsdiscard_ledgerpy) — inspect / backfill / reset the crawl's discard ledger (no Claude)
 - [`scripts/drills.py`](#scriptsdrillspy) — generate interview-prep code drills + review manual attempts (Sonnet)
+- [`scripts/study_drills.py`](#scriptsstudy_drillspy) — daily Algorithm + Interview drills from the `profile/` reference banks (Sonnet, explanations only)
 - [`scripts/backup_data.py`](#scriptsbackup_datapy) — daily local snapshots of the gitignored data/ files
 
 **Surfaces (CLI + web)**
@@ -121,6 +122,7 @@ file.
 | `PIPELINE_EXPIRY_DAYS` | `int` | An un-applied job (`active` / `cover_letter_ready`) older than N days (45) since ingest (`date_found`) auto-archives with reason `stale_pipeline` (see `scan_stale_jobs.archive_stale_jobs`, auto-run at end of crawl). Distinct from `STALENESS_TIERS` (scoring, keyed off `date_posted`) and `auto_age_application` (ages applications, not jobs). |
 | `REJECTION_REASONS` | `dict[str, str]` | SSOT for rejection-reason key → human label: `generic`, `position_filled`, `interview_failed`, `ghosted_timeout`. Consumed by serve.py status buttons, `metrics.py`, and the inbox scanner. |
 | `DAILY_APPLICATION_GOAL` | `int` | Applications-per-day target (10). The `/today` "Cover letters & apply" section auto-earns its green checkmark once this many applications are logged *today*. Derived from `application_tracker.date_applied`, so it resets daily. serve.py reads the constant; never hardcode the number. |
+| `ALGORITHM_REFERENCE_PATH`, `BEHAVIORAL_REFERENCE_PATH`, `ALGORITHM_DRILLS_PATH`, `INTERVIEW_DRILLS_PATH`, `DAILY_ALGORITHM_GOAL`, `DAILY_INTERVIEW_GOAL` | Path / `int` | Study drills (`scripts/study_drills.py`): the two `profile/` question banks, their progress stores under `data/`, and the items-per-day goals (1 each) that auto-earn the `/today` *Algorithm drill* / *Interview drill* checkmarks. |
 | `DAILY_DRILL_GOAL` | `int` | Code-drill-**parts**-per-day target (1). The `/today` "Code drills" section auto-earns its checkmark once this many drill *parts* are marked complete *today* (`drills_completed_today`). Parts, not whole drills — one part is one sitting. |
 | `DRILL_PART_TARGET_MINUTES`, `DRILL_MIN_PARTS`, `DRILL_MAX_PARTS` | `int` | Sitting budget per drill part (60 min) and the number of parts a generated drill is split into (3–6 — each part is one method plus its tests, so a theme needs more of them). Read by `drills._generate_system(language)` (which interpolates all three into the prompt) and by `serve.render_drills_body` for the "budget about N minutes" note. |
 | `DRILLS_STORE_PATH`, `MANUAL_CODE_DRILLS_DIR`, `EDITOR_CMD` | Path / str | Generated-drill store (`data/drills.json`); the sibling project holding the code (default `../manual-code-drills`, override `NEXTROLE_DRILLS_DIR`) — **one subdirectory per language** (`java/`, `python/`), with the editor opened on the ROOT so one window holds every track; the editor CLI for the open button (`NEXTROLE_EDITOR_CMD`, default `"code"` for VS Code → file-manager fallback on failure). |
@@ -1513,8 +1515,9 @@ HTTP server (`BaseHTTPRequestHandler`) with three top-level surfaces:
 
 - `/` — single-URL ingest form. Auto-fetches JD; falls back to a paste
   textbox for JS-rendered pages (Workday, etc.).
-- `/today` — daily checklist with five collapsible sections: status
-  updates, crawl, LinkedIn ingest, cover letters & apply, code drills. Each
+- `/today` — daily checklist with seven collapsible sections: status
+  updates, crawl, LinkedIn ingest, cover letters & apply, algorithm drill,
+  interview drill, code drills. Each
   section has its own POST handlers; the page round-trips state through query
   params (`?open=<section>&view=<view>`).
 - `/pipeline`, `/resume`, `/job/<id>`, `/search` — supporting views. The
@@ -1542,7 +1545,7 @@ calling `linkedin_fetch._fetch_jd_text`.
 | `APPLICATION_TRACKER_PATH` | Local copy of the tracker path (also imported from `config.py`). |
 | `MIN_JD_LENGTH` | 200 — JD body length threshold (mirrors ingest). |
 | `DAILY_CHECKLIST_PATH`, `EMAIL_STAGED_PATH`, `INBOX_MATCHES_PATH` | Daily-checklist state, LinkedIn staged-rows file, and staged inbox rejection/interview matches (`data/inbox_matches.json`). |
-| `CHECKLIST_SECTIONS` | Ordered `(id, title, hint)` for the five `/today` sections (status_updates, crawl, linkedin_ingest, cover_letters, code_drills). The `cover_letters` checkmark is auto-earned once `applications_today_count()` reaches `config.DAILY_APPLICATION_GOAL`, and `code_drills` once `config.drills_completed_today()` (drill **parts** completed today) reaches `config.DAILY_DRILL_GOAL` (see `section_done`); the others use the manual `/today/toggle`. Code-drills store + constants live in `config.py`. |
+| `CHECKLIST_SECTIONS` | Ordered `(id, title, hint)` for the seven `/today` sections (status_updates, crawl, linkedin_ingest, cover_letters, algorithm_drills, interview_drills, code_drills). `algorithm_drills` / `interview_drills` auto-earn their checkmarks once `study_drills.completed_today(kind)` reaches that kind's goal. The `cover_letters` checkmark is auto-earned once `applications_today_count()` reaches `config.DAILY_APPLICATION_GOAL`, and `code_drills` once `config.drills_completed_today()` (drill **parts** completed today) reaches `config.DAILY_DRILL_GOAL` (see `section_done`); the others use the manual `/today/toggle`. Code-drills store + constants live in `config.py`. |
 | `STATUS_ACTION_MAP` | Button-value → `(status, rejection_reason \| None)` for status updates POSTed from `/today`. The reason key (SSOT `config.REJECTION_REASONS`) is passed to `update_status.py status --rejection-reason`; includes `rejected_interview_failed`. |
 | `CRAWL_TAIL_MAX`, `INGESTED_RE` | Background crawl: tail-line cap (50) + regex to capture `Ingested: N` from stdout. |
 | `crawl_state_lk`, `crawl_state` | Threading lock + state dict for the background crawl. |
@@ -1585,6 +1588,8 @@ calling `linkedin_fetch._fetch_jd_text`.
 #### `POST /today/drill/solve` — shell out to `scripts/drills.py solve --number N --language L [--part M]` (Claude): generate the senior/staff-level reference "correct answer" as of that part (cumulative) from the prompts + interfaces (not the attempt), store it on the **part's** `solution`, and surface it inline.
 #### `POST /today/drill/clarify` — shell out to `scripts/drills.py clarify --number N --part M --language L --question "…"` (one small Claude call). Stores the exchange on the part and surfaces it under the prompt.
 #### `POST /today/drill/revert` — undo a mis-clicked Finish: shell out to `scripts/drills.py revert --number N --language L [--part M]`. No Claude call — it only removes what finish added. Surfaced as a small confirm-guarded **Undo finish of part N** button beside the feedback header, targeting the most recently completed part.
+#### `POST /today/study/<kind>/<action>` — the Algorithm / Interview drill forms. `kind` is `algorithm` or `interview`; every form posts `number`. Actions: `save` (algorithm only — stores each language textarea `code_<lang>` that changed, skipping an untouched starter stub; with `action=complete` in the body it also marks the item complete), `complete`, `skip`, `revert` (undo today's latest completion of that item), `explain` (algorithm only — shells out to `scripts/study_drills.py explain --number N`, one Sonnet call, 180s timeout). Flashes via `set_study_flash`, then redirects to the section.
+
 #### `POST /today/drill/finish` — the **primary** action: shell out to `scripts/drills.py finish --number N --language L [--part M]`, which grades the attempt, generates the reference answer (**rewriting** the operator's impl+test files with it, after snapshotting their attempt) and marks the part complete, in one step. **Two** Claude calls back to back, so it passes `timeout=420` to `run_drill_command`. A grading failure aborts everything and leaves the part open (no attempt on disk = nothing to finish); a reference-answer failure is reported but completion still stands.
 #### `POST /today/drill/complete` — mark the posted `part` of drill `number` (on the posted `language`) complete via `config.mark_drill_part_complete` (sets the part's `status`/`completed_at`; the drill's too once the last part lands), counting toward `DAILY_DRILL_GOAL`. Flashes either "part X of Y done, next part is now showing" or series-complete.
 #### `POST /today/drill/open-ide` — launch `config.EDITOR_CMD` (default `code`, VS Code) on `config.MANUAL_CODE_DRILLS_DIR` — the **root**, not the per-language subdirectory, so one editor window holds every track; resolves the launcher via `shutil.which` and routes `.cmd`/`.bat` (e.g. `code.cmd`) through `cmd /c`. Falls back to `os.startfile` (file manager) if the launch fails.
@@ -1622,8 +1627,10 @@ Whether a checklist section counts as complete for its green badge. Most
 sections read the manual toggle in `state`; `cover_letters` **also**
 auto-completes once `apps_today >= config.DAILY_APPLICATION_GOAL`, and
 `code_drills` once `config.drills_completed_today() >= config.DAILY_DRILL_GOAL`
-(drill **parts** completed today, not whole drills — one part is one sitting;
-a manual toggle still forces either done early). Used by `daily_checklist_page`
+(drill **parts** completed today, not whole drills — one part is one sitting),
+and `algorithm_drills` / `interview_drills` (via `STUDY_SECTION_KINDS`) once
+`study_drills.completed_today(kind)` reaches `config.DAILY_ALGORITHM_GOAL` /
+`DAILY_INTERVIEW_GOAL`. A manual toggle still forces any of them done early. Used by `daily_checklist_page`
 for the badge, the done-count/progress bar, and the first-undone auto-open.
 
 #### `days_since_iso(iso_date: str) -> int`
@@ -1737,6 +1744,9 @@ backup failure can't block the daily-checklist page.
 - `with_return_to(html, return_to) -> str` — insert a hidden `return_to` field into every `POST` form in `html`.
 - `_strip_row_fragment(params)` — rewrite `return_to`'s `#cl-<id>` fragment to `#cover_letters` for actions that remove the row (archive, mark applied).
 - `render_cl_pager(cl_page, n_pages, start, n_visible, n_total) -> str` — the queue's "Page N of M · rows a–b of T" bar with Prev/Next links; empty when everything fits on one page. Order is the same on every page: the country-quota block bubbles to the head of page 1 and later pages continue in rank order. Also renders a `gov/defense: flag` badge showing the apply-rank penalty (`rank N/130`) when the gov-screen result is `flag`; `fail` roles are excluded upstream so they don't reach this renderer. The row still displays the pure composite via `job_score`, but the apply queue is ordered by `apply_rank_score`.
+- **Algorithm drill** (`render_algorithm_body() -> str`) — the `algorithm_drills` section: a completed-today meter, today's pattern from `study_drills.current_item("algorithm")` shown as a question (problem + cues), the cached **in-depth explanation** in a collapsed *How it works & how to solve it* `<details>` (or a *Generate in-depth explanation* button when none is cached; a *Regenerate* warning when `explanation_is_stale`), a **Your solution** editor (a language `<select>` over `config.DRILL_LANGUAGES` and one monospace `<textarea>` per language, prefilled with the saved attempt or the reference's signature stub, Tab inserts four spaces) with *Save & mark complete* / *Save code*, the reference solutions + complexity + gotchas behind a collapsed reveal, *Skip*, and an Undo for today's latest completion.
+- **Interview drill** (`render_interview_body() -> str`) — the `interview_drills` section: meter, today's question with its full entry (what it tests, story, model answer, follow-ups) rendered from the bank, with `[CONFIRM: …]` / `[FROM JD: …]` / `STATUS: NEEDS STORY` markers highlighted; *Mark reviewed*, *Skip*, Undo.
+- Study-drill helpers: `STUDY_SECTION_KINDS` (section id → kind), `set_study_flash` / `pop_study_flash` (per-kind one-shot flash), `study_md_html(md)` (minimal markdown → HTML: headings, paragraphs with wrapped lines joined, lists, fenced code; a line opening with `**` starts a new paragraph), `_study_inline` (escape + `code` / **bold** / marker highlighting), `_study_meter`, `_study_action_form`, `_study_undo_html`, `_missing_bank_html`, `_ALGO_EDITOR_JS`, `esc_html`.
 - `daily_checklist_page(open_section=None, view='default', cl_page=1) -> str` — the `/today` page assembly; `view` is the shared sub-tab param threaded to `render_section_body`, and `cl_page` (the `page` query param; non-integers fall back to 1) is the apply-queue page. Named `cl_page`, not `page`, because `page()` is the HTML-shell helper this function returns through. Each section's `<details>` carries `id="<sid>"` so links can target it (`#cover_letters`). Uses `section_done(sid, state, applications_today_count())` for each section's badge, the done-count/progress bar, and the first-undone auto-open, so the cover-letters checkmark reflects the daily goal.
 - `_aq_chip_html(slug, label) -> str` — one resume-entry chip on the answer-questions card.
 - `_aq_card_html(job_id, question) -> str` — full question card HTML, used both for initial page render and as the `card_html` payload returned by every `/answer-questions/*` mutating endpoint so the client can swap a single card's `outerHTML` without a full reload.
@@ -2418,6 +2428,90 @@ Prints a machine-readable last line for `serve.py`: `GENERATED: <n>`,
 `REVERTED: <n>.<part>`, `FINISHED: <n>.<part>`, or `ERROR: <message>`. These stay
 **number-only on purpose** — the caller always supplies the language, so
 qualifying them would break `serve.py`'s parse for no gain.
+
+---
+
+## `scripts/study_drills.py`
+
+**Role.** Backs the `/today` **Algorithm drill** and **Interview drill**
+sections, which sit right before Code drills. Both are daily, one-item
+sections driven by a question bank in `profile/`:
+
+| Kind | Bank | Progress store | Daily goal |
+|---|---|---|---|
+| `algorithm` | `profile/algorithm_reference.md` (`config.ALGORITHM_REFERENCE_PATH`) | `data/algorithm_drills.json` (`config.ALGORITHM_DRILLS_PATH`) | `config.DAILY_ALGORITHM_GOAL` (1) |
+| `interview` | `profile/behavioral_reference.md` (`config.BEHAVIORAL_REFERENCE_PATH`) | `data/interview_drills.json` (`config.INTERVIEW_DRILLS_PATH`) | `config.DAILY_INTERVIEW_GOAL` (1) |
+
+An item is any `## N. Title` heading in a bank; its **number is its identity**
+in the progress store, so renumbering a bank reattaches history to different
+items. Unnumbered `##` sections (the pattern-spotting table, the story map) are
+context and are skipped. The only Claude call is the algorithm **explanation**:
+`CL_MODEL` (Sonnet), once per pattern, cached. Interview items render straight
+from the doc at no cost.
+
+**Selection.** `current_item(kind)` returns the item touched least recently
+(completion or skip; never-touched first, ties by doc order). Deterministic, so
+a refresh shows the same item, and the whole bank rotates before anything
+repeats. Completing an item moves the pick on, so a second item that day is
+just "keep going".
+
+### Module-level constants
+
+| Name | Purpose |
+|---|---|
+| `StudyKind` | Frozen dataclass: `key`, `label`, `reference` (bank path), `store` (progress path), `goal`. |
+| `STUDY_KINDS` | `{"algorithm": StudyKind, "interview": StudyKind}` — built from the `config.py` paths and goals. |
+| `EXPLAIN_MAX_TOKENS` | 3000 — output cap for one explanation. |
+| `_EXPLAIN_SYSTEM` | Explanation prompt: fixed sections (*The idea*, *Why it works*, *Walkthrough* on a small input, *Solving it in an interview*, *Variations*, *Mistakes to avoid*), must stay consistent with the reference solution, must **not** write out a full solution (the reference is shown separately, behind a reveal). |
+| `_ITEM_HEADING_RE`, `_FENCE_RE` | `## N. Title` item headings; fenced code blocks. |
+
+### Functions
+
+- `study_kind(key) -> StudyKind` — resolve a kind; `KeyError` on unknown.
+- `parse_reference(path) -> list[dict]` — every numbered item, in doc order:
+  `{"number", "title", "body", "hash"}`. HTML comments are stripped; a trailing
+  `---` rule is dropped. `hash` is a 16-char sha256 of title + body. Missing
+  file → `[]`, which `/today` renders as a "no items" notice.
+- `reference_items(kind)` / `find_item(kind, number)` — the parsed bank / one item.
+- `split_algorithm_item(body) -> dict` — `prompt` (text before the first `###`
+  heading: problem + cues), `solutions` (`{fence_tag: code}`), `notes` (text
+  after the last fence: complexity + gotchas), `stubs` (`{language: starter}`
+  from `_stub`).
+- `_stub(language, code)` — the reference's first `def` / `static … {`
+  signature with an empty body, so the operator starts from the answer's name
+  and parameters.
+- `load_store(kind)` / `save_store(kind, rows)` — the progress JSON array.
+- `_record(rows, number, title)` — get-or-create a record in a loaded list.
+- `get_record(kind, number)` — the stored record, or an unsaved empty one.
+- `_last_touch(rec)` — latest completion or `skipped_at`; `""` when untouched.
+- `current_item(kind)` — today's item (see *Selection*).
+- `completed_today(kind, rows=None)` — completions stamped today; drives the goal.
+- `last_completed_today(kind)` — the record behind the section's Undo.
+- `mark_complete(kind, number)` — append a completion timestamp.
+- `revert_complete(kind, number) -> bool` — remove today's latest completion of
+  one item. Only ever touches today's, so it's an undo, not history rewriting.
+- `skip_item(kind, number)` — stamp `skipped_at`, sending the item to the back.
+- `save_attempt(number, language, code) -> bool` — store the operator's
+  algorithm code for one language (latest wins). Languages are
+  `config.DRILL_LANGUAGES` keys.
+- `_call_claude(system, user, max_tokens)` — one Sonnet message; imports
+  `anthropic` lazily so the module loads without it.
+- `explanation_is_stale(rec, item) -> bool` — the cached explanation's
+  `source_hash` differs from the bank's current entry. `/today` then shows a
+  *Regenerate* button instead of quietly explaining the old text.
+- `explain(number) -> dict` — generate and cache one explanation.
+
+### CLI
+
+```bash
+python scripts/study_drills.py list                  # both banks + today's picks
+python scripts/study_drills.py explain --number 7    # one pattern
+python scripts/study_drills.py explain --all         # every missing or stale one
+```
+
+`serve.py` shells out to `explain --number N` (180s timeout) from the
+section's *Generate in-depth explanation* button. Everything else is called
+in-process.
 
 ---
 

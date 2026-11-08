@@ -59,6 +59,8 @@ from config import (  # noqa: E402
     GHOSTED_REJECTED_DAYS,
     DAILY_APPLICATION_GOAL,
     DAILY_DRILL_GOAL,
+    DAILY_ALGORITHM_GOAL,
+    DAILY_INTERVIEW_GOAL,
     DRILL_PART_TARGET_MINUTES,
     INBOX_SCAN_WINDOW_DAYS,
     MANUAL_CODE_DRILLS_DIR,
@@ -105,6 +107,7 @@ from config import (  # noqa: E402
     drill_test_path,
 )
 from scan_stale_jobs import archive_stale_jobs  # noqa: E402
+import study_drills  # noqa: E402
 from backup_data import backup_once  # noqa: E402
 
 APPLICATION_TRACKER_PATH = DATA_DIR / "application_tracker.json"
@@ -149,6 +152,13 @@ CHECKLIST_SECTIONS = [
     ("cover_letters",   "Cover letters & apply",
      "Generate cover letters for top-scoring jobs and log applications "
      "as you submit them."),
+    ("algorithm_drills", "Algorithm drill",
+     "One assessment-style algorithm pattern a day from "
+     "profile/algorithm_reference.md: how it works, how to solve it, then "
+     "write your own solution in Java or Python."),
+    ("interview_drills", "Interview drill",
+     "One common interview question a day from profile/behavioral_reference.md: "
+     "review the question and its model answer."),
     ("code_drills",     "Code drills",
      "Interview-prep coding drills. Rebuild fluency writing clean, idiomatic "
      "code by hand under time pressure, then write a test for it."),
@@ -337,6 +347,9 @@ def section_done(sid: str, state: dict, apps_today: int) -> bool:
         return apps_today >= DAILY_APPLICATION_GOAL
     if sid == "code_drills":
         return drills_completed_today() >= DAILY_DRILL_GOAL
+    if sid in STUDY_SECTION_KINDS:
+        k = study_drills.study_kind(STUDY_SECTION_KINDS[sid])
+        return study_drills.completed_today(k.key) >= k.goal
     return False
 
 
@@ -3434,6 +3447,322 @@ def render_drills_body(view: str = "default") -> str:
     return "".join(parts)
 
 
+# ── Study drills: Algorithm + Interview sections ─────────────────────────────
+#
+# Two daily sections that sit right before Code drills. Their question banks are
+# profile/algorithm_reference.md and profile/behavioral_reference.md; parsing,
+# the daily pick, completions and the cached Claude explanation all live in
+# scripts/study_drills.py. This block only renders and routes.
+
+# /today section id -> study_drills kind key.
+STUDY_SECTION_KINDS = {"algorithm_drills": "algorithm",
+                       "interview_drills": "interview"}
+
+_study_flash: dict[str, dict] = {}
+
+
+def set_study_flash(kind: str, level: str, text: str) -> None:
+    """One-shot flash for one study section. level: 'ok' | 'warn' | 'info'."""
+    _study_flash[kind] = {"kind": level, "text": text}
+
+
+def pop_study_flash(kind: str) -> dict | None:
+    return _study_flash.pop(kind, None)
+
+
+def esc_html(text) -> str:
+    from html import escape
+    return escape(str(text))
+
+
+_MD_MARKER_RE = re.compile(r"\[(CONFIRM|FROM JD):[^\]]*\]")
+
+
+def _study_inline(text: str) -> str:
+    """Escape, then apply the few inline marks the reference docs use: `code`,
+    **bold**, and the behavioral doc's fill-in markers ([CONFIRM: ...],
+    [FROM JD: ...], STATUS: NEEDS STORY), which are highlighted so an
+    unfinished answer can't be mistaken for a finished one."""
+    from html import escape as esc
+    out = esc(text, quote=False)
+    out = re.sub(r"`([^`]+)`", r"<code>\1</code>", out)
+    out = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", out)
+    out = _MD_MARKER_RE.sub(
+        lambda m: f'<mark style="background:#fff3bf">{m.group(0)}</mark>', out)
+    out = out.replace("STATUS: NEEDS STORY",
+                      '<mark style="background:#ffd8a8">STATUS: NEEDS STORY</mark>')
+    return out
+
+
+def study_md_html(md: str) -> str:
+    """Minimal markdown -> HTML for the reference docs and cached explanations:
+    headings, paragraphs (hard-wrapped lines joined), bullet / numbered lists,
+    fenced code. Lines opening with ``**`` start a new paragraph, because the
+    behavioral doc puts each **Label:** on its own line with no blank between."""
+    from html import escape as esc
+    html: list[str] = []
+    para: list[str] = []
+    items: list[str] = []
+    list_tag = ""
+
+    def flush_para():
+        if para:
+            html.append(f'<p style="margin:6px 0">{_study_inline(" ".join(para))}</p>')
+            para.clear()
+
+    def flush_list():
+        nonlocal list_tag
+        if items:
+            lis = "".join(f"<li>{_study_inline(i)}</li>" for i in items)
+            html.append(f'<{list_tag} style="margin:6px 0 6px 20px;padding:0">'
+                        f'{lis}</{list_tag}>')
+            items.clear()
+        list_tag = ""
+
+    lines = md.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        s = line.strip()
+        if s.startswith("```"):
+            flush_para()
+            flush_list()
+            j = i + 1
+            while j < len(lines) and not lines[j].strip().startswith("```"):
+                j += 1
+            code = "\n".join(lines[i + 1:j])
+            html.append('<pre style="background:#f6f8fa;border:1px solid #e1e4e8;'
+                        'border-radius:6px;padding:8px;overflow-x:auto;'
+                        f'font-size:12px">{esc(code)}</pre>')
+            i = j + 1
+            continue
+        heading = re.match(r"^(#{2,4})\s+(.*)$", s)
+        bullet  = re.match(r"^[-*]\s+(.*)$", s)
+        number  = re.match(r"^\d+\.\s+(.*)$", s)
+        if not s or s == "---":
+            flush_para()
+            flush_list()
+        elif heading:
+            flush_para()
+            flush_list()
+            html.append(f'<h4 style="margin:12px 0 4px">'
+                        f'{_study_inline(heading.group(2))}</h4>')
+        elif bullet or number:
+            flush_para()
+            tag = "ul" if bullet else "ol"
+            if list_tag and list_tag != tag:
+                flush_list()
+            list_tag = tag
+            items.append((bullet or number).group(1))
+        elif items and line[:1] in (" ", "\t"):
+            items[-1] += " " + s          # wrapped list item
+        elif s.startswith("|"):
+            flush_para()
+            flush_list()
+            html.append(f'<pre style="font-size:12px">{esc(s)}</pre>')
+        else:
+            flush_list()
+            if s.startswith("**"):
+                flush_para()
+            para.append(s)
+        i += 1
+    flush_para()
+    flush_list()
+    return "".join(html)
+
+
+def _study_meter(kind: str) -> str:
+    k    = study_drills.study_kind(kind)
+    done = study_drills.completed_today(kind)
+    met  = done >= k.goal
+    tail = (" · ✓ goal met — another one is below if you want to keep going"
+            if met else "")
+    return (f'<div class="notice {"notice-ok" if met else "notice-info"}" '
+            f'style="margin-bottom:12px">{esc_html(k.label)}s completed today: '
+            f'<strong>{done}</strong> / {k.goal}{tail}</div>')
+
+
+def _study_action_form(kind: str, action: str, number: int, label: str,
+                       secondary: bool = True, confirm: str = "") -> str:
+    onsubmit = (f' onsubmit="return confirm(\'{esc_html(confirm)}\');"'
+                if confirm else "")
+    cls = "btn btn-secondary" if secondary else "btn"
+    return (f'<form method="POST" action="/today/study/{kind}/{action}" '
+            f'style="display:inline"{onsubmit}>'
+            f'<input type="hidden" name="number" value="{number}">'
+            f'<button class="{cls}" style="margin-top:0">{esc_html(label)}</button>'
+            f'</form>')
+
+
+def _study_undo_html(kind: str) -> str:
+    """Undo for today's most recent completion — a mis-click is cheap to make."""
+    rec = study_drills.last_completed_today(kind)
+    if not rec:
+        return ""
+    n = int(rec.get("number", 0))
+    return (f'<div style="font-size:12px;color:#888;margin-top:12px">'
+            f'Last completed today: #{n} {esc_html(rec.get("title", ""))} '
+            + _study_action_form(kind, "revert", n, f"Undo completion of #{n}",
+                                 confirm=f"Undo today's completion of #{n}?")
+            + '</div>')
+
+
+def _missing_bank_html(kind: str) -> str:
+    k = study_drills.study_kind(kind)
+    return (f'<p class="section-placeholder">No items found in '
+            f'<code>profile/{esc_html(k.reference.name)}</code>. Each item needs a '
+            f'<code>## N. Title</code> heading.</p>')
+
+
+_ALGO_EDITOR_JS = (
+    '<script>(function(){'
+    'var sel=document.getElementById("algo-lang");if(!sel||sel._bound)return;'
+    'sel._bound=true;sel.addEventListener("change",function(){'
+    'document.querySelectorAll(".algo-lang").forEach(function(d){'
+    'd.hidden=d.getAttribute("data-lang")!==sel.value;});});'
+    'document.querySelectorAll(".algo-code").forEach(function(t){'
+    't.addEventListener("keydown",function(e){if(e.key!=="Tab")return;'
+    'e.preventDefault();var s=t.selectionStart,en=t.selectionEnd;'
+    't.value=t.value.slice(0,s)+"    "+t.value.slice(en);'
+    't.selectionStart=t.selectionEnd=s+4;});});})();</script>')
+
+
+def render_algorithm_body() -> str:
+    """Algorithm drill: today's pattern as a question, an in-depth explanation
+    (generated once per pattern, cached), an editor for the operator's own
+    Java or Python solution, and the reference solutions + gotchas behind a
+    reveal so they can attempt it first."""
+    kind = "algorithm"
+    out  = [_flash_notice_html(pop_study_flash(kind)), _study_meter(kind)]
+    item = study_drills.current_item(kind)
+    if not item:
+        return "".join(out) + _missing_bank_html(kind)
+
+    n     = item["number"]
+    total = len(study_drills.reference_items(kind))
+    split = study_drills.split_algorithm_item(item["body"])
+    rec   = study_drills.get_record(kind, n)
+    times = len(rec.get("completions") or [])
+    before = f" · completed {times}x before" if times else ""
+
+    out.append(
+        f'<div style="color:#888;font-size:12px;text-transform:uppercase;'
+        f'letter-spacing:.04em">Pattern {n} of {total}{before}</div>'
+        f'<h3 style="margin:2px 0 6px">{esc_html(item["title"])}</h3>'
+        f'<div style="font-size:14px">{study_md_html(split["prompt"])}</div>')
+
+    # In-depth explanation: cached per pattern; a button generates it once.
+    exp = rec.get("explanation") or {}
+    if exp:
+        stale_html = ""
+        if study_drills.explanation_is_stale(rec, item):
+            stale_html = (
+                '<div class="notice notice-warn" style="margin:6px 0">This entry '
+                'changed in the reference since the explanation was written. '
+                + _study_action_form(kind, "explain", n, "Regenerate explanation")
+                + '</div>')
+        out.append(
+            f'<details style="margin-top:12px"><summary style="cursor:pointer;'
+            f'font-size:14px"><strong>How it works &amp; how to solve it</strong> '
+            f'<span style="color:#888;font-size:12px">— in-depth explanation · '
+            f'{esc_html((exp.get("at") or "")[:10])}</span></summary>'
+            f'{stale_html}<div style="font-size:14px;margin-top:6px">'
+            f'{study_md_html(exp.get("text", ""))}</div></details>')
+    else:
+        out.append(
+            '<div style="margin-top:12px">'
+            + _study_action_form(kind, "explain", n,
+                                 "Generate in-depth explanation", secondary=False)
+            + '<span style="font-size:12px;color:#888;margin-left:8px">One Sonnet '
+              'call (~30s), cached for this pattern from then on.</span></div>')
+
+    # Coding section: one textarea per language, switched by the select, so a
+    # half-written Java answer survives a look at the Python one.
+    attempts = rec.get("attempts") or {}
+    last = max(attempts, key=lambda l: attempts[l].get("saved_at", ""),
+               default=DEFAULT_DRILL_LANGUAGE)
+    opts = "".join(
+        f'<option value="{l}"{" selected" if l == last else ""}>'
+        f'{esc_html(DRILL_LANGUAGES[l].label)}</option>' for l in DRILL_LANGUAGES)
+    areas = []
+    for l in DRILL_LANGUAGES:
+        att   = attempts.get(l) or {}
+        code  = att.get("code") or split["stubs"].get(l, "")
+        saved = att.get("saved_at")
+        when  = ("Saved " + esc_html(saved[:16].replace("T", " ")) + " UTC"
+                 if saved else "Not saved yet")
+        areas.append(
+            f'<div class="algo-lang" data-lang="{l}"'
+            f'{"" if l == last else " hidden"}>'
+            f'<textarea name="code_{l}" rows="18" spellcheck="false" wrap="off" '
+            f'class="algo-code" style="width:100%;box-sizing:border-box;'
+            f'font-family:ui-monospace,Consolas,monospace;font-size:13px;'
+            f'border:1px solid #e1e4e8;border-radius:6px;padding:10px;'
+            f'tab-size:4">{esc_html(code)}</textarea>'
+            f'<div style="font-size:11px;color:#888">{when}</div></div>')
+    out.append(
+        '<h4 style="margin:16px 0 6px">Your solution</h4>'
+        f'<form method="POST" action="/today/study/{kind}/save">'
+        f'<input type="hidden" name="number" value="{n}">'
+        f'<label style="font-size:13px">Language '
+        f'<select name="language" id="algo-lang">{opts}</select></label>'
+        f'<div style="margin-top:6px">{"".join(areas)}</div>'
+        '<div class="app-buttons" style="margin-top:8px">'
+        '<button class="btn" name="action" value="complete" style="margin-top:0">'
+        'Save &amp; mark complete</button>'
+        '<button class="btn btn-secondary" name="action" value="save" '
+        'style="margin-top:0">Save code</button></div></form>'
+        + _ALGO_EDITOR_JS)
+
+    # Reference answer, behind a reveal.
+    sols = "".join(
+        f'<div style="font-size:13px;margin-top:8px"><strong>'
+        f'{esc_html(DRILL_LANGUAGES[l].label if l in DRILL_LANGUAGES else l)}'
+        f'</strong></div>' + study_md_html(f"```{l}\n{code}\n```")
+        for l, code in split["solutions"].items())
+    out.append(
+        '<details style="margin-top:14px"><summary style="cursor:pointer;'
+        'font-size:14px"><strong>Reference solution, complexity &amp; gotchas'
+        '</strong> <span style="color:#888;font-size:12px">— try it yourself '
+        'first</span></summary>'
+        f'{sols}<div style="font-size:14px">{study_md_html(split["notes"])}</div>'
+        '</details>')
+
+    out.append('<div class="app-buttons" style="margin-top:12px">'
+               + _study_action_form(kind, "skip", n, "Skip to the next pattern")
+               + '</div>')
+    out.append(_study_undo_html(kind))
+    return "".join(out)
+
+
+def render_interview_body() -> str:
+    """Interview drill: today's question with its model answer, read straight
+    from the behavioral reference, and a single "reviewed" action."""
+    kind = "interview"
+    out  = [_flash_notice_html(pop_study_flash(kind)), _study_meter(kind)]
+    item = study_drills.current_item(kind)
+    if not item:
+        return "".join(out) + _missing_bank_html(kind)
+    n      = item["number"]
+    total  = len(study_drills.reference_items(kind))
+    times  = len(study_drills.get_record(kind, n).get("completions") or [])
+    before = f" · reviewed {times}x before" if times else ""
+    out.append(
+        f'<div style="color:#888;font-size:12px;text-transform:uppercase;'
+        f'letter-spacing:.04em">Question {n} of {total}{before}</div>'
+        f'<h3 style="margin:2px 0 6px">{esc_html(item["title"])}</h3>'
+        f'<div style="font-size:14px">{study_md_html(item["body"])}</div>'
+        '<p style="font-size:12px;color:#888;margin-top:10px">Highlighted '
+        'markers are details only you can fill in. Say the answer out loud once '
+        'before marking it reviewed.</p>'
+        '<div class="app-buttons" style="margin-top:8px">'
+        + _study_action_form(kind, "complete", n, "Mark reviewed", secondary=False)
+        + _study_action_form(kind, "skip", n, "Skip to the next question")
+        + '</div>')
+    out.append(_study_undo_html(kind))
+    return "".join(out)
+
+
 def render_section_body(sid: str, view: str = "default", cl_page: int = 1) -> str:
     # A single ``view`` query param is shared across sections; only the open
     # section interprets it (status_updates: active|ghosted; linkedin:
@@ -3449,6 +3778,10 @@ def render_section_body(sid: str, view: str = "default", cl_page: int = 1) -> st
         return render_cover_letters_body(cl_page)
     if sid == "code_drills":
         return render_drills_body(view)
+    if sid == "algorithm_drills":
+        return render_algorithm_body()
+    if sid == "interview_drills":
+        return render_interview_body()
     return '<p class="section-placeholder">Section content arrives in a later phase.</p>'
 
 
@@ -5235,6 +5568,10 @@ def daily_checklist_page(open_section: str | None = None, view: str = "default",
             if sid == "code_drills":
                 auto_msg = (f"✓ Auto-completed — {drills_completed_today()} of "
                             f"{DAILY_DRILL_GOAL} drill part(s) completed today.")
+            elif sid in STUDY_SECTION_KINDS:
+                k = study_drills.study_kind(STUDY_SECTION_KINDS[sid])
+                auto_msg = (f"✓ Auto-completed — {study_drills.completed_today(k.key)}"
+                            f" of {k.goal} {k.label.lower()}(s) completed today.")
             else:
                 auto_msg = (f"✓ Auto-completed — {apps_today} of "
                             f"{DAILY_APPLICATION_GOAL} applications logged today.")
@@ -5823,6 +6160,87 @@ class Handler(BaseHTTPRequestHandler):
                 save_daily_state(today_iso, state)
 
             self.redirect_today(section if section in valid else None)
+            return
+
+        if path.startswith("/today/study/"):
+            # /today/study/<kind>/<action> — kind: algorithm | interview;
+            # action: save | complete | skip | revert | explain.
+            length = int(self.headers.get("Content-Length", 0))
+            params = parse_qs(self.rfile.read(length).decode("utf-8"),
+                              keep_blank_values=True)
+            _, _, _, kind, action = (path.split("/") + [""] * 5)[:5]
+            sid = next((s for s, k in STUDY_SECTION_KINDS.items() if k == kind),
+                       None)
+            num_raw = params.get("number", [""])[0].strip()
+            if sid is None or not num_raw.isdigit():
+                self.redirect_today()
+                return
+            number = int(num_raw)
+            item   = study_drills.find_item(kind, number)
+            title  = item["title"] if item else f"#{number}"
+
+            if action == "save" and kind == "algorithm":
+                # Store every language whose textarea changed. An untouched
+                # starter stub isn't an attempt, so it's never saved.
+                rec   = study_drills.get_record(kind, number)
+                stubs = (study_drills.split_algorithm_item(item["body"])["stubs"]
+                         if item else {})
+                saved = []
+                for lang in DRILL_LANGUAGES:
+                    code = params.get(f"code_{lang}", [None])[0]
+                    if code is None:
+                        continue
+                    code = code.replace("\r\n", "\n")
+                    prev = ((rec.get("attempts") or {}).get(lang) or {}).get("code")
+                    if code == (prev if prev is not None else stubs.get(lang, "")):
+                        continue
+                    if study_drills.save_attempt(number, lang, code):
+                        saved.append(DRILL_LANGUAGES[lang].label)
+                if params.get("action", [""])[0] == "complete":
+                    study_drills.mark_complete(kind, number)
+                    set_study_flash(kind, "ok",
+                                    f"Completed #{number} {title}"
+                                    + (f" — saved your {' and '.join(saved)} code"
+                                       if saved else "")
+                                    + ". Next pattern is showing.")
+                else:
+                    set_study_flash(kind, "ok" if saved else "info",
+                                    f"Saved your {' and '.join(saved)} code."
+                                    if saved else "No changes to save.")
+            elif action == "complete":
+                if study_drills.mark_complete(kind, number):
+                    set_study_flash(kind, "ok", f"Reviewed #{number} {title}. "
+                                                f"Next question is showing.")
+                else:
+                    set_study_flash(kind, "warn", f"Unknown item #{number}.")
+            elif action == "skip":
+                if study_drills.skip_item(kind, number):
+                    set_study_flash(kind, "info", f"Skipped #{number} {title} — "
+                                                  f"it moved to the back of the rotation.")
+            elif action == "revert":
+                if study_drills.revert_complete(kind, number):
+                    set_study_flash(kind, "ok", f"Undid today's completion of "
+                                                f"#{number} {title}.")
+                else:
+                    set_study_flash(kind, "warn", f"Nothing to undo for #{number}.")
+            elif action == "explain" and kind == "algorithm":
+                cmd = [sys.executable, "-u", str(SCRIPTS / "study_drills.py"),
+                       "explain", "--number", str(number)]
+                try:
+                    r = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE,
+                                       stderr=subprocess.STDOUT, encoding="utf-8",
+                                       errors="replace", timeout=180)
+                    ok, outp = r.returncode == 0, r.stdout or ""
+                except Exception as e:  # noqa: BLE001
+                    ok, outp = False, str(e)
+                if ok:
+                    set_study_flash(kind, "ok", f"Explanation ready for #{number} "
+                                                f"{title} — open “How it works”.")
+                else:
+                    tail = "; ".join([l for l in outp.splitlines() if l.strip()][-2:])
+                    set_study_flash(kind, "warn",
+                                    f"Explanation failed — {tail or 'see server log'}")
+            self.redirect_today(sid)
             return
 
         if path == "/today/drill/generate":

@@ -59,6 +59,7 @@ JSONL logs have no foreign keys to the rest — they're parallel.
 | `inbox_matches.json` | JSON array | Staged rejection / interview / offer email matches awaiting one-click review | `inbox_scan.py`, `serve.py` (apply/dismiss) | `serve.py` `/today` |
 | `inbox_scan_state.json` | JSON object | Cross-run `processed_message_ids` (every message examined, matched or not) for the inbox scanner's own dedup | `inbox_scan.py` | `inbox_scan.py` |
 | `discarded_urls.json` | JSON object | Ledger of apply URLs the pipeline already judged and discarded, so the crawl stops re-fetching and re-scoring them | `scripts/ingest.py` (on every discard), `scripts/discard_ledger.py` | `scripts/crawl.py` |
+| `algorithm_drills.json`, `interview_drills.json` | JSON array | Progress for the `/today` Algorithm / Interview drill sections: completions, skips, saved algorithm code, cached algorithm explanations. The questions live in `profile/`. | `scripts/study_drills.py` (via `serve.py`) | `serve.py` `/today` |
 | `drills.json` | JSON array | Claude-generated code drills, each a 3–6 **part** series (per-part prompt, partial interface, status, review feedback) for the `/today` Code-drills section | `scripts/drills.py`, `serve.py` (complete) | `serve.py` `/today` |
 | `backups/<date>/` | dir of JSON | Daily local snapshots of the `data/*.json` files (recovery from a stray delete / corrupt write) | `scripts/backup_data.py` (via `serve.py` `/today`) | manual recovery |
 | `crawl_log.jsonl` | JSONL | Per-run crawl summaries (funnel breakdown) | `crawl.py` | manual inspection |
@@ -680,6 +681,9 @@ object with **any subset** of these boolean keys (absent ≡ `false`):
 | `crawl` | Crawl job boards |
 | `linkedin_ingest` | LinkedIn alert ingest |
 | `cover_letters` | Cover letters & apply |
+| `algorithm_drills` | Algorithm drill |
+| `interview_drills` | Interview drill |
+| `code_drills` | Code drills |
 
 Section IDs come from `serve.py:CHECKLIST_SECTIONS`.
 
@@ -689,7 +693,10 @@ Section IDs come from `serve.py:CHECKLIST_SECTIONS`.
 > is `true` **or** `applications_today_count()` (derived from
 > `application_tracker.date_applied == today()`) meets the goal. So a green
 > `cover_letters` checkmark may appear on a date with no `cover_letters` key
-> here. The manual toggle still works to force it done early.
+> here. The manual toggle still works to force it done early. The same
+> applies to `code_drills` (`DAILY_DRILL_GOAL`), `algorithm_drills` and
+> `interview_drills` (`DAILY_ALGORITHM_GOAL` / `DAILY_INTERVIEW_GOAL`, counted
+> from today's `completions` in their progress files).
 
 ### Example
 
@@ -994,6 +1001,52 @@ A JSON object keyed by apply URL:
     "title": "Staff Software Engineer"
   }
 }
+```
+
+---
+
+## `data/algorithm_drills.json` and `data/interview_drills.json`
+
+**Role.** Progress for the `/today` **Algorithm drill** and **Interview drill**
+sections (`scripts/study_drills.py`). The questions themselves are **not**
+stored here — they live in `profile/algorithm_reference.md` and
+`profile/behavioral_reference.md` and are parsed on every render. These files
+hold only what the operator did with each item, plus the cached algorithm
+explanations.
+
+**Lifecycle.** A record is created the first time an item is completed,
+skipped, saved or explained, keyed by the item's `## N.` number. Written by
+`study_drills.mark_complete` / `revert_complete` / `skip_item` / `save_attempt`
+/ `explain` (via `serve.py` `POST /today/study/<kind>/<action>` and the CLI).
+Read by `serve.py` `/today` for today's pick, the completed-today meter and the
+section checkmark. Covered by the daily `backup_data.py` snapshot.
+
+### Schema (one record per item)
+
+| Field | Type | Files | Meaning |
+|---|---|---|---|
+| `number` | int | both | The item's `## N.` number in its bank — the identity. Renumbering the bank reattaches history to different items. |
+| `title` | string | both | The heading text at last write (display only). |
+| `completions` | array of ISO-8601 UTC strings | both | One timestamp per completion. Today's count drives the daily goal; Undo removes today's latest. |
+| `skipped_at` | ISO-8601 UTC string \| absent | both | Last skip. Counts as a "touch" for rotation order, not as a completion. |
+| `attempts` | object \| absent | algorithm | `{language: {"code", "saved_at"}}`, language ∈ `config.DRILL_LANGUAGES` (`java`, `python`). Latest save wins. |
+| `explanation` | object \| absent | algorithm | `{"text", "at", "model", "source_hash"}`: the cached in-depth explanation (markdown), when and with which model it was generated, and the hash of the reference entry it was written from. A hash mismatch means the entry changed and the UI offers *Regenerate*. |
+
+### Example (`algorithm_drills.json`)
+
+```json
+[
+  {
+    "number": 1,
+    "title": "Prefix sums: Range sum queries",
+    "completions": ["2026-11-08T19:02:11.481203+00:00"],
+    "attempts": {
+      "python": {"code": "def range_sums(nums, queries):\n    ...", "saved_at": "2026-11-08T19:02:11.470114+00:00"}
+    },
+    "explanation": {"text": "## The idea\n...", "at": "2026-11-08T18:51:40.112305+00:00",
+                    "model": "claude-sonnet-4-6", "source_hash": "3f9c0a1e2b7d4c55"}
+  }
+]
 ```
 
 ---

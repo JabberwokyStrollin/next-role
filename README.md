@@ -109,7 +109,16 @@ SETUP.md.
    **Answer Questions** button on each row opens `/answer-questions?job_id=…`
    for ad-hoc application prompts ("Why this company?", "Tell us about a time
    you…") — paste the question, hit Generate, copy the result.
-5. **Code drills** — interview-prep coding practice (see *Code drills* below).
+5. **Algorithm drill** — one assessment-style algorithm pattern a day from
+   `profile/algorithm_reference.md`, shown as a question. *Generate in-depth
+   explanation* has Claude explain how it works and how to solve it (once per
+   pattern, then cached); write your own solution in the Java or Python editor,
+   reveal the reference when done, then **Save & mark complete**. See
+   *Algorithm & interview drills* below.
+6. **Interview drill** — one common interview question a day from
+   `profile/behavioral_reference.md` with its model answer; **Mark reviewed**
+   once you've gone through it.
+7. **Code drills** — interview-prep coding practice (see *Code drills* below).
    **Generate new drill prompt** has Claude produce a fresh, underspecified
    Java drill as a **3–6 part series**, one ~hour part per sitting; you
    implement the current part by hand in the sibling project, then **Check my
@@ -300,6 +309,27 @@ python scripts/inbox_scan.py --window-days 30  # widen the look-back window
 python scripts/inbox_scan.py --recheck       # re-classify the window under current rules
 python scripts/inbox_scan.py --reset         # clear staged matches + dedup state
 ```
+
+### Algorithm & interview drills
+
+Two `/today` sections, right before Code drills, each with a goal of **one a
+day** (`DAILY_ALGORITHM_GOAL`, `DAILY_INTERVIEW_GOAL`). Their question banks
+are your own markdown files in `profile/` — every `## N. Title` heading is one
+item — so add or reword items by editing the file:
+
+| Section | Bank | What you do |
+|---|---|---|
+| Algorithm drill | `profile/algorithm_reference.md` | Read the problem, open the in-depth explanation, write a solution in Java or Python in the browser editor, check the reference solution and gotchas, mark complete. |
+| Interview drill | `profile/behavioral_reference.md` | Read the question and model answer (highlighted `[CONFIRM: …]` markers are details only you can fill in), mark reviewed. |
+
+Today's item is the one you touched longest ago, so the whole bank rotates
+before anything repeats. **Skip** sends an item to the back; **Undo** reverses
+today's latest completion. Finishing one shows the next if you want to keep
+going. The algorithm explanation is one Sonnet call per pattern, cached in
+`data/algorithm_drills.json`. If you edit that pattern in the reference, the
+section offers to regenerate it. Pre-generate them all with
+`python scripts/study_drills.py explain --all` (~20 calls). Your code is saved
+but never run or graded.
 
 ### Code drills (interview prep)
 
@@ -559,6 +589,7 @@ prompt.
 | Generate a code drill (3–6 part series) | Sonnet 4.6 | ~$0.01–0.02 |
 | Review a code-drill attempt (one part) | Sonnet 4.6 | ~$0.02–0.05 |
 | Reference solution for a part (cumulative) | Sonnet 4.6 | ~$0.03–0.06 |
+| Algorithm-drill explanation (once per pattern, cached) | Sonnet 4.6 | ~$0.02–0.04; $0 for interview drills (no API call) |
 
 Bulk re-score under a new rubric:
 `python scripts/rescore_all.py --dry-run` prints a projected bill before
@@ -589,6 +620,7 @@ scripts/
   inbox_scan.py         — IMAP scan for rejection / interview replies to open applications
   discard_ledger.py     — inspect/backfill/reset the crawl's discard ledger
   drills.py             — generate interview-prep code drills (Java/Python) + review attempts (Sonnet)
+  study_drills.py       — daily Algorithm + Interview drills from the profile/ reference banks
   migrate_drill_layout.py — one-off: split the drills project into java/ + python/
   backup_data.py        — daily local snapshots of data/*.json (stray-delete recovery)
   dashboard.py          — terminal pipeline summary
